@@ -14,8 +14,9 @@
 enum BDPlaybackMode
 {
   BD_PLAYBACK_SIMPLE_MENU = 0,
-  BD_PLAYBACK_DISC_MENU,
-  BD_PLAYBACK_MAIN_TITLE,
+  BD_PLAYBACK_DISC_MENU = 1,
+  BD_PLAYBACK_MAIN_TITLE = 2,
+  BD_PLAYBACK_AUTO = 3, // Only use simple menu if playlist not known
 };
 
 #include "settings/lib/ISettingCallback.h"

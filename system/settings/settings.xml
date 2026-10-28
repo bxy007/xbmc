@@ -566,6 +566,7 @@
               <option label="14104">0</option> <!-- show simplified menu -->
               <option label="25003">1</option> <!-- show disc menu -->
               <option label="14103">2</option> <!-- play main movie -->
+              <option label="25018">3</option> <!-- automatic menu selection -->
             </options>
           </constraints>
           <control type="list" format="string" />

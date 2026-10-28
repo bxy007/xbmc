@@ -37,9 +37,7 @@ bool CUDFDirectory::GetDirectory(const CURL& url, CFileItemList& items)
   URIUtils::AddSlashAtEnd(strRoot);
   URIUtils::AddSlashAtEnd(strSub);
 
-  // Share the mounted volume, and the page cache under it, with every other reader of
-  // this image. Closing the directory drops this reference only; the volume itself stays
-  // mounted until the last reader is gone.
+  // Held for as long as this directory is being read
   const auto context{CUDFContext::Get(url2.GetHostName())};
   if (!context)
     return false;
@@ -78,7 +76,6 @@ bool CUDFDirectory::GetDirectory(const CURL& url, CFileItemList& items)
 
       CFileItemPtr pItem(new CFileItem(filename));
       pItem->SetPath(strRoot + filename);
-      pItem->m_bIsFolder = false;
       pItem->m_dwSize = udfread_file_size(file);
       items.Add(pItem);
 
