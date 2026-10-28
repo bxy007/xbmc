@@ -470,38 +470,29 @@ bool CDVDInputStreamBluray::Open()
     root = url.GetHostName();
     filename = URIUtils::GetFileName(url.GetFileName());
 
-    // Check whether disc is AACS protected
+    // Disc images are opened below in files mode. bd_open_disc only supports a local physical
+    // drive, and probing IsProtectedBlurayDisc on a udf:// or remote image can turn into extra
+    // HTTP requests against the ISO itself.
     CURL url2(root);
-    CFileItem item(url2, false);
-    if (url2.IsProtocol("udf"))
-      item.SetPath(url2.GetHostName());
-    openDisc = item.IsProtectedBlurayDisc();
-
-    // check for a menu call for an image file
-    if (StringUtils::EqualsNoCase(filename, "menu"))
+    if (!url2.IsProtocol("udf") && !URIUtils::IsRemote(root))
     {
-      resumable = false;
-
-      if (item.IsDiscImage())
-      {
-        if (!OpenStream(item))
-          return false;
-
-        openStream = true;
-      }
+      CFileItem item(url2, false);
+      openDisc = item.IsProtectedBlurayDisc();
     }
+
+    if (StringUtils::EqualsNoCase(filename, "menu"))
+      resumable = false;
   }
   else if (m_item.IsDiscImage())
   {
+    // Stream mode reads the image through a file opened READ_NO_CACHE, so each block libbluray
+    // asks for is its own request and it does not share the UDF page cache. Open the image as
+    // udf:// and let files mode read it. GetDynPath() is the resolved path, so a .strm that
+    // points at an image reaches the image.
     CURL url2("udf://");
 
-    url2.SetHostName(m_item.GetPath());
+    url2.SetHostName(m_item.GetDynPath());
     root = url2.Get();
-
-    if (!OpenStream(m_item))
-      return false;
-
-    openStream = true;
   }
   else if (m_item.IsProtectedBlurayDisc())
   {
@@ -569,10 +560,19 @@ bool CDVDInputStreamBluray::Open()
   else
   {
     m_rootPath = root;
+#if defined(HAS_UDFREAD)
+    // Files mode reaches the disc through Kodi's filesystem. On an image each of those opens
+    // would otherwise remount the UDF volume and drop the page cache, so hold the mount until
+    // Close(). A path that is not udf:// holds nothing.
+    m_udfMount.emplace(root);
+#endif
     if (!bd_open_files(m_bd, &m_rootPath, CBlurayCallback::dir_open, CBlurayCallback::file_open))
     {
       CLog::Log(LOGERROR, "CDVDInputStreamBluray::Open - failed to open {} in files mode",
                 CURL::GetRedacted(root));
+#if defined(HAS_UDFREAD)
+      m_udfMount.reset();
+#endif
       return false;
     }
   }
@@ -794,6 +794,11 @@ void CDVDInputStreamBluray::Close()
 
   m_pstream.reset();
   m_rootPath.clear();
+#if defined(HAS_UDFREAD)
+  // bd_close runs on BdCloseWorker after this returns. The mount registry keeps the volume for
+  // a short grace period, which covers that close without holding the image for the whole process.
+  m_udfMount.reset();
+#endif
 }
 
 void CDVDInputStreamBluray::ReplaceTitleInfo(BLURAY_TITLE_INFO* incoming)

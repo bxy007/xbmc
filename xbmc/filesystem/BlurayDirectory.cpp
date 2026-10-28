@@ -51,6 +51,9 @@ void CBlurayDirectory::Dispose()
     bd_close(m_bd);
     m_bd = nullptr;
   }
+#if defined(HAS_UDFREAD)
+  m_udfMount.reset();
+#endif
 }
 
 std::string CBlurayDirectory::GetBlurayTitle()
@@ -272,6 +275,12 @@ bool CBlurayDirectory::InitializeBluray(const std::string &root)
   auto fileHandler = CDirectoryFactory::Create(CURL{root});
   if (fileHandler)
     m_realPath = fileHandler->ResolveMountPoint(root);
+
+#if defined(HAS_UDFREAD)
+  // root is the udf:// image when this directory is listing a disc image. Holding the mount
+  // here keeps the page cache across the file opens libbluray makes while reading the disc.
+  m_udfMount.emplace(root);
+#endif
 
   if (!bd_open_files(m_bd, &m_realPath, CBlurayCallback::dir_open, CBlurayCallback::file_open))
   {

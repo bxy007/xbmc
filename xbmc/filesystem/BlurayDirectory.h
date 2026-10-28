@@ -11,6 +11,12 @@
 #include "IDirectory.h"
 #include "URL.h"
 
+#if defined(HAS_UDFREAD)
+#include "filesystem/UDFContext.h"
+
+#include <optional>
+#endif
+
 #include <memory>
 
 class CFileItem;
@@ -52,6 +58,10 @@ private:
   BLURAY*       m_bd = nullptr;
   bool          m_blurayInitialized = false;
   std::string m_realPath;
+#if defined(HAS_UDFREAD)
+  //! Holds the UDF volume while this directory is alive, so playlist opens share one mount.
+  std::optional<CUDFMount> m_udfMount;
+#endif
 };
 
 }

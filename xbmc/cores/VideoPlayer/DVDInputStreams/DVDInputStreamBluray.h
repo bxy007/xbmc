@@ -12,6 +12,12 @@
 #include "DVDInputStream.h"
 #include "cores/AudioEngine/Interfaces/AE.h"
 
+#if defined(HAS_UDFREAD)
+#include "filesystem/UDFContext.h"
+
+#include <optional>
+#endif
+
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -359,6 +365,10 @@ protected:
     bool IsClipCodecCompatible(const BLURAY_CLIP_INFO* a, const BLURAY_CLIP_INFO* b) const;
     std::unique_ptr<CDVDInputStreamFile> m_pstream;
     std::string m_rootPath;
+#if defined(HAS_UDFREAD)
+    //! Keeps the image's UDF volume mounted for the whole time this stream is open.
+    std::optional<XFILE::CUDFMount> m_udfMount;
+#endif
 
     /*! Bluray state serializer handler */
     CBlurayStateSerializer m_blurayStateSerializer;
