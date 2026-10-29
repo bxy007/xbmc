@@ -23,6 +23,7 @@
 #include "HDR10.h"
 #include "HDR10Plus.h"
 #include "HDR10PlusConvert.h"
+#include "HDRVividConvert.h"
 
 #include "utils/StringUtils.h"
 #include "cores/VideoPlayer/Process/ProcessInfo.h"
@@ -709,6 +710,7 @@ CBitstreamConverter::CBitstreamConverter(CDVDStreamInfo& hints)
   m_convert_dovi = DOVIMode::MODE_NONE;
   m_append_cmv40 = DOVICMv40Mode::CMV40_NONE;
   m_convert_Hdr10Plus = false;
+  m_convert_HdrVivid = false;
   m_prefer_Hdr10Plus_conversion = false;
   m_dual_priority_Hdr10Plus = false;
   m_removeDovi = false;
@@ -1100,6 +1102,8 @@ bool CBitstreamConverter::Convert(uint8_t *pData_bl, int iSize_bl, uint8_t *pDat
 
     Hdr10PlusMetadata hdr10plus_meta;
     bool convert_hdr10plus_meta = false;
+    bool convert_vivid_meta = false;
+    HdrVividStats vivid_stats{};
     bool au_has_rpu = false;
 
     // process bl frame data
@@ -1119,7 +1123,7 @@ bool CBitstreamConverter::Convert(uint8_t *pData_bl, int iSize_bl, uint8_t *pDat
       switch (nal_type) {
 
         case HEVC_NAL_SEI_PREFIX:
-          ProcessSeiPrefixWrap(buf, size, &m_convertBuffer, offset, hdr10plus_meta, convert_hdr10plus_meta);
+          ProcessSeiPrefixWrap(buf, size, &m_convertBuffer, offset, hdr10plus_meta, convert_hdr10plus_meta, vivid_stats, convert_vivid_meta);
           break;
 
         default:
@@ -1221,6 +1225,7 @@ bool CBitstreamConverter::Convert(uint8_t *pData_bl, int iSize_bl, uint8_t *pDat
           {
             ProcessDoViRpuWrap(buf, size, &m_convertBuffer, offset, pts);
             au_has_rpu = true;
+            convert_vivid_meta = false;
           }
           break;
 
@@ -1245,6 +1250,14 @@ bool CBitstreamConverter::Convert(uint8_t *pData_bl, int iSize_bl, uint8_t *pDat
     }
     else if (m_lastHdr10PlusMetaValid && !au_has_rpu)
       AddDoViRpuNaluWrap(m_lastHdr10PlusMeta, &m_convertBuffer, offset, pts);
+    else if (convert_vivid_meta)
+    {
+      AddDoViRpuNaluFromVividWrap(vivid_stats, &m_convertBuffer, offset, pts);
+      m_lastVividStats = vivid_stats;
+      m_lastVividStatsValid = true;
+    }
+    else if (m_convert_HdrVivid && m_lastVividStatsValid && !au_has_rpu)
+      AddDoViRpuNaluFromVividWrap(m_lastVividStats, &m_convertBuffer, offset, pts);
 
     m_convertSize = offset;
     m_combine = true;
@@ -1679,16 +1692,18 @@ void CBitstreamConverter::UpdateHdrStaticMetadata() const {
   m_dataCacheCore.SetVideoHDRStaticMetadataInfo(hdrStaticMetadataInfo);
 }
 
-void CBitstreamConverter::ProcessSeiPrefixWrap(uint8_t *buf, int32_t nal_size, uint8_t **poutbuf, uint32_t& poutbuf_size, Hdr10PlusMetadata& meta, bool& convert_hdr10plus_meta) {
+void CBitstreamConverter::ProcessSeiPrefixWrap(uint8_t *buf, int32_t nal_size, uint8_t **poutbuf, uint32_t& poutbuf_size, Hdr10PlusMetadata& meta, bool& convert_hdr10plus_meta, HdrVividStats& vivid, bool& convert_vivid) {
 
   int int_poutbuf_size = poutbuf_size;
-  ProcessSeiPrefix(buf, nal_size, poutbuf, &int_poutbuf_size, meta, convert_hdr10plus_meta);
+  ProcessSeiPrefix(buf, nal_size, poutbuf, &int_poutbuf_size, meta, convert_hdr10plus_meta, vivid, convert_vivid);
   poutbuf_size = static_cast<uint32_t>(int_poutbuf_size);
 }
 
-void CBitstreamConverter::ProcessSeiPrefix(uint8_t *buf, int32_t nal_size, uint8_t **poutbuf, int *poutbuf_size, Hdr10PlusMetadata& meta, bool& convert_hdr10plus_meta) {
+void CBitstreamConverter::ProcessSeiPrefix(uint8_t *buf, int32_t nal_size, uint8_t **poutbuf, int *poutbuf_size, Hdr10PlusMetadata& meta, bool& convert_hdr10plus_meta, HdrVividStats& vivid, bool& convert_vivid) {
 
   bool copy = true;
+  bool haveRewrite = false;
+  std::vector<uint8_t> rewritten;
 
   const auto metadata = CHevcSei::ExtractMetadata(buf, nal_size, m_seiBuf, m_seiMessages);
 
@@ -1709,7 +1724,7 @@ void CBitstreamConverter::ProcessSeiPrefix(uint8_t *buf, int32_t nal_size, uint8
   if (metadata.alternativeTransferCharacteristics)
     ApplyAlternativeTransferCharacteristics(*metadata.alternativeTransferCharacteristics);
 
-  if (metadata.hdrVivid && m_first_frame &&
+  if (metadata.hdrVivid && m_first_frame && !m_convert_HdrVivid &&
       m_hints.hdrType != StreamHdrType::HDR_TYPE_DOLBYVISION &&
       m_hints.hdrType != StreamHdrType::HDR_TYPE_HDR10PLUS &&
       m_hints.hdrType != StreamHdrType::HDR_TYPE_HDR_VIVID)
@@ -1745,16 +1760,32 @@ void CBitstreamConverter::ProcessSeiPrefix(uint8_t *buf, int32_t nal_size, uint8
       convert_hdr10plus_meta = true;
     }
 
-    if (convert || m_removeHdr10Plus) {
-      // Remove and carry forward remaining sei in nalu.
-      auto nalu = CHevcSei::RemoveHdr10PlusFromSeiNalu(buf, nal_size);
-      if (!nalu.empty())
-      {
-        BitstreamAllocAndCopy(poutbuf, poutbuf_size, nullptr, 0, nalu.data(), nalu.size(), HEVC_NAL_SEI_PREFIX);
-        nalu.clear();
-      }
-      copy = false;
+    if (convert || m_removeHdr10Plus)
+    {
+      rewritten = CHevcSei::RemoveHdr10PlusFromSeiNalu(buf, nal_size);
+      haveRewrite = true;
     }
+  }
+
+  if (metadata.hdrVivid && m_convert_HdrVivid && !convert_hdr10plus_meta)
+  {
+    vivid = *metadata.hdrVivid;
+    convert_vivid = true;
+  }
+
+  if (metadata.hdrVivid && (convert_vivid || convert_hdr10plus_meta))
+  {
+    const uint8_t* src = haveRewrite ? rewritten.data() : buf;
+    const size_t len = haveRewrite ? rewritten.size() : static_cast<size_t>(nal_size);
+    rewritten = len ? CHevcSei::RemoveHdrVividFromSeiNalu(src, len) : std::vector<uint8_t>{};
+    haveRewrite = true;
+  }
+
+  if (haveRewrite)
+  {
+    if (!rewritten.empty())
+      BitstreamAllocAndCopy(poutbuf, poutbuf_size, nullptr, 0, rewritten.data(), rewritten.size(), HEVC_NAL_SEI_PREFIX);
+    copy = false;
   }
 
   if (copy) BitstreamAllocAndCopy(poutbuf, poutbuf_size, nullptr, 0, buf, nal_size, HEVC_NAL_SEI_PREFIX);
@@ -1898,6 +1929,8 @@ bool CBitstreamConverter::BitstreamConvert(uint8_t* pData, int iSize, uint8_t **
 
   Hdr10PlusMetadata hdr10plus_meta;
   bool convert_hdr10plus_meta = false;
+  bool convert_vivid_meta = false;
+  HdrVividStats vivid_stats{};
   bool au_has_rpu = false;
 
   std::vector<uint8_t> finalPrefixSeiNalu;
@@ -1986,7 +2019,7 @@ bool CBitstreamConverter::BitstreamConvert(uint8_t* pData, int iSize, uint8_t **
       switch (unit_type) {
 
         case HEVC_NAL_SEI_PREFIX:
-          ProcessSeiPrefix(buf, nal_size, poutbuf, poutbuf_size, hdr10plus_meta, convert_hdr10plus_meta);
+          ProcessSeiPrefix(buf, nal_size, poutbuf, poutbuf_size, hdr10plus_meta, convert_hdr10plus_meta, vivid_stats, convert_vivid_meta);
           break;
 
         case HEVC_NAL_UNSPEC62: // DoVi RPU
@@ -1994,6 +2027,7 @@ bool CBitstreamConverter::BitstreamConvert(uint8_t* pData, int iSize, uint8_t **
           {
             ProcessDoViRpu(buf, nal_size, poutbuf, poutbuf_size, pts);
             au_has_rpu = true;
+            convert_vivid_meta = false;
           }
           break;
 
@@ -2042,6 +2076,14 @@ bool CBitstreamConverter::BitstreamConvert(uint8_t* pData, int iSize, uint8_t **
   }
   else if (m_lastHdr10PlusMetaValid && !au_has_rpu)
     AddDoViRpuNalu(m_lastHdr10PlusMeta, poutbuf, poutbuf_size, pts);
+  else if (convert_vivid_meta)
+  {
+    AddDoViRpuNaluFromVivid(vivid_stats, poutbuf, poutbuf_size, pts);
+    m_lastVividStats = vivid_stats;
+    m_lastVividStatsValid = true;
+  }
+  else if (m_convert_HdrVivid && m_lastVividStatsValid && !au_has_rpu)
+    AddDoViRpuNaluFromVivid(m_lastVividStats, poutbuf, poutbuf_size, pts);
 
   m_first_frame = false;
 

@@ -229,6 +229,7 @@ public:
     UpdateCMv40Auto2ThresholdPq();
   }
   void SetConvertHdr10Plus(bool value) { m_convert_Hdr10Plus = value; }
+  void SetConvertHdrVivid(bool value) { m_convert_HdrVivid = value; }
   void SetPreferCovertHdr10Plus(bool value) { m_prefer_Hdr10Plus_conversion = value; }
   void SetConvertHdr10PlusPeakBrightnessSource(enum PeakBrightnessSource value) { m_convert_Hdr10Plus_peak_brightness_source = value; };
   void SetDualPriorityHdr10Plus(bool value) { m_dual_priority_Hdr10Plus = value; }
@@ -284,9 +285,11 @@ protected:
 
   void AddDoViRpuNaluWrap(const Hdr10PlusMetadata& meta, uint8_t **poutbuf, uint32_t& poutbuf_size, double pts);
   void AddDoViRpuNalu(const Hdr10PlusMetadata& meta, uint8_t **poutbuf, int *poutbuf_size, double pts);
+  void AddDoViRpuNaluFromVividWrap(const HdrVividStats& stats, uint8_t **poutbuf, uint32_t& poutbuf_size, double pts);
+  void AddDoViRpuNaluFromVivid(const HdrVividStats& stats, uint8_t **poutbuf, int *poutbuf_size, double pts);
 
-  void ProcessSeiPrefixWrap(uint8_t *buf, int32_t nal_size, uint8_t **poutbuf, uint32_t& poutbuf_size, Hdr10PlusMetadata& meta, bool& convert_hdr10plus_meta);
-  void ProcessSeiPrefix(uint8_t *buf, int32_t nal_size, uint8_t **poutbuf, int *poutbuf_size, Hdr10PlusMetadata& meta, bool& convert_hdr10plus_meta);
+  void ProcessSeiPrefixWrap(uint8_t *buf, int32_t nal_size, uint8_t **poutbuf, uint32_t& poutbuf_size, Hdr10PlusMetadata& meta, bool& convert_hdr10plus_meta, HdrVividStats& vivid, bool& convert_vivid);
+  void ProcessSeiPrefix(uint8_t *buf, int32_t nal_size, uint8_t **poutbuf, int *poutbuf_size, Hdr10PlusMetadata& meta, bool& convert_hdr10plus_meta, HdrVividStats& vivid, bool& convert_vivid);
   void ScanAnnexbHdrStaticMetadata(const uint8_t* pData, int iSize);
 
   void ProcessDoViRpuWrap(uint8_t* buf, int32_t nal_size, uint8_t** poutbuf, uint32_t& poutbuf_size, double pts);
@@ -340,10 +343,13 @@ protected:
   bool m_removeDovi;
   bool m_removeHdr10Plus;
   bool m_convert_Hdr10Plus;
+  bool m_convert_HdrVivid;
   bool m_prefer_Hdr10Plus_conversion;
   bool m_dual_priority_Hdr10Plus;
   Hdr10PlusMetadata m_lastHdr10PlusMeta{};
   bool m_lastHdr10PlusMetaValid{false};
+  HdrVividStats m_lastVividStats{};
+  bool m_lastVividStatsValid{false};
   enum PeakBrightnessSource m_convert_Hdr10Plus_peak_brightness_source;
   bool m_first_frame;
   std::chrono::steady_clock::time_point m_gateFirstReject{};

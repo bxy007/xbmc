@@ -80,6 +80,32 @@ bool IsHdrVividSeiMessage(
          (itu_t_t35_terminal_provider_oriented_code == 0x0005);
 }
 
+std::optional<HdrVividStats> ExtractHdrVivid(const CHevcSei& message,
+                                             const std::vector<uint8_t>& buf)
+{
+  if (!IsHdrVividSeiMessage(message, buf))
+    return std::nullopt;
+
+  CBitstreamReader br(buf.data() + message.m_payloadOffset, message.m_payloadSize);
+  br.SkipBits(8 + 16 + 16);
+  if (br.AvailableBits() < 8 + 12 * 4)
+    return std::nullopt;
+
+  const auto systemStartCode = br.ReadBits(8);
+  if (systemStartCode < 1 || systemStartCode > 7)
+    return std::nullopt;
+
+  HdrVividStats stats;
+  stats.minimum_maxrgb = static_cast<uint16_t>(br.ReadBits(12));
+  stats.average_maxrgb = static_cast<uint16_t>(br.ReadBits(12));
+  br.SkipBits(12);
+  stats.maximum_maxrgb = static_cast<uint16_t>(br.ReadBits(12));
+  if (stats.minimum_maxrgb > stats.average_maxrgb ||
+      stats.average_maxrgb > stats.maximum_maxrgb)
+    return std::nullopt;
+  return stats;
+}
+
 std::optional<Hdr10PlusMetadata> ExtractHdr10Plus(const CHevcSei& message,
                                                   const std::vector<uint8_t>& buf)
 {
@@ -149,8 +175,8 @@ CHevcSei::Metadata ExtractMetadata(const std::vector<CHevcSei>& messages,
       case SEI_TYPE_USER_DATA_REGISTERED_ITU_T_T35:
         if (!metadata.hdr10Plus)
           metadata.hdr10Plus = ExtractHdr10Plus(sei, buf);
-        if (!metadata.hdrVivid && IsHdrVividSeiMessage(sei, buf))
-          metadata.hdrVivid = true;
+        if (!metadata.hdrVivid)
+          metadata.hdrVivid = ExtractHdrVivid(sei, buf);
         break;
       case SEI_TYPE_MASTERING_DISPLAY_COLOUR_VOLUME:
         if (!metadata.masteringDisplayColourVolume)
@@ -169,7 +195,7 @@ CHevcSei::Metadata ExtractMetadata(const std::vector<CHevcSei>& messages,
         break;
     }
 
-    if (metadata.hdr10Plus && metadata.masteringDisplayColourVolume &&
+    if (metadata.hdr10Plus && metadata.hdrVivid && metadata.masteringDisplayColourVolume &&
         metadata.contentLightLevel && metadata.alternativeTransferCharacteristics)
       break;
   }
@@ -357,6 +383,36 @@ const std::vector<uint8_t> CHevcSei::RemoveHdr10PlusFromSeiNalu(
   else
   {
     // No HDR10+
+    buf.clear();
+  }
+
+  return buf;
+}
+
+const std::vector<uint8_t> CHevcSei::RemoveHdrVividFromSeiNalu(
+  const uint8_t* inData,
+  const size_t inDataLen)
+{
+  std::vector<uint8_t> buf;
+  auto messages = CHevcSei::ParseSeiRbspUnclearedEmulation(inData, inDataLen, buf);
+  const auto vivid = std::find_if(messages.cbegin(), messages.cend(),
+                      [&buf](const CHevcSei& sei) { return IsHdrVividSeiMessage(sei, buf); });
+
+  if (vivid != messages.cend())
+  {
+    if (messages.size() > 1)
+    {
+      buf.erase(std::next(buf.begin(), vivid->m_msgOffset),
+                std::next(buf.begin(), vivid->m_payloadOffset + vivid->m_payloadSize));
+      HevcAddStartCodeEmulationPrevention3Byte(buf);
+    }
+    else
+    {
+      buf.clear();
+    }
+  }
+  else
+  {
     buf.clear();
   }
 

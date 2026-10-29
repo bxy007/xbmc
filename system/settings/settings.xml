@@ -4647,6 +4647,17 @@
           </dependencies>
           <control type="toggle" />
         </setting>
+        <setting id="coreelec.amlogic.dolbyvision.hdrvivid.convert" type="boolean" label="60135" help="60136" parent="coreelec.amlogic.dolbyvision.type">
+          <requirement>HAVE_AMCODEC</requirement>
+          <visible>false</visible>
+          <level>2</level>
+          <default>false</default>
+          <dependencies>
+            <dependency type="visible" setting="coreelec.amlogic.dolbyvision.mode" operator="!is">2</dependency>
+            <dependency type="visible" setting="coreelec.amlogic.dolbyvision.dual.priority" operator="is">0</dependency>
+          </dependencies>
+          <control type="toggle" />
+        </setting>
         <setting id="coreelec.amlogic.dolbyvision.hdr10plus.prefer.convert" type="boolean" label="60121" help="60122" parent="coreelec.amlogic.dolbyvision.hdr10plus.convert">
           <requirement>HAVE_AMCODEC</requirement>
           <visible>false</visible>

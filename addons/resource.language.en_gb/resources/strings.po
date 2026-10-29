@@ -25061,6 +25061,18 @@ msgctxt "#60094"
 msgid "HDR InfoFrame Payload. A 48 character basic hex string to specify colour primaries, white point, luminance and content light level. Leave blank to align values with the DV VSVDB."
 msgstr ""
 
+#. "Dolby Vision HDR Vivid"
+#: system/settings/settings.xml
+msgctxt "#60135"
+msgid "Convert HDR Vivid video to DV profile 8.1 during playback"
+msgstr ""
+
+#. "Dolby Vision HDR Vivid"
+#: system/settings/settings.xml
+msgctxt "#60136"
+msgid "Set to On to convert each HDR Vivid frame's MaxRGB statistics into a DV profile 8.1 RPU during playback. Vivid tone-mapping curves are not rewritten as Dolby trims. An existing Dolby Vision RPU is left unchanged."
+msgstr ""
+
 #. "Dolby Vision HDR10+"
 #: system/settings/settings.xml
 msgctxt "#60101"

@@ -32,6 +32,13 @@ struct ContentLightLevel {
   uint16_t maxFrameAverageLightLevel;
 };
 
+// T/UWA 005.1 window-0 MaxRGB, already quantized to 12-bit PQ (denominator 4095).
+struct HdrVividStats {
+  uint16_t minimum_maxrgb{0};
+  uint16_t average_maxrgb{0};
+  uint16_t maximum_maxrgb{0};
+};
+
 void HevcAddStartCodeEmulationPrevention3Byte(std::vector<uint8_t>& buf);
 void HevcClearStartCodeEmulationPrevention3Byte(const uint8_t* buf,
                                                 const size_t len,
@@ -57,7 +64,7 @@ public:
     std::optional<MasteringDisplayColourVolume> masteringDisplayColourVolume;
     std::optional<ContentLightLevel> contentLightLevel;
     std::optional<uint8_t> alternativeTransferCharacteristics;
-    bool hdrVivid{false};
+    std::optional<HdrVividStats> hdrVivid;
   };
 
   CHevcSei() = default;
@@ -92,6 +99,9 @@ public:
   //      When not empty: the new NALU containing all but the HDR10+ SEI message.
   //      Otherwise: the NALU contained only one HDR10+ SEI and can be discarded.
   static const std::vector<uint8_t> RemoveHdr10PlusFromSeiNalu(
+      const uint8_t* inData, const size_t inDataLen);
+
+  static const std::vector<uint8_t> RemoveHdrVividFromSeiNalu(
       const uint8_t* inData, const size_t inDataLen);
 
  private:
