@@ -741,8 +741,16 @@ void CGUIFontTTF::DrawTextInternal(CGraphicContext& context,
 
 float CGUIFontTTF::GetTextWidthInternal(const vecText& text)
 {
+  // Upstream PR #26022: cache width so WrapText / layout does not reshape every prefix.
+  const std::u32string key(text.begin(), text.end());
+  const auto cached = m_textWidthCache.find(key);
+  if (cached != m_textWidthCache.end())
+    return cached->second;
+
   const std::vector<Glyph> glyphs = GetHarfBuzzShapedGlyphs(text);
-  return GetTextWidthInternal(text, glyphs);
+  const float width = GetTextWidthInternal(text, glyphs);
+  m_textWidthCache.emplace(key, width);
+  return width;
 }
 
 // this routine assumes a single line (i.e. it was called from GUITextLayout)

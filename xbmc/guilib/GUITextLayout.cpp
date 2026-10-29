@@ -658,12 +658,17 @@ void CGUITextLayout::WrapText(const vecText &text, float maxWidth)
         break;
 
       // current line is empty and word is too long: split by character using a safe linear scan.
-      // Do not assume monotonic width because shaping/kerning can make width shrink or grow non-linearly.
+      // CJK (and other scripts without spaces) treat the whole plot as one "word"; scanning every
+      // prefix through wordEnd is O(n^2) HarfBuzz GetTextWidth calls and freezes the UI on long
+      // Chinese plots. Stop once width exceeds maxWidth — further growth is monotonic for CJK and
+      // practically so for Latin; pathological kerning shrinks are ignored for performance.
       size_t bestCount = 0;
       for (auto it = std::next(current); it < wordEnd; ++it)
       {
         if (m_font->GetTextWidth({current, it}) <= maxWidth)
           bestCount = std::distance(current, it);
+        else
+          break;
       }
       if (bestCount == 0)
         bestCount = 1; // ensure progress even if a single glyph is wider than maxWidth
