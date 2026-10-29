@@ -39,13 +39,14 @@ static void set_visible(const std::string& id, bool visible) {
   if (auto setting = settings()->GetSetting(id)) setting->SetVisible(visible);
 }
 
-// Dolby VSVDB Color space data
-static double colour_space_data[4][6] = {
+// Dolby VSVDB Color space data (offset form for 1/256 quantize, same as dolby_vsvdb.py)
+static double colour_space_data[5][6] = {
     // Rx--[5/8]-------  Ry--[1/4]------  Gx--[1]-  Gy--[1/2]-----  Bx--[1/8]-------  By--[1/32]--------
-      {(0.6800 - 0.625), (0.3200 - 0.25), (0.2650), (0.6900 - 0.5), (0.1500 - 0.125), (0.0600 - 0.03125)}, // DCI-P3  - https://en.wikipedia.org/wiki/DCI-P3
-      {(0.7080 - 0.625), (0.2920 - 0.25), (0.1700), (0.7970 - 0.5), (0.1310 - 0.125), (0.0460 - 0.03125)}, // BT.2020 - https://en.wikipedia.org/wiki/Rec._2020
-      {(0.6400 - 0.625), (0.3300 - 0.25), (0.3000), (0.6000 - 0.5), (0.1500 - 0.125), (0.0600 - 0.03125)}, // BT.709  - https://en.wikipedia.org/wiki/Rec._709
-      {(0.6670 - 0.625), (0.3310 - 0.25), (0.3140), (0.6720 - 0.5), (0.1480 - 0.125), (0.0420 - 0.03125)}  // EPSON LS12000
+      {(0.6800 - 0.625), (0.3200 - 0.25), (0.2650), (0.6900 - 0.5), (0.1500 - 0.125), (0.0600 - 0.03125)}, // DCI-P3
+      {(0.7080 - 0.625), (0.2920 - 0.25), (0.1700), (0.7970 - 0.5), (0.1310 - 0.125), (0.0460 - 0.03125)}, // BT.2020
+      {(0.6400 - 0.625), (0.3300 - 0.25), (0.3000), (0.6000 - 0.5), (0.1500 - 0.125), (0.0600 - 0.03125)}, // BT.709
+      {(0.6670 - 0.625), (0.3310 - 0.25), (0.3140), (0.6720 - 0.5), (0.1480 - 0.125), (0.0420 - 0.03125)}, // EPSON LS12000
+      {(0.6400 - 0.625), (0.3300 - 0.25), (0.2100), (0.7100 - 0.5), (0.1500 - 0.125), (0.0600 - 0.03125)}  // Adobe RGB
 };
 
 static const double* colour_space_row(int cs)
@@ -56,8 +57,23 @@ static const double* colour_space_row(int cs)
     case 1: return colour_space_data[1];
     case 2: return colour_space_data[2];
     case 4: return colour_space_data[3];
+    case 5: return colour_space_data[4];
     default: return colour_space_data[1];
   }
+}
+
+// Keep setting value DISPLAY(3) stable for the spinner. Only prepare primaries for payload.
+// Prefer DV VSVDB from dv_cap; if the display has no VSVDB, use base-EDID chromaticity.
+static bool prepare_display_primaries_for_payload(int& cs)
+{
+  if (cs != 3)
+    return true;
+  if (aml_ensure_display_vsvdb_primaries())
+    return true;
+  CLog::Log(LOGWARNING,
+            "VSVDB DISPLAY: no DV VSVDB or usable EDID primaries; encoding BT.2020 for payload only");
+  cs = 1;
+  return false;
 }
 
 static inline int find_closest_lut_index(int value, const int *lut, int lut_size)
@@ -159,72 +175,44 @@ void CalculateVSVDBPayload()
   int max_lum_pq_value = 0;
  
   bool dv_dolby_vsvdb_inject(settings()->GetBool(CSettings::SETTING_COREELEC_AMLOGIC_DV_VSVDB_INJECT));
-  if (dv_dolby_vsvdb_inject)
+  // Inject On + DISPLAY: do not rewrite the setting (keeps spinner contiguous).
+  // Inject Off + display has DV VSVDB: peek EDID into settings (existing Off-On-Off workflow).
+  if (!dv_dolby_vsvdb_inject && aml_display_support_dv())
   {
-    if ((cs == 3) && aml_display_support_dv())
+    aml_get_dv_cap();
+    cs = vsvdb_cs_from_cap();
+    settings()->SetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_VSVDB_CS, cs);
+    switch (xbmc_dv_cap::dv_ver_i)
     {
-      aml_get_dv_cap();
-      cs = vsvdb_cs_from_cap();
-      settings()->SetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_VSVDB_CS, cs);
-    }
-    else if ((cs == 3) && !aml_display_support_dv())
-    {
-      cs = 1;
-      settings()->SetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_VSVDB_CS, cs);
-    }
-  }
-  else if (!dv_dolby_vsvdb_inject)
-  {
-    if (aml_display_support_dv())
-    {
-      aml_get_dv_cap();
-      cs = vsvdb_cs_from_cap();
-      settings()->SetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_VSVDB_CS, cs);
-      switch (xbmc_dv_cap::dv_ver_i)
+      case 0:
       {
-        case 0:
-        {
-          max_lum_idx = find_closest_lut_index(xbmc_dv_cap::dv_max_v2_i, max_direct_to_pq_lut, 128);
-          max_lum_nits_value = max_direct_to_nits_lut[max_lum_idx];
-          settings()->SetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_VSVDB_MAX_LUM, max_lum_nits_value);
-          break;
-        }
-        case 1:
-        {
-          max_lum_idx = xbmc_dv_cap::dv_max_v1_i;
-          max_lum_nits_value = max_direct_to_nits_lut[max_lum_idx];
-          settings()->SetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_VSVDB_MAX_LUM, max_lum_nits_value);
-          break;
-        }
-        case 2:
-        {
-          max_lum_nits_value = max_direct_to_nits_lut_2[xbmc_dv_cap::dv_max_v2_i];
-          settings()->SetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_VSVDB_MAX_LUM, max_lum_nits_value);
-          max_lum_pq_value = max_direct_to_pq_lut_2[xbmc_dv_cap::dv_max_v2_i];
-          max_lum_idx = find_closest_lut_index(max_lum_pq_value, max_direct_to_pq_lut, 128);
-          if ((max_lum_idx > 17) && (max_lum_idx < 127)) max_lum_idx = max_lum_idx + 1;
-          break;
-        }
-        default:
-          break;
+        max_lum_idx = find_closest_lut_index(xbmc_dv_cap::dv_max_v2_i, max_direct_to_pq_lut, 128);
+        max_lum_nits_value = max_direct_to_nits_lut[max_lum_idx];
+        settings()->SetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_VSVDB_MAX_LUM, max_lum_nits_value);
+        break;
       }
-    }
-    else
-    {
-      if (cs == 3)
+      case 1:
       {
-        cs = 1;
-        settings()->SetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_VSVDB_CS, cs);
+        max_lum_idx = xbmc_dv_cap::dv_max_v1_i;
+        max_lum_nits_value = max_direct_to_nits_lut[max_lum_idx];
+        settings()->SetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_VSVDB_MAX_LUM, max_lum_nits_value);
+        break;
       }
+      case 2:
+      {
+        max_lum_nits_value = max_direct_to_nits_lut_2[xbmc_dv_cap::dv_max_v2_i];
+        settings()->SetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_VSVDB_MAX_LUM, max_lum_nits_value);
+        max_lum_pq_value = max_direct_to_pq_lut_2[xbmc_dv_cap::dv_max_v2_i];
+        max_lum_idx = find_closest_lut_index(max_lum_pq_value, max_direct_to_pq_lut, 128);
+        if ((max_lum_idx > 17) && (max_lum_idx < 127)) max_lum_idx = max_lum_idx + 1;
+        break;
+      }
+      default:
+        break;
     }
   }
 
-  if ((cs == 3) && ((xbmc_dv_cap::dv_rx_i == 0) || (xbmc_dv_cap::dv_ry_i == 0) || (xbmc_dv_cap::dv_gx_i == 0) ||
-      (xbmc_dv_cap::dv_gy_i == 0) || (xbmc_dv_cap::dv_bx_i == 0) || (xbmc_dv_cap::dv_by_i == 0)))
-  {
-    cs = 1;
-    settings()->SetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_VSVDB_CS, cs);
-  }
+  prepare_display_primaries_for_payload(cs);
 
   unsigned char byte[7];
   
@@ -286,70 +274,40 @@ void CalculateVSVDBPayload_2(enum DV_TYPE dv_type)
   int cs(settings()->GetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_VSVDB_CS));
 
   bool dv_dolby_vsvdb_inject(settings()->GetBool(CSettings::SETTING_COREELEC_AMLOGIC_DV_VSVDB_INJECT));
-  if (dv_dolby_vsvdb_inject)
+  if (!dv_dolby_vsvdb_inject && aml_display_support_dv())
   {
-    if ((cs == 3) && aml_display_support_dv())
+    aml_get_dv_cap();
+    cs = vsvdb_cs_from_cap();
+    settings()->SetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_VSVDB_CS, cs);
+    switch (xbmc_dv_cap::dv_ver_i)
     {
-      aml_get_dv_cap();
-      cs = vsvdb_cs_from_cap();
-      settings()->SetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_VSVDB_CS, cs);
-    }
-    else if ((cs == 3) && !aml_display_support_dv())
-    {
-      cs = 1;
-      settings()->SetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_VSVDB_CS, cs);
-    }
-  }
-  else if (!dv_dolby_vsvdb_inject)
-  {
-    if (aml_display_support_dv())
-    {
-      aml_get_dv_cap();
-      cs = vsvdb_cs_from_cap();
-      settings()->SetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_VSVDB_CS, cs);
-      switch (xbmc_dv_cap::dv_ver_i)
+      case 0:
       {
-        case 0:
-        {
-          max_lum_idx = find_closest_lut_index(xbmc_dv_cap::dv_max_v2_i, max_direct_to_pq_lut_2, 32);
-          max_lum_nits_value = max_direct_to_nits_lut_2[max_lum_idx];
-          settings()->SetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_VSVDB_MAX_LUM, max_lum_nits_value);
-          break;
-        }
-        case 1:
-        {
-          max_lum_nits_value = max_direct_to_nits_lut[xbmc_dv_cap::dv_max_v1_i];
-          settings()->SetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_VSVDB_MAX_LUM, max_lum_nits_value);
-          max_lum_idx = find_closest_lut_index(max_lum_nits_value, max_direct_to_nits_lut_2_adj, 32);
-          break;
-        }
-       case 2:
-       {
-          max_lum_idx = xbmc_dv_cap::dv_max_v2_i;
-          max_lum_nits_value = max_direct_to_nits_lut_2[max_lum_idx];
-          settings()->SetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_VSVDB_MAX_LUM, max_lum_nits_value);
-          break;
-       }
-       default:
-          break;
+        max_lum_idx = find_closest_lut_index(xbmc_dv_cap::dv_max_v2_i, max_direct_to_pq_lut_2, 32);
+        max_lum_nits_value = max_direct_to_nits_lut_2[max_lum_idx];
+        settings()->SetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_VSVDB_MAX_LUM, max_lum_nits_value);
+        break;
       }
-    }
-    else
-    {
-      if (cs == 3)
+      case 1:
       {
-        cs = 1;
-        settings()->SetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_VSVDB_CS, cs);
+        max_lum_nits_value = max_direct_to_nits_lut[xbmc_dv_cap::dv_max_v1_i];
+        settings()->SetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_VSVDB_MAX_LUM, max_lum_nits_value);
+        max_lum_idx = find_closest_lut_index(max_lum_nits_value, max_direct_to_nits_lut_2_adj, 32);
+        break;
       }
+      case 2:
+      {
+        max_lum_idx = xbmc_dv_cap::dv_max_v2_i;
+        max_lum_nits_value = max_direct_to_nits_lut_2[max_lum_idx];
+        settings()->SetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_VSVDB_MAX_LUM, max_lum_nits_value);
+        break;
+      }
+      default:
+        break;
     }
   }
 
-  if ((cs == 3) && ((xbmc_dv_cap::dv_rx_i == 0) || (xbmc_dv_cap::dv_ry_i == 0) || (xbmc_dv_cap::dv_gx_i == 0) ||
-      (xbmc_dv_cap::dv_gy_i == 0) || (xbmc_dv_cap::dv_bx_i == 0) || (xbmc_dv_cap::dv_by_i == 0)))
-  {
-    cs = 1;
-    settings()->SetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_VSVDB_CS, cs);
-  }
+  prepare_display_primaries_for_payload(cs);
 
   unsigned char byte[7];
   

@@ -27,6 +27,7 @@
 #include <limits>
 #include <cerrno>
 #include <cstdint>
+#include <cctype>
 #include <pthread.h>
 #include <sys/syscall.h>
 
@@ -3339,6 +3340,127 @@ void aml_get_dv_cap()
     xbmc_dv_cap::dv_bx_i = xbmc_dv_cap::dv_bx_i >> 4;
     xbmc_dv_cap::dv_by_i = xbmc_dv_cap::dv_by_i >> 4;
   }
+}
+
+namespace
+{
+bool aml_read_rawedid_bytes(std::vector<uint8_t>& out)
+{
+  static const char* paths[] = {"/sys/devices/virtual/amhdmitx/amhdmitx0/rawedid",
+                                "/sys/class/amhdmitx/amhdmitx0/rawedid"};
+  for (const char* path : paths)
+  {
+    CSysfsPath raw{path};
+    if (!raw.Exists())
+      continue;
+    const auto val = raw.Get<std::string>();
+    if (!val.has_value() || val->empty())
+      continue;
+
+    std::string hex;
+    hex.reserve(val->size());
+    for (unsigned char ch : *val)
+    {
+      if (std::isxdigit(ch))
+        hex.push_back(static_cast<char>(ch));
+    }
+    if (hex.size() < 256) // at least one 128-byte block as hex
+      continue;
+
+    out.clear();
+    out.reserve(hex.size() / 2);
+    for (size_t i = 0; i + 1 < hex.size(); i += 2)
+    {
+      unsigned int byte = 0;
+      if (std::sscanf(hex.c_str() + i, "%02x", &byte) != 1)
+      {
+        out.clear();
+        break;
+      }
+      out.push_back(static_cast<uint8_t>(byte));
+    }
+    if (out.size() >= 128 && out[0] == 0x00 && out[1] == 0xff && out[2] == 0xff &&
+        out[3] == 0xff && out[4] == 0xff && out[5] == 0xff && out[6] == 0xff && out[7] == 0x00)
+      return true;
+    out.clear();
+  }
+  return false;
+}
+
+bool aml_quantize_vsvdb_primary(double value, double offset, int bits, int& code)
+{
+  if (!std::isfinite(value) || value < 0.0 || value > 1.0)
+    return false;
+  // Match dolby_vsvdb.py / Excel DEC2BIN: truncate toward zero after *256.
+  const int q = static_cast<int>((value - offset) * 256.0);
+  if (q < 0 || q >= (1 << bits))
+    return false;
+  code = q;
+  return true;
+}
+} // namespace
+
+bool aml_fill_vsvdb_primaries_from_edid()
+{
+  std::vector<uint8_t> edid;
+  if (!aml_read_rawedid_bytes(edid))
+  {
+    CLog::Log(LOGDEBUG, "aml_fill_vsvdb_primaries_from_edid: rawedid unavailable");
+    return false;
+  }
+
+  // EDID 1.3 colour characteristics at 0x19..0x22 (10-bit, /1024).
+  const double rx =
+      ((edid[0x1B] << 2) | ((edid[0x19] >> 6) & 0x3)) / 1024.0;
+  const double ry =
+      ((edid[0x1C] << 2) | ((edid[0x19] >> 4) & 0x3)) / 1024.0;
+  const double gx =
+      ((edid[0x1D] << 2) | ((edid[0x19] >> 2) & 0x3)) / 1024.0;
+  const double gy = ((edid[0x1E] << 2) | (edid[0x19] & 0x3)) / 1024.0;
+  const double bx =
+      ((edid[0x1F] << 2) | ((edid[0x1A] >> 6) & 0x3)) / 1024.0;
+  const double by =
+      ((edid[0x20] << 2) | ((edid[0x1A] >> 4) & 0x3)) / 1024.0;
+
+  int rx_i = 0, ry_i = 0, gx_i = 0, gy_i = 0, bx_i = 0, by_i = 0;
+  if (!aml_quantize_vsvdb_primary(rx, 0.625, 5, rx_i) ||
+      !aml_quantize_vsvdb_primary(ry, 0.250, 5, ry_i) ||
+      !aml_quantize_vsvdb_primary(gx, 0.000, 7, gx_i) ||
+      !aml_quantize_vsvdb_primary(gy, 0.500, 7, gy_i) ||
+      !aml_quantize_vsvdb_primary(bx, 0.125, 3, bx_i) ||
+      !aml_quantize_vsvdb_primary(by, 0.03125, 3, by_i))
+  {
+    CLog::Log(LOGWARNING,
+              "aml_fill_vsvdb_primaries_from_edid: EDID primaries out of VSVDB range "
+              "R({:.4f},{:.4f}) G({:.4f},{:.4f}) B({:.4f},{:.4f})",
+              rx, ry, gx, gy, bx, by);
+    return false;
+  }
+
+  xbmc_dv_cap::dv_rx_i = rx_i;
+  xbmc_dv_cap::dv_ry_i = ry_i;
+  xbmc_dv_cap::dv_gx_i = gx_i;
+  xbmc_dv_cap::dv_gy_i = gy_i;
+  xbmc_dv_cap::dv_bx_i = bx_i;
+  xbmc_dv_cap::dv_by_i = by_i;
+
+  CLog::Log(LOGDEBUG,
+            "aml_fill_vsvdb_primaries_from_edid: R({:.4f},{:.4f}) G({:.4f},{:.4f}) "
+            "B({:.4f},{:.4f}) -> codes rx={} ry={} gx={} gy={} bx={} by={}",
+            rx, ry, gx, gy, bx, by, rx_i, ry_i, gx_i, gy_i, bx_i, by_i);
+  return true;
+}
+
+bool aml_ensure_display_vsvdb_primaries()
+{
+  if (aml_display_support_dv())
+  {
+    aml_get_dv_cap();
+    if (xbmc_dv_cap::dv_rx_i != 0 || xbmc_dv_cap::dv_ry_i != 0 || xbmc_dv_cap::dv_gx_i != 0 ||
+        xbmc_dv_cap::dv_gy_i != 0 || xbmc_dv_cap::dv_bx_i != 0 || xbmc_dv_cap::dv_by_i != 0)
+      return true;
+  }
+  return aml_fill_vsvdb_primaries_from_edid();
 }
 
 namespace

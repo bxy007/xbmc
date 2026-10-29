@@ -251,6 +251,16 @@ void aml_reset_audio_from_play_from_resume();
 void aml_reset_from_subtitle_change();
 
 void aml_get_dv_cap();
+/*!
+ * \brief Read base-EDID chromaticity (bytes 0x19-0x22) from amhdmitx rawedid
+ *        and quantize into xbmc_dv_cap Rx/Ry/Gx/Gy/Bx/By VSVDB codes.
+ * \return true when primaries were filled and are within VSVDB bit ranges.
+ */
+bool aml_fill_vsvdb_primaries_from_edid();
+/*!
+ * \brief Prefer DV VSVDB primaries from dv_cap; if unavailable, use base EDID.
+ */
+bool aml_ensure_display_vsvdb_primaries();
 struct xbmc_dv_cap
 {
   static inline int dv_ver_i = 0;

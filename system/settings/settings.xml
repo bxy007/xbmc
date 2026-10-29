@@ -4562,8 +4562,9 @@
               <option label="60081">0</option> <!-- DCI-P3 -->
               <option label="60082">1</option> <!-- BT.2020 -->
               <option label="60083">2</option> <!-- BT.709 -->
-              <option label="60563">3</option> <!-- DISPLAY -->
+              <option label="60563">3</option> <!-- DISPLAY (DV VSVDB or base EDID gamut) -->
               <option label="60084">4</option> <!-- EPSON LS12000 -->
+              <option label="60085">5</option> <!-- Adobe RGB -->
             </options>
           </constraints>
           <control type="spinner" format="string" />
