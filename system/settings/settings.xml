@@ -5218,7 +5218,7 @@
         </setting>
         <setting id="locale.timezonecountry" type="string" label="14079" help="36117">
           <level>1</level>
-          <default>default</default> <!-- will be properly set on startup -->
+          <default>China</default>
           <constraints>
             <options>timezonecountries</options>
           </constraints>
@@ -5226,7 +5226,7 @@
         </setting>
         <setting id="locale.timezone" type="string" label="14080" help="36118">
           <level>1</level>
-          <default>default</default> <!-- will be properly set on startup -->
+          <default>Asia/Shanghai</default>
           <constraints>
             <options>timezones</options>
           </constraints>
