@@ -65,8 +65,11 @@ class CGUIFontCacheImpl
       {
         if (ageit->second == it)
         {
-          ageMap.erase(ageit);
-          ageMap.insert(typename AgeMap::value_type(now, it));
+          // A hit only changes the timestamp. Reuse its tree node instead of
+          // freeing and allocating one for every rendered label.
+          auto node = ageMap.extract(ageit);
+          node.key() = now;
+          ageMap.insert(std::move(node));
           it->second->m_lastUsed = now;
           return;
         }

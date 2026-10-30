@@ -21,6 +21,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstring>
+#include <functional>
 #include <memory>
 #include <stdint.h>
 #include <vector>
@@ -110,13 +111,25 @@ struct CGUIFontCacheHash
 {
   size_t operator()(const CGUIFontCacheKey<Position>& key) const
   {
-    /* Not much effort has gone into choosing this hash function */
-    size_t hash = 0, i;
-    for (i = 0; i < 3 && i < key.m_text.size(); ++i)
-      hash += key.m_text[i];
-    if (key.m_colors.size())
-      hash += key.m_colors[0];
-    hash += static_cast<size_t>(MatrixHashContribution(key)); // horrible
+    // Text prefixes, years and rating strings often share the same first
+    // characters. Hash the complete exact-match part of the key so cache hits
+    // do not scan long collision chains. Positions/matrices use tolerance in
+    // the dynamic cache and must not be hashed as exact values.
+    size_t hash = 0;
+    const auto combine = [&hash](size_t value) {
+      hash ^= value + 0x9e3779b9u + (hash << 6) + (hash >> 2);
+    };
+    combine(key.m_text.size());
+    for (const auto character : key.m_text)
+      combine(character);
+    combine(key.m_colors.size());
+    for (const auto color : key.m_colors)
+      combine(color);
+    combine(key.m_alignment);
+    combine(key.m_scrolling);
+    combine(std::hash<float>{}(key.m_maxPixelWidth));
+    combine(std::hash<float>{}(key.m_scaleX));
+    combine(std::hash<float>{}(key.m_scaleY));
     return hash;
   }
 };

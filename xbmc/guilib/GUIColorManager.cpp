@@ -97,6 +97,33 @@ UTILS::COLOR::Color CGUIColorManager::GetColor(const std::string& color) const
   if (directIt != m_colors.end())
     return directIt->second;
 
+  // Dynamic skin colors commonly resolve to eight ARGB hex digits every
+  // frame. Parse this exact format without the generic scanf machinery, while
+  // preserving named-color precedence and the legacy fallback for other input.
+  if (color.size() == 8)
+  {
+    UTILS::COLOR::Color value = 0;
+    bool hexadecimal = true;
+    for (const unsigned char ch : color)
+    {
+      unsigned int digit;
+      if (ch >= '0' && ch <= '9')
+        digit = ch - '0';
+      else if (ch >= 'a' && ch <= 'f')
+        digit = ch - 'a' + 10;
+      else if (ch >= 'A' && ch <= 'F')
+        digit = ch - 'A' + 10;
+      else
+      {
+        hexadecimal = false;
+        break;
+      }
+      value = (value << 4) | digit;
+    }
+    if (hexadecimal)
+      return value;
+  }
+
   // slow path: trim leading '=' and spaces, then retry
   if (!color.empty() && (color[0] == '=' || color[0] == ' '))
   {

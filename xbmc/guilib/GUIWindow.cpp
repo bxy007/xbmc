@@ -38,9 +38,24 @@
 
 using namespace KODI;
 
-bool CGUIWindow::icompare::operator()(const std::string &s1, const std::string &s2) const
+size_t CGUIWindow::PropertyHash::operator()(const std::string& key) const
 {
-  return StringUtils::CompareNoCase(s1, s2) < 0;
+  // Match CompareNoCase's ASCII folding and C-string termination, including
+  // property names containing an embedded NUL. No property iteration is exposed.
+  uint32_t hash = 2166136261u;
+  for (const unsigned char ch : key)
+  {
+    if (ch == 0)
+      break;
+    hash ^= (ch >= 'A' && ch <= 'Z') ? ch + ('a' - 'A') : ch;
+    hash *= 16777619u;
+  }
+  return hash;
+}
+
+bool CGUIWindow::PropertyEquals::operator()(const std::string& s1, const std::string& s2) const
+{
+  return StringUtils::CompareNoCase(s1, s2) == 0;
 }
 
 CGUIWindow::CGUIWindow(int id, const std::string &xmlFile)

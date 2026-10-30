@@ -22,6 +22,7 @@ class CFileItem; typedef std::shared_ptr<CFileItem> CFileItemPtr;
 
 #include <limits.h>
 #include <map>
+#include <unordered_map>
 #include <vector>
 
 enum RenderOrder {
@@ -265,9 +266,13 @@ protected:
   int m_previousWindow;
 
   bool m_animationsEnabled;
-  struct icompare
+  struct PropertyHash
   {
-    bool operator()(const std::string &s1, const std::string &s2) const;
+    size_t operator()(const std::string& key) const;
+  };
+  struct PropertyEquals
+  {
+    bool operator()(const std::string& s1, const std::string& s2) const;
   };
 
   CGUIAction m_loadActions;
@@ -287,7 +292,7 @@ protected:
   bool m_custom;
 
 private:
-  std::map<std::string, CVariant, icompare> m_mapProperties;
+  std::unordered_map<std::string, CVariant, PropertyHash, PropertyEquals> m_mapProperties;
   std::map<INFO::InfoPtr, bool> m_xmlIncludeConditions; ///< \brief used to store conditions used to resolve includes for this window
 };
 
