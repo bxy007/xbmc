@@ -328,6 +328,8 @@ protected:
   CDataCacheCore& m_dataCacheCore;
   StreamHdrType m_initial_hdrType;
   bool m_start_decode;
+  bool m_elSpsReady{false};
+  bool m_elPpsReady{false};
   unsigned int m_annexbStartScanCount = 0;
   enum DOVIMode m_convert_dovi;
   enum DOVICMv40Mode m_append_cmv40;

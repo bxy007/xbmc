@@ -1218,6 +1218,16 @@ bool CBitstreamConverter::Convert(uint8_t *pData_bl, int iSize_bl, uint8_t *pDat
       buf += lenSize;
       nal_type = (buf[0] >> 1) & 0x3f;
 
+      // Annex-B DT-DL seeks can start with EL AUD/SEI/predictive slices before
+      // its parameter sets.  Let configuration reach the slave first; starting
+      // it on those prefix NALs can make its recovery search skip shared BL data.
+      const bool elWasReady = m_elSpsReady && m_elPpsReady;
+      if (nal_type == HEVC_NAL_SPS) m_elSpsReady = true;
+      if (nal_type == HEVC_NAL_PPS) m_elPpsReady = true;
+      const bool elReady = m_elSpsReady && m_elPpsReady;
+      if (!elWasReady && elReady)
+        logComponentM(LOGDEBUG, LOGVIDEO, "BSC EL parameter sets ready: enabling native EL NALs");
+
       switch (nal_type) {
 
         case HEVC_NAL_UNSPEC62: // DoVi RPU
@@ -1230,7 +1240,9 @@ bool CBitstreamConverter::Convert(uint8_t *pData_bl, int iSize_bl, uint8_t *pDat
           break;
 
         default: // Package other data into HEVC_NAL_UNSPEC63 DoVi EL
-          if (!m_removeDovi && !convert_hdr10plus_meta && (m_convert_dovi == DOVIMode::MODE_NONE))
+          if (!m_removeDovi && !convert_hdr10plus_meta && (m_convert_dovi == DOVIMode::MODE_NONE) &&
+              (elReady || m_hints.stills ||
+               (nal_type >= HEVC_NAL_VPS && nal_type <= HEVC_NAL_PPS)))
             BitstreamAllocAndCopy(&m_convertBuffer, &offset, buf, size, HEVC_NAL_UNSPEC63);
           break;
       }
@@ -1310,6 +1322,7 @@ int CBitstreamConverter::GetExtraSize() const
 void CBitstreamConverter::ResetStartDecode()
 {
   m_start_decode = false;
+  m_elSpsReady = m_elPpsReady = false;
   m_annexbStartScanCount = 0;
   m_gateFirstReject = {};
 }
