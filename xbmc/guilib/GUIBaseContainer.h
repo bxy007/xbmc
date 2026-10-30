@@ -17,6 +17,7 @@
 #include "IGUIContainer.h"
 #include "utils/Stopwatch.h"
 
+#include <array>
 #include <list>
 #include <memory>
 #include <optional>
@@ -134,7 +135,7 @@ protected:
 
   int ScrollCorrectionRange() const;
   inline float Size() const;
-  void FreeMemory(int keepStart, int keepEnd) const;
+  void FreeMemory(int keepStart, int keepEnd);
   void GetCurrentLayouts();
   CGUIListItemLayout *GetFocusedLayout() const;
 
@@ -230,6 +231,12 @@ protected:
 
 private:
   bool OnContextMenu() const;
+
+  // Only these ranges can still have item layouts after the last cleanup.
+  // The first cleanup after a list replacement must inspect all items.
+  std::array<std::pair<int, int>, 2> m_memoryRanges{};
+  size_t m_memoryItemCount{0};
+  bool m_memoryRangesValid{false};
 
   int m_cursor;
   int m_offset;

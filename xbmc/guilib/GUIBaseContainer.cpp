@@ -506,7 +506,6 @@ bool CGUIBaseContainer::OnMessage(CGUIMessage& message)
         for (int i = 0; i < items->Size(); i++)
           m_items.push_back(items->Get(i));
         UpdateLayout(true); // true to refresh all items
-        UpdateScrollByLetter();
         SelectItem(message.GetParam1());
         return true;
       }
@@ -629,6 +628,7 @@ void CGUIBaseContainer::OnRight()
 
 void CGUIBaseContainer::OnNextLetter()
 {
+  UpdateScrollByLetter();
   const int offset = CorrectOffset(GetOffset(), GetCursor());
   // Binary search for first letter offset greater than current position
   auto it = std::upper_bound(m_letterOffsets.begin(), m_letterOffsets.end(), offset,
@@ -640,6 +640,7 @@ void CGUIBaseContainer::OnNextLetter()
 
 void CGUIBaseContainer::OnPrevLetter()
 {
+  UpdateScrollByLetter();
   const int offset = CorrectOffset(GetOffset(), GetCursor());
   if (m_letterOffsets.empty())
     return;
@@ -653,6 +654,7 @@ void CGUIBaseContainer::OnPrevLetter()
 
 void CGUIBaseContainer::OnJumpLetter(const std::string& letter, bool skip /*=false*/)
 {
+  UpdateScrollByLetter();
   if (m_matchTimer.GetElapsedMilliseconds() < letter_match_timeout)
     m_match += letter;
   else
@@ -696,7 +698,11 @@ void CGUIBaseContainer::OnJumpSMS(int letter)
   static const char letterMap[8][6] = { "ABC2", "DEF3", "GHI4", "JKL5", "MNO6", "PQRS7", "TUV8", "WXYZ9" };
 
   // only 2..9 supported
-  if (letter < 2 || letter > 9 || m_letterOffsets.empty())
+  if (letter < 2 || letter > 9)
+    return;
+
+  UpdateScrollByLetter();
+  if (m_letterOffsets.empty())
     return;
 
   const std::string letters = letterMap[letter - 2];
@@ -1007,6 +1013,9 @@ void CGUIBaseContainer::FreeResources(bool immediately)
 
 void CGUIBaseContainer::UpdateLayout(bool updateAllItems)
 {
+  // Returning to a view can expose item layouts shared with another view.
+  // Reconcile the complete list once before using the retained ranges again.
+  m_memoryRangesValid = false;
   if (updateAllItems)
   { // free memory of items
     for (iItems it = m_items.begin(); it != m_items.end(); ++it)
@@ -1148,9 +1157,8 @@ void CGUIBaseContainer::UpdateListProvider(bool forceRefresh /* = false */)
         SelectItem(m_items.size()-1);
       SetInvalid();
     }
-    // always update the scroll by letter, as the list provider may have altered labels
-    // while not actually changing the list items.
-    UpdateScrollByLetter();
+    // Letter navigation rebuilds its index when requested, using the current
+    // labels. Ordinary provider updates need no per-frame whole-list scan.
   }
 }
 
@@ -1310,6 +1318,7 @@ int CGUIBaseContainer::CorrectOffset(int offset, int cursor) const
 
 void CGUIBaseContainer::Reset()
 {
+  m_memoryRangesValid = false;
   m_wasReset = true;
   m_items.clear();
   m_lastItem.reset();
@@ -1355,19 +1364,40 @@ void CGUIBaseContainer::SetRenderOffset(const CPoint &offset)
   m_renderOffset = offset;
 }
 
-void CGUIBaseContainer::FreeMemory(int keepStart, int keepEnd) const {
+void CGUIBaseContainer::FreeMemory(int keepStart, int keepEnd)
+{
+  const int count = static_cast<int>(m_items.size());
+  const auto shouldFree = [keepStart, keepEnd](int index) {
+    if (keepStart < keepEnd)
+      return index < keepStart || index > keepEnd;
+    return index > keepEnd && index < keepStart;
+  };
+
+  if (!m_memoryRangesValid || m_memoryItemCount != m_items.size())
+    m_memoryRanges = {{{0, count}, {0, 0}}};
+
+  // ProcessItem only creates layouts inside the retained cache window. All
+  // other items were already freed, so revisiting the whole library each frame
+  // is unnecessary. Check both ranges to preserve wrapping-list semantics.
+  for (const auto& [begin, end] : m_memoryRanges)
+  {
+    for (int index = begin; index < end; ++index)
+    {
+      if (shouldFree(index))
+        m_items[index]->FreeMemory();
+    }
+  }
+
+  const int begin = std::clamp(keepStart, 0, count);
+  const int end = std::clamp(keepEnd + 1, 0, count);
   if (keepStart < keepEnd)
-  { // remove before keepStart and after keepEnd
-    for (int i = 0; i < keepStart && i < (int)m_items.size(); ++i)
-      m_items[i]->FreeMemory();
-    for (int i = std::max(keepEnd + 1, 0); i < (int)m_items.size(); ++i)
-      m_items[i]->FreeMemory();
-  }
+    m_memoryRanges = {{{begin, end}, {0, 0}}};
+  else if (keepStart == keepEnd)
+    m_memoryRanges = {{{0, count}, {0, 0}}};
   else
-  { // wrapping
-    for (int i = std::max(keepEnd + 1, 0); i < keepStart && i < (int)m_items.size(); ++i)
-      m_items[i]->FreeMemory();
-  }
+    m_memoryRanges = {{{0, end}, {begin, count}}};
+  m_memoryItemCount = m_items.size();
+  m_memoryRangesValid = true;
 }
 
 bool CGUIBaseContainer::InsideLayout(const CGUIListItemLayout *layout, const CPoint &point) const

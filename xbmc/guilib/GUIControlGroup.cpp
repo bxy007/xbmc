@@ -302,6 +302,12 @@ bool CGUIControlGroup::CanFocus() const
 
 void CGUIControlGroup::AssignDepth()
 {
+  // Match DoRender: invisible and fully transparent groups are not drawn.
+  // Processing still updates their animations and visibility; descendants get
+  // fresh depths when the group can be rendered again.
+  if (!IsVisible() || m_isCulled)
+    return;
+
   CGUIControl* focusedControl = nullptr;
   if (m_children.size())
   {
