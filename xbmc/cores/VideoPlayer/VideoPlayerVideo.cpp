@@ -334,7 +334,7 @@ void CVideoPlayerVideo::CloseStream(bool bWaitForBuffers)
   // wait until buffers are empty
   if (bWaitForBuffers && m_speed > 0)
   {
-    SendMessage(std::make_shared<CDVDMsg>(CDVDMsg::VIDEO_DRAIN), 0);
+    SendMessage(std::make_shared<CDVDMsg>(CDVDMsg::VIDEO_DRAIN_FINAL), 0);
     m_messageQueue.WaitUntilEmpty();
   }
 
@@ -635,6 +635,7 @@ void CVideoPlayerVideo::Process()
       m_renderManager.DiscardBuffer();
       FlushMessages();
       m_messageQueue.Flush(CDVDMsg::VIDEO_DRAIN);
+      m_messageQueue.Flush(CDVDMsg::VIDEO_DRAIN_FINAL);
     }
     else if (pMsg->IsType(CDVDMsg::PLAYER_SETSPEED))
     {
@@ -651,6 +652,8 @@ void CVideoPlayerVideo::Process()
       m_isEOS = false;
       if (m_telecineProbe > 0 && m_processInfo.IsVideoHwDecoder())
         ResolveTelecineProbe(frametime, true);
+      if (m_pVideoCodec)
+        m_pVideoCodec->SetEof();
       while (!m_bStop && m_pVideoCodec)
       {
         m_pVideoCodec->SetCodecControl(DVD_CODEC_CTRL_DRAIN);
@@ -668,13 +671,24 @@ void CVideoPlayerVideo::Process()
         m_picture.videoBuffer = nullptr;
       }
     }
-    else if (pMsg->IsType(CDVDMsg::VIDEO_DRAIN))
+    else if (pMsg->IsType(CDVDMsg::VIDEO_DRAIN) || pMsg->IsType(CDVDMsg::VIDEO_DRAIN_FINAL))
     {
       m_isEOS = false;
       if (m_telecineProbe > 0 && m_processInfo.IsVideoHwDecoder())
         ResolveTelecineProbe(frametime, true);
+      if (pMsg->IsType(CDVDMsg::VIDEO_DRAIN_FINAL) && m_pVideoCodec)
+        m_pVideoCodec->SetEof();
       while (!m_bStop && m_pVideoCodec)
       {
+        // A very short remainder can reach EOF before initial A/V resync.
+        // Return to the priority-message pump so GENERAL_RESYNC can enable
+        // presentation, then resume draining instead of filling a hidden queue.
+        if (m_syncState == IDVDStreamPlayer::SYNC_WAITSYNC)
+        {
+          logComponentM(LOGDEBUG, LOGVIDEO, "drain: yield for initial video resync");
+          SendMessage(pMsg, 0);
+          break;
+        }
         m_pVideoCodec->SetCodecControl(DVD_CODEC_CTRL_DRAIN);
         if (!ProcessDecoderOutput(frametime, pts))
           break;

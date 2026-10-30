@@ -65,7 +65,9 @@ public:
 
     // subtitle related messages
     SUBTITLE_CLUTCHANGE,
-    SUBTITLE_ADDFILE
+    SUBTITLE_ADDFILE,
+
+    VIDEO_DRAIN_FINAL              // no more packets before close or stream replacement
   };
   // clang-format on
 

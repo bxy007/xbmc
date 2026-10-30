@@ -772,6 +772,7 @@ void CDVDVideoCodecAmlogic::ResetDualLayerState()
   m_dlNoptsRun = 0;
   m_dlLastPts = DVD_NOPTS_VALUE;
   m_dlLastDts = DVD_NOPTS_VALUE;
+  m_dlDtsHistoryTrusted = false;
 }
 
 DLDemuxPacket CDVDVideoCodecAmlogic::AcquireDualLayerPacket(std::size_t requiredCapacity)
@@ -845,6 +846,16 @@ bool CDVDVideoCodecAmlogic::DualLayerConvert(uint8_t *pData, uint32_t iSize, con
   {
     const bool bl_pts_valid = IsValidTimestamp(oldestBlIt->pts);
     const bool bl_dts_valid = IsValidTimestamp(oldestBlIt->dts);
+    // CheckContinuity can blank a BL timestamp while the EL remains timed.
+    // Decode order still advances by one AU; use it to find the matching EL
+    // rather than pairing this BL with a stale, oldest queued EL.
+    const double bl_match_dts =
+        bl_dts_valid ? oldestBlIt->dts
+                     : (!bl_pts_valid && m_dlDtsHistoryTrusted &&
+                                IsValidTimestamp(m_dlLastDts) &&
+                                m_dlNoptsRun < max_timestamp_extrapolation
+                            ? m_dlLastDts + frame_period
+                            : DVD_NOPTS_VALUE);
     const auto oldestElIt = std::find_if(
         m_packages.begin(), m_packages.end(),
         [](const auto& p) { return p.isELPackage; });
@@ -856,7 +867,7 @@ bool CDVDVideoCodecAmlogic::DualLayerConvert(uint8_t *pData, uint32_t iSize, con
     {
       // No Enhancement Layer candidate in queue yet; wait for partner packet.
     }
-    else if ((!bl_pts_valid && !bl_dts_valid) ||
+    else if ((!bl_pts_valid && !IsValidTimestamp(bl_match_dts)) ||
              (!IsValidTimestamp(oldestElIt->pts) && !IsValidTimestamp(oldestElIt->dts)))
     {
       // When either side lacks valid timestamps, fallback to ordinal (FIFO) pairing.
@@ -906,8 +917,8 @@ bool CDVDVideoCodecAmlogic::DualLayerConvert(uint8_t *pData, uint32_t iSize, con
       };
 
       // Tier 1: DTS-based nearest-neighbor (native decode causality dependency order).
-      if (bl_dts_valid)
-        matchElIt = findBestMatch(oldestBlIt->dts, [](const auto& p) { return p.dts; }, false);
+      if (IsValidTimestamp(bl_match_dts))
+        matchElIt = findBestMatch(bl_match_dts, [](const auto& p) { return p.dts; }, false);
 
       // Tier 2: PTS-based nearest-neighbor fallback (when DTS is missing or did not match).
       if (matchElIt == m_packages.end() && bl_pts_valid)
@@ -931,19 +942,36 @@ bool CDVDVideoCodecAmlogic::DualLayerConvert(uint8_t *pData, uint32_t iSize, con
 
       bool bl_pts_valid_cur = bl_pts_native;
       bool bl_dts_valid_cur = bl_dts_native;
+      bool dts_history_trusted = bl_dts_native;
 
       // Extrapolate if Base Layer timestamp was blanked by CheckContinuity
-      if (!bl_pts_native && IsValidTimestamp(m_dlLastPts) &&
-          m_dlNoptsRun < max_timestamp_extrapolation)
+      const double matched_el_pts =
+          elPacket.pts + elPacket.m_ptsOffsetCorrection - blPacket.m_ptsOffsetCorrection;
+      if (!bl_pts_native && IsValidTimestamp(elPacket.pts) &&
+          IsValidTimestamp(matched_el_pts))
+      {
+        // PTS is in display order.  The matched EL preserves B-frame reorder;
+        // adding one frame to the previous BL PTS does not.
+        bl_pts = matched_el_pts;
+        bl_pts_valid_cur = true;
+        logComponentM(LOGDEBUG, LOGVIDEO,
+                      "dlpair: recovered BL timing from matched EL pts={:.3f} dts={:.3f} "
+                      "elDts={:.3f}",
+                      bl_pts / DVD_TIME_BASE, bl_match_dts / DVD_TIME_BASE,
+                      elPacket.dts / DVD_TIME_BASE);
+      }
+      else if (!bl_pts_native && IsValidTimestamp(m_dlLastPts) &&
+               m_dlNoptsRun < max_timestamp_extrapolation)
       {
         bl_pts = m_dlLastPts + frame_period;
         bl_pts_valid_cur = true;
       }
-      if (!bl_dts_native && IsValidTimestamp(m_dlLastDts) &&
+      if (!bl_dts_native && m_dlDtsHistoryTrusted && IsValidTimestamp(m_dlLastDts) &&
           m_dlNoptsRun < max_timestamp_extrapolation)
       {
         bl_dts = m_dlLastDts + frame_period;
         bl_dts_valid_cur = true;
+        dts_history_trusted = true;
       }
       if (!bl_dts_valid_cur)
       {
@@ -960,6 +988,7 @@ bool CDVDVideoCodecAmlogic::DualLayerConvert(uint8_t *pData, uint32_t iSize, con
         m_dlLastPts = bl_pts;
       if (bl_dts_valid_cur)
         m_dlLastDts = bl_dts;
+      m_dlDtsHistoryTrusted = bl_dts_valid_cur && dts_history_trusted;
 
       const double convertPts = bl_pts_valid_cur ? bl_pts : DVD_NOPTS_VALUE;
       uint8_t* blData = blPacket.buffer.GetData();
@@ -1434,6 +1463,12 @@ CDVDVideoCodec::VCReturn CDVDVideoCodecAmlogic::GetPicture(VideoPicture* pVideoP
   }
 
   return retVal;
+}
+
+void CDVDVideoCodecAmlogic::SetEof()
+{
+  if (m_Codec)
+    m_Codec->SetEof();
 }
 
 void CDVDVideoCodecAmlogic::SetCodecControl(int flags)

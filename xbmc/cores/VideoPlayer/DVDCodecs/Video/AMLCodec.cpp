@@ -2065,6 +2065,7 @@ bool CAMLCodec::OpenAmlVideo()
   {
     std::scoped_lock lock(m_ioControlMutex);
     m_amlVideoFile = amlVideoFile;
+    m_releaseFrameIndexValid = false;
   }
   m_defaultVfmMap = GetVfmMap("default");
   m_dvblpathVfmMap = GetVfmMap("dvblpath");
@@ -2559,7 +2560,23 @@ int CAMLCodec::ReleaseFrame(const uint32_t index, bool drop)
   {
     std::scoped_lock lock(m_ioControlMutex);
     if (!m_amlVideoFile) return 0;
+    // amlvideo QBUF releases every queued frame through the requested index.
+    // An older render buffer can be discarded after a newer one was presented.
+    // Sending that stale index would drain all future frames without finding it.
+    // Indices are serial numbers; retain ordering across uint32_t wraparound.
+    if (m_releaseFrameIndexValid &&
+        static_cast<int32_t>(index - m_lastReleasedFrameIndex) <= 0)
+    {
+      logComponentM(LOGDEBUG, LOGVIDEO, "amlqbuf: ignore stale idx={} last={} drop={}",
+                    index, m_lastReleasedFrameIndex, drop);
+      return 0;
+    }
     ret = (m_amlVideoFile->IOControl(VIDIOC_QBUF, &vbuf) < 0) ? errno : 0;
+    if (ret == 0)
+    {
+      m_lastReleasedFrameIndex = index;
+      m_releaseFrameIndexValid = true;
+    }
   }
 
   if (ret != 0) LOG_THROTTLE_PERIODIC(LOGERROR, LOGVIDEO, 1000, "VIDIOC_QBUF failed: [{}] [{}]", ret, strerror(ret));
@@ -2898,6 +2915,20 @@ CDVDVideoCodec::VCReturn CAMLCodec::GetPicture(VideoPicture& videoPicture)
   }
 
   return CDVDVideoCodec::VC_BUFFER;
+}
+
+void CAMLCodec::SetEof()
+{
+  if (!m_opened || !am_private || !am_private->gcodec.dv_enable ||
+      am_private->gcodec.dec_mode != STREAM_TYPE_STREAM)
+    return;
+
+  // Release the dual-layer byte readiness gate for the last, short buffer.
+  // Temporary starvation drains must not signal a terminal kernel EOS.
+  const int result = m_dll->codec_set_eos(&am_private->vcodec, 1);
+  logComponentM(LOGDEBUG, LOGVIDEO, "terminal dual-layer EOS result={}", result);
+  if (result != 0)
+    logM(LOGERROR, "failed to signal terminal dual-layer EOS: {}", result);
 }
 
 void CAMLCodec::SetDrain(bool drain)

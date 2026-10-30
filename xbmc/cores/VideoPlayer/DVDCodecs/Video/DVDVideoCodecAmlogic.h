@@ -94,9 +94,18 @@ public:
   virtual VCReturn GetPicture(VideoPicture* pVideoPicture) override;
   virtual void SetSpeed(int iSpeed) override;
   virtual void SetCodecControl(int flags) override;
+  void SetEof() override;
   virtual void Abort() override;
   virtual const char* GetName(void) override { return (const char*)m_pFormatName; }
   virtual bool SupportsExtention() { return true; }
+  // FEL needs room for both decoder DPBs as well as queued presentation frames.
+  unsigned GetAllowedReferences() override
+  {
+    return m_hints.hdrType == StreamHdrType::HDR_TYPE_DOLBYVISION &&
+                   m_hints.dovi_el_type == DOVIELType::TYPE_FEL
+               ? 8
+               : 0;
+  }
   bool HonorsAccurateSeek() const override { return false; }
 
   void OnSettingChanged(const std::shared_ptr<const CSetting>& setting) override;
@@ -166,6 +175,7 @@ private:
   uint32_t m_dlNoptsRun = 0;
   double m_dlLastPts{DVD_NOPTS_VALUE};
   double m_dlLastDts{DVD_NOPTS_VALUE};
+  bool m_dlDtsHistoryTrusted{false};
   int64_t m_dlStatLastLog = 0;
 
   bool      m_last_added = true;

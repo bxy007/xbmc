@@ -2160,7 +2160,7 @@ bool CVideoPlayer::HandleReadPacketEndOfStream()
 {
   if (m_CurrentVideo.inited)
   {
-    m_VideoPlayerVideo->SendMessage(std::make_shared<CDVDMsg>(CDVDMsg::VIDEO_DRAIN));
+    m_VideoPlayerVideo->SendMessage(std::make_shared<CDVDMsg>(CDVDMsg::VIDEO_DRAIN_FINAL));
   }
   else if (m_VideoPlayerVideo->IsInited() && !m_VideoPlayerVideo->HasData())
   {

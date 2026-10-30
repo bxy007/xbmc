@@ -247,6 +247,10 @@ public:
    */
   virtual void SetCodecControl(int flags) {}
 
+  // No more packets will arrive before the stream is closed or replaced.
+  // This differs from a temporary drain while waiting for input.
+  virtual void SetEof() {}
+
   /**
    * Abort a blocking AddData call (e.g. when a flush is pending).
    * Called from a non-codec thread; implementation must be thread-safe.

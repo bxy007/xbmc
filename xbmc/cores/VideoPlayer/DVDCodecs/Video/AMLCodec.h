@@ -87,6 +87,7 @@ public:
   virtual int codec_init(codec_para_t *pcodec) = 0;
   virtual int codec_close(codec_para_t *pcodec) = 0;
   virtual int codec_reset(codec_para_t *pcodec) = 0;
+  virtual int codec_set_eos(codec_para_t *pcodec, int is_eos) = 0;
   virtual int codec_pause(codec_para_t *pcodec) = 0;
   virtual int codec_resume(codec_para_t *pcodec) = 0;
   virtual int codec_write(codec_para_t *pcodec, void *buffer, int len) = 0;
@@ -115,6 +116,7 @@ class DllLibAmCodec : public DllDynamic, DllLibamCodecInterface
   DEFINE_METHOD1(int, codec_init,               (codec_para_t *p1))
   DEFINE_METHOD1(int, codec_close,              (codec_para_t *p1))
   DEFINE_METHOD1(int, codec_reset,              (codec_para_t *p1))
+  DEFINE_METHOD2(int, codec_set_eos,            (codec_para_t *p1, int p2))
   DEFINE_METHOD1(int, codec_pause,              (codec_para_t *p1))
   DEFINE_METHOD1(int, codec_resume,             (codec_para_t *p1))
   DEFINE_METHOD3(int, codec_write,              (codec_para_t *p1, void *p2, int p3))
@@ -138,6 +140,7 @@ class DllLibAmCodec : public DllDynamic, DllLibamCodecInterface
     RESOLVE_METHOD(codec_init)
     RESOLVE_METHOD(codec_close)
     RESOLVE_METHOD(codec_reset)
+    RESOLVE_METHOD(codec_set_eos)
     RESOLVE_METHOD(codec_pause)
     RESOLVE_METHOD(codec_resume)
     RESOLVE_METHOD(codec_write)
@@ -272,6 +275,7 @@ public:
 
   void          SetSpeed(int speed);
   void          SetDrain(bool drain);
+  void          SetEof();
   void          SetVideoRect(const CRect &SrcRect, const CRect &DestRect);
   void          SetVideoRate(int videoRate) const;
   uint64_t      GetOMXPts() const { return m_cur_pts; }
@@ -343,6 +347,9 @@ private:
   unsigned int     m_state;
 
   PosixFilePtr     m_amlVideoFile;
+  // Protected by m_ioControlMutex, like the capture queue itself.
+  bool            m_releaseFrameIndexValid{false};
+  uint32_t        m_lastReleasedFrameIndex{0};
   std::string      m_defaultVfmMap;
   std::string      m_dvblpathVfmMap;
   bool             m_vfmDefaultModified = false;
