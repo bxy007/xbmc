@@ -105,18 +105,17 @@ void CGUIWindowDebugInfo::Process(unsigned int currentTime, CDirtyRegionList &di
     std::string lcAppName = CCompileInfo::GetAppName();
     StringUtils::ToLower(lcAppName);
 
-    float videoFps = CServiceBroker::GetDataCacheCore().GetVideoFps();
+    const float videoFps = CServiceBroker::GetDataCacheCore().GetVideoFps();
+    const float guiFps = CServiceBroker::GetGUI()
+                             ->GetInfoManager()
+                             .GetInfoProviders()
+                             .GetSystemInfoProvider()
+                             .GetFPS();
     std::string fpsInfo;
     if (videoFps > 0.0f)
-      fpsInfo = StringUtils::Format("FPS: {:.3f} RM: {:.3f}", videoFps,
-                                    CServiceBroker::GetGUI()
-                                            ->GetInfoManager()
-                                            .GetInfoProviders()
-                                            .GetSystemInfoProvider()
-                                            .GetFPS() /
-                                        videoFps);
+      fpsInfo = StringUtils::Format("FPS: {:.3f} RM: {:.3f}", videoFps, guiFps / videoFps);
     else
-      fpsInfo = "FPS: 0 RM: -";
+      fpsInfo = StringUtils::Format("FPS: {:.3f} (GUI) RM: -", guiFps);
 #if !defined(TARGET_POSIX)
     info = StringUtils::Format("LOG: {}{}.log\nMEM: {}/{} KB - {}\nCPU: {}{}",
                                CSpecialProtocol::TranslatePath("special://logpath"), lcAppName,
