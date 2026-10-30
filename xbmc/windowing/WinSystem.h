@@ -69,7 +69,7 @@ public:
   virtual bool SetFullScreen(bool fullScreen, RESOLUTION_INFO& res, bool blankOtherDisplays) = 0;
   virtual bool DisplayHardwareScalingEnabled() { return false; }
   virtual void UpdateDisplayHardwareScaling(const RESOLUTION_INFO& resInfo) { }
-  virtual void SetDirtyRegions(const CDirtyRegionList& dirtyRegionsList) {}
+  virtual bool SetDirtyRegions(const CDirtyRegionList& dirtyRegionsList) { return true; }
   virtual int GetBufferAge() { return 2; }
   virtual bool MoveWindow(int topLeft, int topRight){return false;}
   virtual void FinishModeChange(RESOLUTION res){}

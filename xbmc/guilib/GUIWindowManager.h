@@ -114,7 +114,7 @@ public:
    It should only be called from the application thread.
    Returns true only if it has rendered something.
    */
-  bool Render();
+  bool Render(bool forScreenshot = false);
 
   void RenderEx() const;
 
@@ -394,6 +394,7 @@ private:
   std::vector<std::shared_ptr<CGUIWindow>> m_dialogWindows;
   std::vector<std::shared_ptr<CGUIWindow>> m_activeDialogs;
   std::vector<std::shared_ptr<CGUIWindow>> m_deleteWindows;
+  bool m_renderedForScreenshot{false};
 
   mutable std::unique_ptr<CGUIRenderTargetFBO> m_fullscreenOverlayRenderTarget;
   mutable std::chrono::steady_clock::time_point m_fullscreenOverlayLastFillTime;
@@ -430,7 +431,7 @@ private:
   mutable AsyncFullscreenOverlaySignature m_pendingFullscreenOverlaySignature;
   mutable void* m_preparedFullscreenOverlayFence{nullptr};
   mutable std::atomic<bool> m_fullscreenOverlayRenderThreadDisabled{false};
-  mutable std::atomic<uint32_t> m_fullscreenOverlayDepthLayer{2};
+  mutable std::atomic<uint32_t> m_guiDepthLayer{2};
   mutable bool m_fullscreenOverlayReleaseRequested{false};
   mutable FullscreenOverlayCompositeSource m_fullscreenOverlayCompositeSource{
       FullscreenOverlayCompositeSource::NONE};

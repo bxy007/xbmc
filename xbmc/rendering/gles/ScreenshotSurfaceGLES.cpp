@@ -45,7 +45,7 @@ bool CScreenshotSurfaceGLES::Capture()
 
   std::lock_guard lock(winsystem->GetGfxContext());
 
-  gui->GetWindowManager().Render();
+  gui->GetWindowManager().Render(true);
 
   gui->GetWindowManager().EndRenderExclusion();
 

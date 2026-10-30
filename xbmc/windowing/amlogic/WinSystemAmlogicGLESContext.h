@@ -39,9 +39,9 @@ public:
                        bool fullScreen,
                        RESOLUTION_INFO& res) override;
   bool DestroyWindow() override;
-  void SetDirtyRegions(const CDirtyRegionList& dirtyRegions) override
+  bool SetDirtyRegions(const CDirtyRegionList& dirtyRegions) override
   {
-    m_pGLContext.SetDamagedRegions(dirtyRegions, m_height);
+    return m_pGLContext.SetDamagedRegions(dirtyRegions, m_height);
   }
   int GetBufferAge() override;
 

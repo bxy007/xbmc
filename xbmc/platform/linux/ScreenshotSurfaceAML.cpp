@@ -38,7 +38,7 @@ bool CScreenshotSurfaceAML::Capture()
 
   std::lock_guard lock(CServiceBroker::GetWinSystem()->GetGfxContext());
 
-  gui->GetWindowManager().Render();
+  gui->GetWindowManager().Render(true);
 
   gui->GetWindowManager().EndRenderExclusion();
 

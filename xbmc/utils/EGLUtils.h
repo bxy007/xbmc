@@ -204,7 +204,7 @@ public:
   void DestroyContext();
   bool SetVSync(bool enable) const;
   bool TrySwapBuffers() const;
-  void SetDamagedRegions(const CDirtyRegionList& dirtyRegions, int expectedHeight = -1);
+  bool SetDamagedRegions(const CDirtyRegionList& dirtyRegions, int expectedHeight = -1);
   int GetBufferAge();
   bool HasBufferAgeSupport() const { return m_partialUpdateSupport || m_bufferAgeSupport; }
   bool IsPlatformSupported() const;

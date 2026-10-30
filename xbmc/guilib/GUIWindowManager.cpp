@@ -47,6 +47,7 @@
 #include "threads/SingleLock.h"
 #include "threads/Thread.h"
 #include "utils/AMLUtils.h"
+#include "utils/ScopeGuard.h"
 #include "utils/StringUtils.h"
 #include "windowing/WinSystem.h"
 #include "utils/URIUtils.h"
@@ -1690,7 +1691,7 @@ void CFullscreenOverlayRenderThread::RunPendingFill(
     const unsigned int width = gfx.GetWidth();
     const unsigned int height = gfx.GetHeight();
     renderSystem->EstablishGuiRenderBaseline(width, height);
-    gfx.SetLayer(m_manager.m_fullscreenOverlayDepthLayer.load(std::memory_order_relaxed));
+    gfx.SetLayer(m_manager.m_guiDepthLayer.load(std::memory_order_relaxed));
     gfx.ResetScissors();
 
     std::unique_ptr<CGUIRenderTargetFBO> target;
@@ -1889,7 +1890,7 @@ void CGUIWindowManager::Process(unsigned int currentTime)
       window->AssignDepth();
   }
 
-  m_fullscreenOverlayDepthLayer.store(
+  m_guiDepthLayer.store(
       CServiceBroker::GetWinSystem()->GetGfxContext().GetLayer(), std::memory_order_relaxed);
 
   for (auto& itr : m_dirtyregions)
@@ -3114,10 +3115,19 @@ void CGUIWindowManager::RenderEx() const
   */
 }
 
-bool CGUIWindowManager::Render()
+bool CGUIWindowManager::Render(bool forScreenshot)
 {
   assert(CServiceBroker::GetAppMessenger()->IsProcessThread());
   CSingleExit lock(CServiceBroker::GetWinSystem()->GetGfxContext());
+
+  // AfterRender resets the live layer count, while cached control transforms
+  // retain their assigned depths. A capture outside the normal frame needs the
+  // corresponding count or those controls fall outside the clip depth range.
+  auto& gfx = CServiceBroker::GetWinSystem()->GetGfxContext();
+  KODI::UTILS::CScopeGuard<uint32_t, 0, void(uint32_t)> restoreDepthLayer(
+      [&gfx](uint32_t layer) { gfx.SetLayer(layer); }, forScreenshot ? gfx.GetLayer() : 0);
+  if (forScreenshot)
+    gfx.SetLayer(m_guiDepthLayer.load(std::memory_order_relaxed));
 
   const auto settingsComponent = CServiceBroker::GetSettingsComponent();
   const auto advancedSettings = settingsComponent ? settingsComponent->GetAdvancedSettings() : nullptr;
@@ -3201,14 +3211,22 @@ bool CGUIWindowManager::Render()
     }
   }
 
-  int bufferAge = CServiceBroker::GetWinSystem()->GetBufferAge();
+  // A screenshot draws without swapping. Draw the entire capture and the next
+  // normal pass, so neither depends on stale pixels or declares damage twice
+  // between swaps. A capture must not advance the swap-based region history.
+  const bool forceFullRedraw = forScreenshot || m_renderedForScreenshot;
+  m_renderedForScreenshot = forScreenshot;
+  int bufferAge = forceFullRedraw ? 0 : CServiceBroker::GetWinSystem()->GetBufferAge();
   const int realAge = bufferAge;
   if (visualizeDirtyRegions)
     bufferAge = 20;
-  if (bufferAge)
-    m_tracker.CleanMarkedRegions(bufferAge + 1);
-  else
-    m_tracker.CleanMarkedRegions(10);
+  if (!forScreenshot)
+  {
+    if (bufferAge)
+      m_tracker.CleanMarkedRegions(bufferAge + 1);
+    else
+      m_tracker.CleanMarkedRegions(10);
+  }
 
   CDirtyRegionList dirtyRegions = m_tracker.GetDirtyRegions();
   float frameSnapGrowth = 0.0f;
@@ -3304,11 +3322,19 @@ bool CGUIWindowManager::Render()
       renderedViaRegions = false;
       return true;
     }
+    if (!damageRegions.empty() &&
+        !CServiceBroker::GetWinSystem()->SetDirtyRegions(damageRegions))
+    {
+      // Recover this frame as well as subsequent ones; presenting even one
+      // clipped pass after rejected damage can expose undefined/black pixels.
+      CServiceBroker::GetWinSystem()->GetGfxContext().ResetScissors();
+      RenderPass();
+      frameRects = static_cast<uint32_t>(damageRegions.size());
+      renderedViaRegions = false;
+      return true;
+    }
     for (const auto& i : damageRegions)
     {
-      if (!rendered)
-        CServiceBroker::GetWinSystem()->SetDirtyRegions(damageRegions);
-
       if (bufAgeDiag)
         frameDirtyPx += i.Area();
 
@@ -3354,6 +3380,7 @@ bool CGUIWindowManager::Render()
   if (visualizeDirtyRegions || bufferAge == 0 || skinHdrForceFull ||
       guiAlgorithmDirtyRegions == DIRTYREGION_SOLVER_FILL_VIEWPORT_ALWAYS)
   {
+    CServiceBroker::GetWinSystem()->GetGfxContext().ResetScissors();
     RenderPass();
     hasRendered = true;
   }

@@ -753,10 +753,12 @@ bool CEGLContextUtils::HasContext()
   return eglGetCurrentContext() != EGL_NO_CONTEXT;
 }
 
-void CEGLContextUtils::SetDamagedRegions(const CDirtyRegionList& dirtyRegions, int expectedHeight)
+bool CEGLContextUtils::SetDamagedRegions(const CDirtyRegionList& dirtyRegions, int expectedHeight)
 {
-  if (!m_partialUpdateSupport || m_damageRegionError)
-    return;
+  if (m_damageRegionError)
+    return false;
+  if (!m_partialUpdateSupport)
+    return true;
 
   using Rect = std::array<EGLint, 4>;
   EGLBoolean damageRegionsResult = EGL_FALSE;
@@ -790,7 +792,7 @@ void CEGLContextUtils::SetDamagedRegions(const CDirtyRegionList& dirtyRegions, i
                       "eglDamage: height guard skips={} expected={} height={} queryOk={}",
                       s_guardSkips, expectedHeight, static_cast<int>(height), heightValid);
       }
-      return;
+      return false;
     }
 
     std::vector<Rect> rects;
@@ -844,10 +846,15 @@ void CEGLContextUtils::SetDamagedRegions(const CDirtyRegionList& dirtyRegions, i
       }
     }
   }
+  return damageRegionsResult == EGL_TRUE;
 }
 
 int CEGLContextUtils::GetBufferAge()
 {
+  // A failed partial update cannot establish which pixels survived. Keep doing
+  // full redraws until a new surface resets the error, including with EXT age.
+  if (m_damageRegionError)
+    return 0;
 #ifdef EGL_BUFFER_AGE_KHR
   if (m_partialUpdateSupport)
   {
