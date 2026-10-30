@@ -70,7 +70,7 @@ protected:
 
 private:
   CEGLContextUtils m_pGLContext;
-  StreamHdrType m_hdrType = StreamHdrType::HDR_TYPE_NONE;
+  StreamHdrType m_outputHdrType = StreamHdrType::HDR_TYPE_NONE;
   bool m_failedSwap{false};
   int m_vsyncFd{-1};
   bool m_vsyncAlignFailed{false};

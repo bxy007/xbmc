@@ -632,6 +632,7 @@ bool CDolbyVisionAML::Setup()
   std::set<std::string> settingSet;
   settingSet.insert(CSettings::SETTING_COREELEC_AMLOGIC_DV_MODE);
   settingSet.insert(CSettings::SETTING_COREELEC_AMLOGIC_DV_MODE_ON_LUMINANCE);
+  settingSet.insert(CSettings::SETTING_VIDEOSCREEN_GUISATURATION_DOLBYVISION);
   settingSet.insert(CSettings::SETTING_COREELEC_AMLOGIC_DV_TYPE);
   settingSet.insert(CSettings::SETTING_COREELEC_AMLOGIC_DV_TYPE_ASSIGNED);
   settingSet.insert(CSettings::SETTING_COREELEC_AMLOGIC_DV_VIDEO_PROCESSOR);
@@ -677,6 +678,13 @@ bool CDolbyVisionAML::Setup()
 void CDolbyVisionAML::OnSettingChanged(const std::shared_ptr<const CSetting>& setting) 
 {
   if (!setting) return;
+
+  if (setting->GetId() == CSettings::SETTING_VIDEOSCREEN_GUISATURATION_DOLBYVISION)
+  {
+    if (!aml_dv_playback_active())
+      aml_dv_start();
+    return;
+  }
 
   if (setting->GetId() == CSettings::SETTING_COREELEC_AUDIO_DDR_PRIORITY)
   {

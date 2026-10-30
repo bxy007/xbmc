@@ -53,9 +53,9 @@ public:
   bool IsVideoModeSwitchPending();
   void CancelVideoModeSwitch();
 protected:
-  void BeginModeSwitchBlank();
-  void EndModeSwitchBlank();
-  void OsdReassertTick();
+  void BeginModeSwitch();
+  void EndModeSwitch();
+  void ProcessPendingVideoModeSwitch();
 
   std::string m_framebuffer_name;
   EGLDisplay m_nativeDisplay;
@@ -71,17 +71,13 @@ protected:
   std::unique_ptr<CLibInputHandler> m_libinput;
   CHDRCapabilities m_hdr_caps;
   bool m_force_mode_switch;
-  bool m_modeSwitchBlanked;
-  int m_modeSwitchFb0Blank;
-  int m_modeSwitchFb1Blank;
-  int m_osdReassertFrames{0};
 
 private:
-  void BeginModeSwitchBlankLocked();
-  void EndModeSwitchBlankLocked();
-  std::mutex m_modeSwitchBlankMutex;
+  void EndModeSwitchLocked();
+  std::mutex m_videoModeSwitchMutex;
+  bool m_modeSwitchInProgress{false};
   bool m_videoModeSwitchPrepared{false};
   bool m_videoModeSwitchRefreshDeferred{false};
-  XbmcThreads::EndTime<> m_videoModeSwitchBlankTimer;
+  XbmcThreads::EndTime<> m_videoModeSwitchTimer;
   std::unique_ptr<CDolbyVisionAML> m_dolbyVisionAML;
 };

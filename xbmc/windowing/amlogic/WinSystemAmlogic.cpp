@@ -39,8 +39,6 @@
 #include <linux/fb.h>
 #include <linux/version.h>
 
-#include <thread>
-
 #include "system_egl.h"
 
 using namespace KODI;
@@ -49,9 +47,6 @@ CWinSystemAmlogic::CWinSystemAmlogic()
 :  m_nativeWindow(nullptr)
 ,  m_libinput(new CLibInputHandler)
 ,  m_force_mode_switch(false)
-,  m_modeSwitchBlanked(false)
-,  m_modeSwitchFb0Blank(0)
-,  m_modeSwitchFb1Blank(0)
 {
   const char *env_framebuffer = getenv("FRAMEBUFFER");
 
@@ -149,7 +144,7 @@ bool CWinSystemAmlogic::CreateNewWindow(const std::string& name,
     m_dispResetTimer.Set(std::chrono::milliseconds(static_cast<unsigned int>(delay * 100)));
   }
 
-  BeginModeSwitchBlank();
+  BeginModeSwitch();
 
   {
     std::lock_guard lock(m_resourceSection);
@@ -182,47 +177,31 @@ bool CWinSystemAmlogic::CreateNewWindow(const std::string& name,
   return true;
 }
 
-void CWinSystemAmlogic::BeginModeSwitchBlank()
+void CWinSystemAmlogic::BeginModeSwitch()
 {
-  std::lock_guard lock(m_modeSwitchBlankMutex);
+  std::lock_guard lock(m_videoModeSwitchMutex);
   if (m_videoModeSwitchPrepared)
-    logM(LOGDEBUG, "DV startup OSD blank handed to display mode switch");
+    logM(LOGDEBUG, "DV startup handoff to display mode switch");
   m_videoModeSwitchPrepared = false;
   m_videoModeSwitchRefreshDeferred = false;
-  BeginModeSwitchBlankLocked();
+  m_modeSwitchInProgress = true;
 }
 
 void CWinSystemAmlogic::PrepareVideoModeSwitch()
 {
-  {
-    std::lock_guard lock(m_modeSwitchBlankMutex);
-    if (m_modeSwitchBlanked)
-      return;
+  std::lock_guard lock(m_videoModeSwitchMutex);
+  if (m_modeSwitchInProgress)
+    return;
 
-    BeginModeSwitchBlankLocked();
-    m_videoModeSwitchPrepared = true;
-    m_videoModeSwitchBlankTimer.Set(std::chrono::seconds(5));
-    logM(LOGDEBUG, "DV startup OSD blank before output mode change");
-  }
-
-  // fb blank is applied at vsync. Let it latch before enabling the DV core.
-  int64_t edge = 0;
-  if (aml_get_vsync_edge(edge))
-  {
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(50);
-    int64_t nextEdge = edge;
-    while (nextEdge == edge && std::chrono::steady_clock::now() < deadline)
-    {
-      std::this_thread::sleep_for(std::chrono::milliseconds(1));
-      if (!aml_get_vsync_edge(nextEdge))
-        break;
-    }
-  }
+  m_modeSwitchInProgress = true;
+  m_videoModeSwitchPrepared = true;
+  m_videoModeSwitchTimer.Set(std::chrono::seconds(5));
+  logM(LOGDEBUG, "DV startup prepared");
 }
 
 bool CWinSystemAmlogic::DeferVideoModeSwitch()
 {
-  std::lock_guard lock(m_modeSwitchBlankMutex);
+  std::lock_guard lock(m_videoModeSwitchMutex);
   if (!m_videoModeSwitchPrepared)
     return false;
 
@@ -232,80 +211,52 @@ bool CWinSystemAmlogic::DeferVideoModeSwitch()
 
 bool CWinSystemAmlogic::IsVideoModeSwitchPending()
 {
-  std::lock_guard lock(m_modeSwitchBlankMutex);
+  std::lock_guard lock(m_videoModeSwitchMutex);
   return m_videoModeSwitchPrepared && m_videoModeSwitchRefreshDeferred;
 }
 
 void CWinSystemAmlogic::CancelVideoModeSwitch()
 {
-  std::lock_guard lock(m_modeSwitchBlankMutex);
-  // Once the display switch takes ownership, only its normal completion can
-  // restore the planes. A simultaneous decoder close must not expose it early.
+  std::lock_guard lock(m_videoModeSwitchMutex);
+  // A decoder close may cancel preparation, but the display switch owns its
+  // transaction after handoff and completes it through EndModeSwitch().
   if (m_videoModeSwitchPrepared)
   {
-    EndModeSwitchBlankLocked();
-    logM(LOGDEBUG, "DV startup OSD blank cancelled before display mode switch");
+    EndModeSwitchLocked();
+    logM(LOGDEBUG, "DV startup preparation cancelled");
   }
 }
 
-void CWinSystemAmlogic::BeginModeSwitchBlankLocked()
+void CWinSystemAmlogic::EndModeSwitch()
 {
-  if (m_modeSwitchBlanked)
-    return;
-
-  m_osdReassertFrames = 0;
-  m_modeSwitchFb0Blank = aml_osd_blank(0, 1);
-  m_modeSwitchFb1Blank = aml_osd_blank(1, 1);
-  m_modeSwitchBlanked = true;
+  std::lock_guard lock(m_videoModeSwitchMutex);
+  EndModeSwitchLocked();
 }
 
-void CWinSystemAmlogic::EndModeSwitchBlank()
+void CWinSystemAmlogic::EndModeSwitchLocked()
 {
-  std::lock_guard lock(m_modeSwitchBlankMutex);
-  EndModeSwitchBlankLocked();
-}
-
-void CWinSystemAmlogic::EndModeSwitchBlankLocked()
-{
-  if (!m_modeSwitchBlanked)
-    return;
-
-  aml_osd_blank(0, m_modeSwitchFb0Blank);
-  aml_osd_blank(1, m_modeSwitchFb1Blank);
-  m_modeSwitchBlanked = false;
+  m_modeSwitchInProgress = false;
   m_videoModeSwitchPrepared = false;
   m_videoModeSwitchRefreshDeferred = false;
-  m_modeSwitchFb0Blank = 0;
-  m_modeSwitchFb1Blank = 0;
-  m_osdReassertFrames = 6;
 }
 
-void CWinSystemAmlogic::OsdReassertTick()
+void CWinSystemAmlogic::ProcessPendingVideoModeSwitch()
 {
-  std::unique_lock lock(m_modeSwitchBlankMutex);
-  if (m_videoModeSwitchPrepared && m_videoModeSwitchBlankTimer.IsTimePast())
+  std::unique_lock lock(m_videoModeSwitchMutex);
+  if (m_videoModeSwitchPrepared && m_videoModeSwitchTimer.IsTimePast())
   {
     // DV setup takes the core lock before the window lock. Drop this lock
     // during the fallback, then recheck in case a decoder close cancelled it.
     lock.unlock();
     aml_dv_apply_pending_output();
     lock.lock();
-    if (m_videoModeSwitchPrepared && m_videoModeSwitchBlankTimer.IsTimePast())
+    if (m_videoModeSwitchPrepared && m_videoModeSwitchTimer.IsTimePast())
     {
       if (m_videoModeSwitchRefreshDeferred && aml_is_dv_enable())
         aml_dv_display_auto_now();
-      EndModeSwitchBlankLocked();
-      logM(LOGWARNING, "DV startup OSD blank timed out before display mode switch");
+      EndModeSwitchLocked();
+      logM(LOGWARNING, "DV startup preparation timed out before display mode switch");
     }
-  }
-  if (m_osdReassertFrames <= 0)
-    return;
-
-  if (--m_osdReassertFrames == 0)
-  {
-    aml_osd_blank(0, 0);
-    aml_osd_blank(1, 0);
-    logM(LOGDEBUG, "CWinSystemAmlogic::OsdReassertTick - re-asserted OSD unblank after mode switch");
   }
 }
 

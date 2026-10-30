@@ -929,20 +929,6 @@ int aml_blackout_policy(int new_blackout)
   return 0;
 }
 
-int aml_osd_blank(int fbIndex, int blankMode)
-{
-  const std::string blankPath = StringUtils::Format("/sys/class/graphics/fb{}/blank", fbIndex);
-  CSysfsPath osd_blank{blankPath};
-  if (osd_blank.Exists())
-  {
-    const int existingBlank = osd_blank.Get<int>().value();
-    osd_blank.Set(blankMode);
-    return existingBlank;
-  }
-
-  return 0;
-}
-
 static unsigned int aml_vs10_by_hdrtype(StreamHdrType hdrType, unsigned int bitDepth)
 {
   unsigned int vs10_mode = DOLBY_VISION_OUTPUT_MODE_BYPASS;
@@ -2280,6 +2266,19 @@ bool aml_gui_pq_is_final_stage()
   return s_guiPqIsFinalStage.load(std::memory_order_relaxed);
 }
 
+static bool aml_dv_use_sdr_gui(StreamHdrType hdrType, unsigned int mode)
+{
+  // Core2 accepts SDR RGB and performs the graphics transfer/gamut conversion
+  // in hardware. Keep video OSD/subtitles on their existing PQ path. A custom
+  // shader saturation still needs that path, including on the idle desktop.
+  return aml_dv_mode() == DV_MODE_ON && !aml_dv_playback_active() &&
+         hdrType == StreamHdrType::HDR_TYPE_NONE &&
+         (mode == DOLBY_VISION_OUTPUT_MODE_IPT ||
+          mode == DOLBY_VISION_OUTPUT_MODE_IPT_TUNNEL) &&
+         CSysfsPath("/sys/module/amdolby_vision/parameters/aml_linux_osd_sdr8").Exists() &&
+         settings()->GetInt(CSettings::SETTING_VIDEOSCREEN_GUISATURATION_DOLBYVISION) == 50;
+}
+
 void aml_set_linux_osd_sdr8(StreamHdrType hdrType, unsigned int bitDepth,
                             std::optional<unsigned int> override_mode)
 {
@@ -2287,7 +2286,9 @@ void aml_set_linux_osd_sdr8(StreamHdrType hdrType, unsigned int bitDepth,
       override_mode.value_or(aml_vs10_by_hdrtype(hdrType, bitDepth));
 
   bool sdr8;
-  if (vs10_mode == DOLBY_VISION_OUTPUT_MODE_BYPASS)
+  if (aml_dv_use_sdr_gui(hdrType, vs10_mode))
+    sdr8 = true;
+  else if (vs10_mode == DOLBY_VISION_OUTPUT_MODE_BYPASS)
     sdr8 = (hdrType == StreamHdrType::HDR_TYPE_NONE) ||
            (hdrType == StreamHdrType::HDR_TYPE_HLG) ||
            (hdrType == StreamHdrType::HDR_TYPE_HDR_VIVID);
@@ -2297,13 +2298,35 @@ void aml_set_linux_osd_sdr8(StreamHdrType hdrType, unsigned int bitDepth,
     sdr8 = false;
 
   aml_linux_osd_sdr8 = sdr8;
-  CSysfsPath("/sys/module/amdolby_vision/parameters/aml_linux_osd_sdr8", aml_linux_osd_sdr8);
+  CSysfsPath osdSdr8{"/sys/module/amdolby_vision/parameters/aml_linux_osd_sdr8"};
+  if (osdSdr8.Exists())
+  {
+    const auto previous = osdSdr8.Get<std::string>();
+    const bool wasSdr8 = previous && (*previous == "Y" || *previous == "1");
+    osdSdr8.Set(sdr8);
+    if (previous && wasSdr8 != sdr8 && aml_is_dv_enable())
+    {
+      // The parameter has no setter callback. Re-evaluate Core2's g_format
+      // without reloading HDMI or waiting for the next video frame.
+      aml_dv_toggle_frame(aml_dv_dolby_vision_mode());
+    }
+  }
   logComponentM(LOGDEBUG, LOGVIDEO, "amdolby_vision aml_linux_osd_sdr8 [{}]", sdr8 ? "true" : "false");
 }
 
 void aml_set_transfer_pq(StreamHdrType hdrType, unsigned int bitDepth,
                          std::optional<unsigned int> override_mode)
 {
+  const unsigned int vs10_mode =
+      override_mode.value_or(aml_vs10_by_hdrtype(hdrType, bitDepth));
+  // Match Core2's input format; the HDMI output remains Dolby Vision.
+  if (aml_is_dv_enable() && aml_dv_use_sdr_gui(hdrType, vs10_mode))
+  {
+    CServiceBroker::GetWinSystem()->GetGfxContext().SetTransferPQ(false);
+    logM(LOGDEBUG, "DV idle GUI: SDR RGB rendered directly, Core2 performs output transfer");
+    return;
+  }
+
   // Configure GUI/OSD for HDR PQ when display is in HDR PQ mode
   bool hdr_display(CServiceBroker::GetWinSystem()->IsHDRDisplay() || aml_display_support_dv());
   bool dv_on(aml_is_dv_enable());
@@ -2318,7 +2341,6 @@ void aml_set_transfer_pq(StreamHdrType hdrType, unsigned int bitDepth,
 
     // Check for vs10 up or down mapping.
     if (dv_on) {
-      unsigned int vs10_mode = override_mode.value_or(aml_vs10_by_hdrtype(hdrType, bitDepth));
       hdr = (((vs10_mode == DOLBY_VISION_OUTPUT_MODE_BYPASS) && hdr) ||
               (vs10_mode <= DOLBY_VISION_OUTPUT_MODE_HDR10));
     }

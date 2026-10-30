@@ -135,7 +135,6 @@ void aml_dv_set_vs10_mode(unsigned int mode, StreamHdrType hdrType, bool force =
 void aml_dv_wait_video_off(int timeout);
 int aml_blackout_policy(int new_blackout);
 void aml_set_mpeg2_keep_progressive(bool enable);
-int aml_osd_blank(int fbIndex, int blankMode);
 unsigned int aml_dv_on(unsigned int mode, bool force = false);
 void aml_dv_off(bool restoreFollows = false);
 void aml_set_perf_governors_for_playback();

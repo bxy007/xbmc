@@ -140,11 +140,13 @@ bool CWinSystemAmlogicGLESContext::CreateNewWindow(const std::string& name,
     cur_fractional_rate = amhdmitx0_frac_rate_policy.Get<int>().value();
   }
 
-  // If changing in or out of Dolby Vision and it is on then make sure we do a mode swtich - TODO: combine with DV InfoFrame?
-  StreamHdrType hdrType = CServiceBroker::GetWinSystem()->GetGfxContext().GetHDRType();
+  // Content HDR can change while global DV keeps the same HDMI output. Only
+  // a change of output signalling requires the extra DV mode switch.
+  const StreamHdrType hdrType = GetGfxContext().GetHDRType();
+  const StreamHdrType outputHdrType = aml_get_output_hdr_type(hdrType);
   bool force_mode_switch_by_dv =
-         ((hdrType != m_hdrType) &&
-          ((hdrType == StreamHdrType::HDR_TYPE_DOLBYVISION) || (m_hdrType == StreamHdrType::HDR_TYPE_DOLBYVISION)) &&
+         ((outputHdrType != m_outputHdrType) &&
+          ((outputHdrType == StreamHdrType::HDR_TYPE_DOLBYVISION) || (m_outputHdrType == StreamHdrType::HDR_TYPE_DOLBYVISION)) &&
        (aml_dv_mode() != DV_MODE_OFF));
 
   // get current used resolution
@@ -155,15 +157,18 @@ bool CWinSystemAmlogicGLESContext::CreateNewWindow(const std::string& name,
   }
 
   const std::string new_hdrStr = CStreamDetails::HdrTypeToString(hdrType);
-  const std::string old_hdrStr = CStreamDetails::HdrTypeToString(m_hdrType);
+  const std::string output_hdrStr = CStreamDetails::HdrTypeToString(outputHdrType);
+  const std::string old_hdrStr = CStreamDetails::HdrTypeToString(m_outputHdrType);
   CLog::Log(LOGDEBUG, "CWinSystemAmlogicGLESContext::{}: "
     "m_bWindowCreated: {}, "
     "frac rate {:d}({:d}), "
-    "hdrType: {}({}), force mode switch: {}",
+    "content HDR: {}, output HDR: {}({}), force mode switch: {}",
     __FUNCTION__,
     m_bWindowCreated,
     fractional_rate, cur_fractional_rate,
-    new_hdrStr.empty() ? "none" : new_hdrStr, old_hdrStr.empty() ? "none" : old_hdrStr, force_mode_switch_by_dv);
+    new_hdrStr.empty() ? "none" : new_hdrStr,
+    output_hdrStr.empty() ? "none" : output_hdrStr,
+    old_hdrStr.empty() ? "none" : old_hdrStr, force_mode_switch_by_dv);
   CLog::Log(LOGDEBUG, "CWinSystemAmlogicGLESContext::{}: "
     "cur: iWidth: {:04d}, iHeight: {:04d}, iScreenWidth: {:04d}, iScreenHeight: {:04d}, fRefreshRate: {:02.2f}, dwFlags: {:02x}",
     __FUNCTION__,
@@ -207,7 +212,6 @@ bool CWinSystemAmlogicGLESContext::CreateNewWindow(const std::string& name,
     m_force_mode_switch = true;
 
   // refresh backup data
-  m_hdrType = hdrType;
   m_stereo_mode = stereo_mode;
   m_bFullScreen = fullScreen;
 
@@ -218,13 +222,13 @@ bool CWinSystemAmlogicGLESContext::CreateNewWindow(const std::string& name,
 
   if (!m_pGLContext.CreateSurface(static_cast<EGLNativeWindowType>(m_nativeWindow)))
   {
-    EndModeSwitchBlank();
+    EndModeSwitch();
     return false;
   }
 
   if (!m_pGLContext.BindContext())
   {
-    EndModeSwitchBlank();
+    EndModeSwitch();
     return false;
   }
 
@@ -236,9 +240,11 @@ bool CWinSystemAmlogicGLESContext::CreateNewWindow(const std::string& name,
     for (auto i = m_resources.begin(); i != m_resources.end(); ++i)
       (*i)->OnResetDisplay();
 
-    EndModeSwitchBlank();
+    EndModeSwitch();
   }
 
+  // Deferred DV activation is applied by the native mode write above.
+  m_outputHdrType = aml_get_output_hdr_type(hdrType);
   return true;
 }
 
@@ -271,7 +277,7 @@ void CWinSystemAmlogicGLESContext::SetVSyncImpl(bool enable)
 
 void CWinSystemAmlogicGLESContext::PresentRenderImpl(bool rendered)
 {
-  OsdReassertTick();
+  ProcessPendingVideoModeSwitch();
   aml_dv_display_trigger_tick();
   if (m_delayDispReset && m_dispResetTimer.IsTimePast())
   {
@@ -283,7 +289,7 @@ void CWinSystemAmlogicGLESContext::PresentRenderImpl(bool rendered)
     for (auto i = m_resources.begin(); i != m_resources.end(); ++i)
       (*i)->OnResetDisplay();
 
-    EndModeSwitchBlank();
+    EndModeSwitch();
   }
   if (!rendered)
     return;
