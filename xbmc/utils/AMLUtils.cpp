@@ -43,6 +43,7 @@
 #include "utils/StringUtils.h"
 #include "utils/AudioSyncReset.h"
 #include "windowing/GraphicContext.h"
+#include "windowing/amlogic/WinSystemAmlogic.h"
 #include "utils/RegExp.h"
 #include "filesystem/SpecialProtocol.h"
 #include "rendering/RenderSystem.h"
@@ -72,6 +73,15 @@ static std::atomic<bool> s_guiPqIsFinalStage{false};
 static std::atomic<bool> aml_bdj_overlay_active{false};
 static std::atomic<bool> s_dvDiscSession{false};
 static std::atomic<bool> s_dvPlaybackActive{false};
+struct PendingDvOutput
+{
+  StreamHdrType hdrType;
+  unsigned int bitDepth;
+  AVColorPrimaries colorPrimaries;
+};
+// Accessed under s_dvCoreMutex. Decoder setup can precede HDMI activation.
+static std::optional<PendingDvOutput> s_pendingDvOutput;
+static thread_local bool s_dvTargetModeFollows{false};
 static AVColorPrimaries s_currentColorPrimaries = AVCOL_PRI_UNSPECIFIED;
 static std::mutex s_lastDisplayModeMutex;
 static std::string s_lastDisplayMode;
@@ -1636,8 +1646,28 @@ unsigned int aml_dv_on(unsigned int mode, bool force)
 
     if ((mode == DOLBY_VISION_OUTPUT_MODE_IPT_TUNNEL) || (mode == DOLBY_VISION_OUTPUT_MODE_IPT))
     {
-      aml_dv_trigger_update_resolution(StreamHdrType::HDR_TYPE_DOLBYVISION); // Required for 60Hz VS10 > DV.
-      aml_dv_display_auto_now();
+      // Publish the HDR override before allowing the GUI thread to apply the
+      // pending startup mode, so it cannot briefly choose an SDR target.
+      if (!s_dvTargetModeFollows)
+        aml_dv_trigger_update_resolution(StreamHdrType::HDR_TYPE_DOLBYVISION);
+      bool deferDisplayRefresh = s_dvTargetModeFollows;
+      auto* window = dynamic_cast<CWinSystemAmlogic*>(CServiceBroker::GetWinSystem());
+      if (!deferDisplayRefresh && window &&
+          settings()->GetInt(CSettings::SETTING_VIDEOPLAYER_ADJUSTREFRESHRATE) !=
+                        ADJUST_REFRESHRATE_OFF)
+        deferDisplayRefresh = window->DeferVideoModeSwitch();
+      // The renderer will apply DV wire attributes with its chosen video mode.
+      // Reloading the desktop here needlessly changes its HDR signaling first.
+      if (!deferDisplayRefresh)
+      {
+        aml_dv_display_auto_now();
+        // With automatic refresh switching disabled there is no target mode
+        // to wait for. The current wire is ready, so reveal the GUI now.
+        if (window)
+          window->CancelVideoModeSwitch();
+      }
+      else
+        logM(LOGDEBUG, "DV startup HDMI refresh deferred to target video mode");
     }
   }
 
@@ -1762,9 +1792,14 @@ void aml_dv_off(bool restoreFollows)
        restoreWillWrite);
 }
 
-void aml_dv_open(StreamHdrType hdrType, unsigned int bitDepth, AVColorPrimaries colorPrimaries, bool swDecoded)
+static void aml_dv_open_impl(StreamHdrType hdrType,
+                             unsigned int bitDepth,
+                             AVColorPrimaries colorPrimaries,
+                             bool swDecoded,
+                             bool allowDeferred)
 {
-  s_dvPlaybackActive = true;
+  if (allowDeferred)
+    s_dvPlaybackActive = true;
 
   CDVCoreGuard dvlock(__FUNCTION__);
   if (!dvlock.Owns())
@@ -1784,6 +1819,34 @@ void aml_dv_open(StreamHdrType hdrType, unsigned int bitDepth, AVColorPrimaries 
   aml_dv_refresh_vs10_converting(hdrType, bitDepth);
 
   enum DV_MODE dv_mode(aml_dv_mode());
+  const unsigned int live_mode = aml_dv_dolby_vision_mode();
+  const bool entering_ipt = !swDecoded && dv_mode != DV_MODE_OFF &&
+      (stream_vs10_mode == DOLBY_VISION_OUTPUT_MODE_IPT ||
+       stream_vs10_mode == DOLBY_VISION_OUTPUT_MODE_IPT_TUNNEL) &&
+      (!aml_is_dv_enable() ||
+       (live_mode != DOLBY_VISION_OUTPUT_MODE_IPT &&
+        live_mode != DOLBY_VISION_OUTPUT_MODE_IPT_TUNNEL));
+  if (entering_ipt && allowDeferred)
+  {
+    if (auto* window = dynamic_cast<CWinSystemAmlogic*>(CServiceBroker::GetWinSystem()))
+    {
+      window->PrepareVideoModeSwitch();
+      auto& cache = CServiceBroker::GetDataCacheCore();
+      if (settings()->GetInt(CSettings::SETTING_VIDEOPLAYER_ADJUSTREFRESHRATE) !=
+              ADJUST_REFRESHRATE_OFF &&
+          cache.GetVideoFps() > 0 && cache.GetVideoWidth() > 0 && cache.GetVideoHeight() > 0)
+      {
+        s_pendingDvOutput = PendingDvOutput{hdrType, bitDepth, colorPrimaries};
+        aml_dv_trigger_update_resolution(StreamHdrType::HDR_TYPE_DOLBYVISION);
+        if (window->DeferVideoModeSwitch())
+        {
+          logM(LOGDEBUG, "DV startup output queued for adjacent target mode activation");
+          return;
+        }
+        s_pendingDvOutput.reset();
+      }
+    }
+  }
   if (s_dvDiscSession)
   {
     const bool outputDovi = !swDecoded &&
@@ -1859,9 +1922,52 @@ void aml_dv_open(StreamHdrType hdrType, unsigned int bitDepth, AVColorPrimaries 
        static_cast<int>(dv_mode), aml_is_dv_enable());
 }
 
+void aml_dv_open(StreamHdrType hdrType, unsigned int bitDepth, AVColorPrimaries colorPrimaries, bool swDecoded)
+{
+  aml_dv_open_impl(hdrType, bitDepth, colorPrimaries, swDecoded, true);
+}
+
+bool aml_dv_decoder_enabled()
+{
+  CDVCoreGuard dvlock(__FUNCTION__);
+  return dvlock.Owns() &&
+         (aml_is_dv_enable() || (s_dvPlaybackActive && s_pendingDvOutput.has_value()));
+}
+
+bool aml_dv_apply_pending_output()
+{
+  CDVCoreGuard dvlock(__FUNCTION__);
+  if (!dvlock.Owns() || !s_pendingDvOutput)
+    return false;
+  const auto pending = s_pendingDvOutput.value();
+  s_pendingDvOutput.reset();
+  if (!s_dvPlaybackActive)
+    return false;
+
+  struct TargetModeScope
+  {
+    const bool previous{s_dvTargetModeFollows};
+    TargetModeScope() { s_dvTargetModeFollows = true; }
+    ~TargetModeScope() { s_dvTargetModeFollows = previous; }
+  } targetModeScope;
+  logM(LOGDEBUG, "DV startup output activation adjacent to target mode write");
+  aml_dv_open_impl(pending.hdrType, pending.bitDepth, pending.colorPrimaries, false, false);
+  return aml_is_dv_enable();
+}
+
 void aml_dv_close()
 {
   s_dvPlaybackActive = false;
+
+  // Keep cancellation after the DV cleanup, including its early-return paths.
+  struct CancelPendingModeSwitch
+  {
+    ~CancelPendingModeSwitch()
+    {
+      if (auto* window = dynamic_cast<CWinSystemAmlogic*>(CServiceBroker::GetWinSystem()))
+        window->CancelVideoModeSwitch();
+    }
+  } cancelPendingModeSwitch;
 
   CDVCoreGuard dvlock(__FUNCTION__);
   if (!dvlock.Owns())
@@ -1870,6 +1976,7 @@ void aml_dv_close()
     return;
   }
   const auto t_close_start = std::chrono::steady_clock::now();
+  s_pendingDvOutput.reset();
 
   s_currentColorPrimaries = AVCOL_PRI_UNSPECIFIED;
 
@@ -2755,6 +2862,10 @@ bool aml_set_display_resolution(const RESOLUTION_INFO &res, std::string framebuf
   else
     CLog::Log(LOGDEBUG, "{}: try to set mode: {}", __FUNCTION__, mode.c_str());
 
+  // Keep DV packet activation adjacent to the actual HDMI target write, after
+  // EGL/window preparation. Apply it before taking the HDMI lock: DV setup
+  // takes the DV-core lock and then the HDMI lock in that order.
+  aml_dv_apply_pending_output();
   CAmlHdmiWireGuard wire(__FUNCTION__);
 
   CSysfsPath display_mode{"/sys/class/display/mode"};

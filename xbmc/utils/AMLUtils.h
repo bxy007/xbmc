@@ -144,6 +144,8 @@ void aml_restore_governors_after_playback();
 unsigned int aml_dv_dolby_vision_mode();
 void aml_dv_open(StreamHdrType hdrType, unsigned int bitDepth, AVColorPrimaries colorPrimaries = AVCOL_PRI_UNSPECIFIED, bool swDecoded = false);
 void aml_dv_close();
+bool aml_dv_decoder_enabled();
+bool aml_dv_apply_pending_output();
 bool aml_dv_playback_active();
 void aml_dv_restore_gui_osd_max();
 void aml_dv_set_osd_max(int max);

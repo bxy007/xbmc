@@ -1890,7 +1890,7 @@ bool CAMLCodec::OpenDecoder(bool restart)
   SetProcessInfoVideoDetails();
 
   // Setup Codec for DV Content
-  if ((hints.hdrType == StreamHdrType::HDR_TYPE_DOLBYVISION) && aml_is_dv_enable())
+  if ((hints.hdrType == StreamHdrType::HDR_TYPE_DOLBYVISION) && aml_dv_decoder_enabled())
   {
     am_private->gcodec.dv_enable = 1;
     if (!hints.interlaced && !m_dvblpathVfmMap.empty())

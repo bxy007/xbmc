@@ -41,6 +41,10 @@
 #include "windowing/GraphicContext.h"
 #include "windowing/WinSystem.h"
 
+#if defined(HAS_LIBAMCODEC)
+#include "windowing/amlogic/WinSystemAmlogic.h"
+#endif
+
 #include <algorithm>
 #include <cmath>
 #include <memory>
@@ -1909,7 +1913,15 @@ void CRenderManager::UpdateResolution(bool force)
 
   if (m_bTriggerUpdateResolution)
   {
-    if (force ||
+    bool earlyDvStartup = false;
+#if defined(HAS_LIBAMCODEC)
+    if (auto* window = dynamic_cast<CWinSystemAmlogic*>(CServiceBroker::GetWinSystem()))
+      earlyDvStartup = window->IsVideoModeSwitchPending();
+#endif
+    // Stream hints already supplied dimensions/fps before decoder startup.
+    // Once DV is ready, overlap the target modeset with first-frame decoding
+    // instead of keeping the receiver in desktop timing until fullscreen.
+    if (force || earlyDvStartup ||
         (CServiceBroker::GetWinSystem()->GetGfxContext().IsFullScreenVideo() &&
          CServiceBroker::GetWinSystem()->GetGfxContext().IsFullScreenRoot()))
     {

@@ -17,6 +17,8 @@
 #include <EGL/fbdev_window.h>
 #include "DolbyVisionAML.h"
 
+#include <mutex>
+
 class IDispResource;
 
 class CWinSystemAmlogic : public CWinSystemBase
@@ -46,6 +48,10 @@ public:
   bool Show(bool show = true) override;
   virtual void Register(IDispResource *resource);
   virtual void Unregister(IDispResource *resource);
+  void PrepareVideoModeSwitch();
+  bool DeferVideoModeSwitch();
+  bool IsVideoModeSwitchPending();
+  void CancelVideoModeSwitch();
 protected:
   void BeginModeSwitchBlank();
   void EndModeSwitchBlank();
@@ -71,5 +77,11 @@ protected:
   int m_osdReassertFrames{0};
 
 private:
+  void BeginModeSwitchBlankLocked();
+  void EndModeSwitchBlankLocked();
+  std::mutex m_modeSwitchBlankMutex;
+  bool m_videoModeSwitchPrepared{false};
+  bool m_videoModeSwitchRefreshDeferred{false};
+  XbmcThreads::EndTime<> m_videoModeSwitchBlankTimer;
   std::unique_ptr<CDolbyVisionAML> m_dolbyVisionAML;
 };
