@@ -156,6 +156,7 @@ public:
   static constexpr auto SETTING_LOCALE_SUBTITLELANGUAGE = "locale.subtitlelanguage";
   static constexpr auto SETTING_SUBTITLES_PARSECAPTIONS = "subtitles.parsecaptions";
   static constexpr auto SETTING_SUBTITLES_PGSVERTICALMODE = "subtitles.pgsverticalmode";
+  static constexpr auto SETTING_SUBTITLES_PGSCOLORSPACE = "subtitles.pgscolorspace";
   static constexpr auto SETTING_SUBTITLES_PGSVERTICALOFFSET = "subtitles.pgsverticaloffset";
   static constexpr auto SETTING_SUBTITLES_BITMAPZOOM = "subtitles.bitmapzoom";
   static constexpr auto SETTING_SUBTITLES_PGSMANUALACTIVEASPECT = "subtitles.pgsmanualactiveaspect";

@@ -2332,6 +2332,7 @@ CDemuxStream* CDVDDemuxFFmpeg::AddStream(int streamIdx)
         {
           auto st = new CDemuxStreamSubtitleFFmpeg(pStream);
           stream = st;
+          st->colorTransferCharacteristic = pStream->codecpar->color_trc;
 
           if (auto tag = av_dict_get(pStream->metadata, "title", nullptr, 0))
             st->m_description = tag->value;

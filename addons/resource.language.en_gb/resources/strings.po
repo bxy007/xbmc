@@ -26922,3 +26922,19 @@ msgstr ""
 msgctxt "#69999"
 msgid "Enable this to disable noise reduction. Requires reboot. FOR BETTER VIDEO PROCESSING LEAVE THIS SETTING ENABLED (i.e., DISABLE NOISE REDUCTION)."
 msgstr ""
+
+msgctxt "#65121"
+msgid "PGS subtitle colour space"
+msgstr ""
+
+msgctxt "#65122"
+msgid "Auto uses the subtitle transfer tag when present, otherwise the video HDR type. For SDR PGS mixed into HDR video choose SDR; for untagged HDR PGS choose HDR. Changes in the playback subtitle settings reopen the current subtitle track; changes in the main settings apply when the track is next opened."
+msgstr ""
+
+msgctxt "#65123"
+msgid "SDR (BT.709)"
+msgstr ""
+
+msgctxt "#65124"
+msgid "HDR (BT.2020 PQ)"
+msgstr ""

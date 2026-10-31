@@ -15,6 +15,7 @@
 #include "cores/VideoPlayer/Interface/DemuxPacket.h"
 #include "cores/VideoPlayer/Interface/TimingConstants.h"
 #include "settings/AdvancedSettings.h"
+#include "settings/Settings.h"
 #include "settings/SettingsComponent.h"
 #include "utils/EndianSwap.h"
 #include "utils/log.h"
@@ -30,8 +31,19 @@ extern "C"
 
 namespace
 {
-bool PgsIsPqAuthored(const CDVDStreamInfo& hints)
+bool PgsIsPqAuthored(const CDVDStreamInfo& hints, int colorSpace)
 {
+  if (colorSpace == 1)
+    return false;
+  if (colorSpace == 2)
+    return true;
+
+  // Prefer a subtitle stream's own transfer tag. An untagged PGS has no
+  // reliable per-pixel HDR detector, so preserve the UHD-video fallback and
+  // allow mixed/remuxed or external tracks to be corrected explicitly.
+  if (hints.colorTransferCharacteristic != AVCOL_TRC_UNSPECIFIED)
+    return hints.colorTransferCharacteristic == AVCOL_TRC_SMPTE2084;
+
   switch (hints.hdrType)
   {
     case StreamHdrType::HDR_TYPE_HDR10:
@@ -136,7 +148,9 @@ bool CDVDOverlayCodecFFmpeg::Open(CDVDStreamInfo &hints, CDVDCodecOptions &optio
   if (m_pCodecContext->codec_id == AV_CODEC_ID_HDMV_PGS_SUBTITLE)
   {
     // UHD-BD HDR PGS is BT.2020 PQ, SDR PGS is SDR BT.709 or SDR BT.2020.
-    m_pgsIsPqAuthored = PgsIsPqAuthored(hints);
+    m_pgsIsPqAuthored = PgsIsPqAuthored(
+        hints, CServiceBroker::GetSettingsComponent()->GetSettings()->GetInt(
+                   CSettings::SETTING_SUBTITLES_PGSCOLORSPACE));
 
     // TODO: identify SDR BT.2020 and do the right thing for the PGS matrix, currently will treat as BT.709.
     const char* matrix = m_pgsIsPqAuthored ? "bt2020" : "auto";

@@ -331,5 +331,6 @@ void CDVDStreamInfo::Assign(const CDemuxStream& right, bool withextradata)
   {
     auto stream = static_cast<const CDemuxStreamSubtitle*>(&right);
     m_3dSubtitlePlane = stream->m_3dSubtitlePlane;
+    colorTransferCharacteristic = stream->colorTransferCharacteristic;
   }
 }

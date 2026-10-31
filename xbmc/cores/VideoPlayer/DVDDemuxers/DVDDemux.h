@@ -218,6 +218,7 @@ public:
   }
 
   int m_3dSubtitlePlane;
+  AVColorTransferCharacteristic colorTransferCharacteristic{AVCOL_TRC_UNSPECIFIED};
 };
 
 class CDemuxStreamTeletext : public CDemuxStream

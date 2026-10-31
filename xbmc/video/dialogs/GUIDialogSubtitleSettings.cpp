@@ -116,6 +116,15 @@ void CGUIDialogSubtitleSettings::OnSettingChanged(const std::shared_ptr<const CS
     m_subtitleStream = std::static_pointer_cast<const CSettingInt>(setting)->GetValue();
     appPlayer->SetSubtitle(m_subtitleStream);
   }
+  else if (settingId == CSettings::SETTING_SUBTITLES_PGSCOLORSPACE)
+  {
+    CServiceBroker::GetSettingsComponent()->GetSettings()->SetInt(
+        settingId, std::static_pointer_cast<const CSettingInt>(setting)->GetValue());
+    // Reopen the subtitle decoder so the palette matrix and overlay tag change
+    // together. Changing only the renderer would retain incorrectly decoded RGB.
+    if (m_subtitleStream >= 0)
+      appPlayer->SetSubtitle(m_subtitleStream);
+  }
   else if (settingId == CSettings::SETTING_SUBTITLES_PGSVERTICALMODE ||
            settingId == CSettings::SETTING_SUBTITLES_PGSVERTICALOFFSET ||
            settingId == CSettings::SETTING_SUBTITLES_BITMAPZOOM ||
@@ -356,6 +365,13 @@ void CGUIDialogSubtitleSettings::InitializeSettings()
   depsPgsAspect.push_back(depPgsAspect);
 
   TranslatableIntegerSettingOptions pgsModeEntries;
+  TranslatableIntegerSettingOptions pgsColorEntries;
+  pgsColorEntries.emplace_back(16316, 0);
+  pgsColorEntries.emplace_back(65123, 1);
+  pgsColorEntries.emplace_back(65124, 2);
+  AddSpinner(groupPgs, CSettings::SETTING_SUBTITLES_PGSCOLORSPACE, 65121, SettingLevel::Basic,
+             settings->GetInt(CSettings::SETTING_SUBTITLES_PGSCOLORSPACE), pgsColorEntries);
+
   pgsModeEntries.emplace_back(65102, 0);
   pgsModeEntries.emplace_back(65103, 1);
   pgsModeEntries.emplace_back(65104, 2);
