@@ -352,13 +352,16 @@ double CAudioSinkAE::GetResampleRatio() const {
   return m_resampleRatio;
 }
 
-void CAudioSinkAE::SetResampleMode(int mode)
+void CAudioSinkAE::SetResampleMode(int mode, double tempo)
 {
   std::lock_guard lock(m_critSection);
 
   if(m_pAudioStream)
   {
     m_pAudioStream->SetResampleMode(mode);
+    // Apply user tempo immediately; the normal sync servo will refine this
+    // ratio afterwards instead of waiting for its next error interval.
+    m_pAudioStream->SetResampleRatio(1.0 / tempo);
   }
 }
 

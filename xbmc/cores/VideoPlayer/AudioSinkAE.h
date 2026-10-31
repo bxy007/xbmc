@@ -55,7 +55,7 @@ public:
    */
   double GetResampleRatio() const;
 
-  void SetResampleMode(int mode);
+  void SetResampleMode(int mode, double tempo = 1.0);
   void SetHybridFirstCycleInterval(std::chrono::milliseconds interval);
   void Flush();
   void Drain();

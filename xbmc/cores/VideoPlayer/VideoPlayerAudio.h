@@ -112,10 +112,12 @@ protected:
 
   bool ProcessDecoderOutput(DVDAudioFrame &audioframe);
   void UpdatePlayerInfo();
-  void OpenStream(CDVDStreamInfo& hints, std::unique_ptr<CDVDAudioCodec> codec);
+  bool OpenStream(CDVDStreamInfo& hints, std::unique_ptr<CDVDAudioCodec> codec);
   //! Switch codec if needed. Called when the sample rate gotten from the
   //! codec changes, in which case we may want to switch passthrough on/off.
   bool SwitchCodecIfNeeded();
+  double GetTempo();
+  int GetSyncType(bool passthrough);
   void SetSyncType(bool passthrough);
 
   CDVDMessageQueue m_messageQueue;
@@ -136,6 +138,8 @@ protected:
   BitstreamStats m_audioStats;
 
   int m_speed;
+  int m_speedBeforePause{DVD_PLAYSPEED_NORMAL};
+  std::atomic_bool m_allowPassthrough{true};
   std::atomic_bool m_stalled{true};
   bool m_paused;
   IDVDStreamPlayer::ESyncState m_syncState;
@@ -152,6 +156,8 @@ protected:
 
   int m_synctype;
   int m_prevsynctype;
+  double m_prevTempo{1.0};
+  bool m_normalResample{false};
 
   bool   m_prevskipped;
   double m_maxspeedadjust;

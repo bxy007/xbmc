@@ -528,7 +528,6 @@ protected:
   int64_t m_brokenFileStallBytes = -1;
 
   ECacheState  m_caching;
-  bool m_bPassthroughTempFallback{false};
   XbmcThreads::EndTime<> m_cachingTimer;
 
   std::chrono::steady_clock::time_point m_eofRenderWaitStart{};

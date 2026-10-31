@@ -4886,23 +4886,11 @@ bool CVideoPlayer::CanTempo()
 
 void CVideoPlayer::UpdateAudioPassthroughForSpeed(double speed)
 {
-  if (!m_VideoPlayerAudio)
+  // Pausing must retain the policy of the speed that will be resumed.
+  if (!m_VideoPlayerAudio || speed == 0.0)
     return;
 
-  const bool isNonNormalSpeed = (speed != 1.0 && speed != 0.0);
-
-  if (isNonNormalSpeed && m_VideoPlayerAudio->IsPassthrough() && !m_bPassthroughTempFallback)
-  {
-    CLog::Log(LOGINFO, "CVideoPlayer::UpdateAudioPassthroughForSpeed: non-normal speed ({:.2f}x), temporarily disabling passthrough for audio tempo", speed);
-    m_bPassthroughTempFallback = true;
-    m_VideoPlayerAudio->SetAllowPassthrough(false);
-  }
-  else if (!isNonNormalSpeed && m_bPassthroughTempFallback)
-  {
-    CLog::Log(LOGINFO, "CVideoPlayer::UpdateAudioPassthroughForSpeed: returning to normal speed, restoring passthrough");
-    m_bPassthroughTempFallback = false;
-    m_VideoPlayerAudio->SetAllowPassthrough(true);
-  }
+  m_VideoPlayerAudio->SetAllowPassthrough(speed == 1.0);
 }
 
 
