@@ -2968,7 +2968,14 @@ void CAMLCodec::SetSpeed(int speed, bool force)
       break;
     default:
       if ((am_private->video_format == VFORMAT_H264) || (am_private->video_format == VFORMAT_H264_4K2K))
-        m_dll->codec_set_cntl_mode(&am_private->vcodec, TRICKMODE_FFFB);
+      {
+        // Tempo is paced by Kodi's render clock. The H.264 FFFB frame-done
+        // handshake can throttle that path below the requested frame rate.
+        const bool tempo = m_processInfo.IsTempoAllowed(
+            static_cast<float>(speed) / DVD_PLAYSPEED_NORMAL);
+        m_dll->codec_set_cntl_mode(&am_private->vcodec,
+                                  tempo ? TRICKMODE_NONE : TRICKMODE_FFFB);
+      }
       else
         m_dll->codec_set_cntl_mode(&am_private->vcodec, TRICKMODE_I);
       break;
