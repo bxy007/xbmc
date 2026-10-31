@@ -3294,6 +3294,13 @@ std::string CAMLCodec::GetHDRStaticMetadata() const
 
   switch(am_private->video_format)
   {
+    case VFORMAT_HEVC:
+      if (m_hints.hdrType == StreamHdrType::HDR_TYPE_DOLBYVISION &&
+          m_hints.dovi_el_type == DOVIELType::TYPE_FEL &&
+          am_private->gcodec.dv_enable &&
+          am_private->gcodec.dec_mode == STREAM_TYPE_STREAM)
+        config_data = "hevc_fel_preroll:1;";
+      break;
     // add static HDR metadata for VP9 content
     case VFORMAT_VP9:
       if (m_hints.masteringMetadata)
