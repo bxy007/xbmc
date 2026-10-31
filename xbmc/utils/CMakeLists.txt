@@ -123,6 +123,7 @@ set(HEADERS ActorProtocol.h
             FileOperationJob.h
             FileUtils.h
             FontUtils.h
+            FrameRateEstimator.h
             Geometry.h
             GlobalsHandling.h
             GpuInfo.h

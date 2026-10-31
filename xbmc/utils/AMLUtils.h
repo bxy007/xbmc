@@ -230,6 +230,7 @@ bool aml_set_reg_ignore_alpha();
 bool aml_unset_reg_ignore_alpha();
 std::string aml_video_fps_info();
 std::string aml_video_fps_drop();
+std::optional<double> aml_video_output_fps();
 bool aml_get_vsync_edge(int64_t& lastVsyncTs);
 bool aml_get_time_until_vsync_phase_us(int afterVsyncUs, int& timeUntilPhaseUs);
 unsigned int aml_dv_video_processor_mode();

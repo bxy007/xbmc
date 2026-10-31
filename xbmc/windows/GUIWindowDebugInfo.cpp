@@ -12,7 +12,8 @@
 #include "GUIInfoManager.h"
 #include "ServiceBroker.h"
 #include "addons/Skin.h"
-#include "cores/DataCacheCore.h"
+#include "application/ApplicationComponents.h"
+#include "application/ApplicationPlayer.h"
 #include "filesystem/SpecialProtocol.h"
 #include "guilib/GUIComponent.h"
 #include "guilib/GUIControlFactory.h"
@@ -28,6 +29,12 @@
 #include "utils/StringUtils.h"
 #include "utils/Variant.h"
 #include "utils/log.h"
+
+#ifdef HAS_LIBAMCODEC
+#include "utils/AMLUtils.h"
+#endif
+
+#include <optional>
 
 #include <inttypes.h>
 
@@ -105,17 +112,23 @@ void CGUIWindowDebugInfo::Process(unsigned int currentTime, CDirtyRegionList &di
     std::string lcAppName = CCompileInfo::GetAppName();
     StringUtils::ToLower(lcAppName);
 
-    const float videoFps = CServiceBroker::GetDataCacheCore().GetVideoFps();
+    const auto player = CServiceBroker::GetAppComponents().GetComponent<CApplicationPlayer>();
+    const bool playingVideo = player && player->IsPlayingVideo();
     const float guiFps = CServiceBroker::GetGUI()
                              ->GetInfoManager()
                              .GetInfoProviders()
                              .GetSystemInfoProvider()
                              .GetFPS();
     std::string fpsInfo;
-    if (videoFps > 0.0f)
-      fpsInfo = StringUtils::Format("FPS: {:.3f} RM: {:.3f}", videoFps, guiFps / videoFps);
+    std::optional<double> videoOutputFps;
+#ifdef HAS_LIBAMCODEC
+    videoOutputFps = aml_video_output_fps();
+#endif
+    if (playingVideo)
+      fpsInfo = videoOutputFps ? StringUtils::Format("FPS: {:.3f} (Video)", *videoOutputFps)
+                               : "FPS: -- (Video)";
     else
-      fpsInfo = StringUtils::Format("FPS: {:.3f} (GUI) RM: -", guiFps);
+      fpsInfo = StringUtils::Format("FPS: {:.3f} (GUI)", guiFps);
 #if !defined(TARGET_POSIX)
     info = StringUtils::Format("LOG: {}{}.log\nMEM: {}/{} KB - {}\nCPU: {}{}",
                                CSpecialProtocol::TranslatePath("special://logpath"), lcAppName,

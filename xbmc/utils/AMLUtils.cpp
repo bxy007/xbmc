@@ -39,6 +39,7 @@
 #include "application/ApplicationPlayer.h"
 #include "cores/DataCacheCore.h"
 #include "utils/LogThrottle.h"
+#include "utils/FrameRateEstimator.h"
 #include "utils/log.h"
 #include "utils/StringUtils.h"
 #include "utils/AudioSyncReset.h"
@@ -3186,96 +3187,76 @@ bool aml_unset_reg_ignore_alpha()
   return false;
 }
 
-struct FpsData {
-  unsigned int input_fps;
-  unsigned int output_fps;
-  std::chrono::steady_clock::time_point timestamp;
-};
-
-struct FpsInfo {
-  unsigned int avg_input_fps;
-  unsigned int avg_output_fps;
-  unsigned int avg_drop_fps;
-};
-
 struct FormattedFpsInfo {
   std::string basic_info;
   std::string drop_info;
 };
 
-FpsInfo gather_fps_data() {
+static std::optional<uint32_t> ReadVideoFrameCounter(const char* path)
+{
+  CSysfsPath counter{path};
+  const auto text = counter.Get<std::string>();
+  if (!text)
+    return std::nullopt;
 
-  static std::vector<FpsData> fps_history;
-  static const std::chrono::seconds HISTORY_DURATION(1);
-  static const std::chrono::milliseconds SAMPLE_INTERVAL(100);
-  static std::chrono::steady_clock::time_point last_sample_time;
-  static bool sample_valid = false;
-  static unsigned int cached_input_fps = 0;
-  static unsigned int cached_output_fps = 0;
+  uint32_t value = 0;
+  const char* const end = text->data() + text->size();
+  const auto parsed = std::from_chars(text->data(), end, value);
+  if (parsed.ec != std::errc() || parsed.ptr != end)
+    return std::nullopt;
+  return value;
+}
 
-  auto now = std::chrono::steady_clock::now();
-  bool sample_updated = false;
+static std::optional<CFrameRateEstimator::Rates> gather_fps_data()
+{
+  static std::mutex mutex;
+  static CFrameRateEstimator estimator;
+  static std::optional<CFrameRateEstimator::Rates> cached;
+  static CFrameRateEstimator::Clock::time_point lastSample;
+  std::lock_guard lock(mutex);
 
-  if (!sample_valid || (now - last_sample_time) >= SAMPLE_INTERVAL) {
-    CSysfsPath fps_info{"/sys/class/video/fps_info"};
-    if (fps_info.Exists()) {
-
-      std::string input = fps_info.Get<std::string>().value();
-      unsigned int input_fps, output_fps;
-      std::istringstream iss(input);
-
-      if ((iss.ignore(std::numeric_limits<std::streamsize>::max(), ':') && iss >> std::hex >> input_fps) &&
-          (iss.ignore(std::numeric_limits<std::streamsize>::max(), ':') && iss >> std::hex >> output_fps)) {
-        cached_input_fps = input_fps;
-        cached_output_fps = output_fps;
-        sample_valid = true;
-        sample_updated = true;
-      }
-    }
-
-    last_sample_time = now;
+  const auto player = CServiceBroker::GetAppComponents().GetComponent<CApplicationPlayer>();
+  if (!player || !player->IsPlayingVideo() ||
+      !CServiceBroker::GetDataCacheCore().IsVideoHwDecoder() ||
+      !StringUtils::StartsWith(CServiceBroker::GetDataCacheCore().GetVideoDecoderName(), "am-"))
+  {
+    estimator.Reset();
+    cached.reset();
+    lastSample = {};
+    return cached;
   }
 
-  if (sample_valid && sample_updated) {
-    fps_history.push_back({cached_input_fps, cached_output_fps, now});
+  const auto now = CFrameRateEstimator::Clock::now();
+  if (lastSample.time_since_epoch().count() != 0 &&
+      now - lastSample < std::chrono::milliseconds(100))
+    return cached;
+  lastSample = now;
+
+  const auto input = ReadVideoFrameCounter("/sys/module/amvideo/parameters/receive_frame_count");
+  const auto output = ReadVideoFrameCounter("/sys/module/amvideo/parameters/display_frame_count");
+  if (!input || !output)
+  {
+    estimator.Reset();
+    cached.reset();
+    return cached;
   }
-
-  fps_history.erase(
-    std::remove_if(
-        fps_history.begin(), fps_history.end(),
-        [&now](const FpsData& data) {
-          return (now - data.timestamp) > HISTORY_DURATION;
-        }
-      ), fps_history.end()
-  );
-
-  if (!fps_history.empty()) {
-    double avg_input_fps = 0;
-    double avg_output_fps = 0;
-    double avg_drop_fps = 0;
-
-    for (const auto& data : fps_history) {
-      avg_input_fps += data.input_fps;
-      avg_output_fps += data.output_fps;
-    }
-
-    avg_input_fps /= fps_history.size();
-    avg_output_fps /= fps_history.size();
-    avg_drop_fps = (avg_input_fps > avg_output_fps) ? (avg_input_fps - avg_output_fps) : 0.0;
-
-    return {
-      static_cast<unsigned int>(avg_input_fps + 0.5),
-      static_cast<unsigned int>(avg_output_fps + 0.5),
-      static_cast<unsigned int>(avg_drop_fps + 0.5)
-    };
-  }
-
-  return {0, 0, 0};
+  cached = estimator.Sample(now, *input, *output);
+  return cached;
 }
 
 FormattedFpsInfo format_fps_info() {
 
-  FpsInfo info = gather_fps_data();
+  const auto info = gather_fps_data();
+  static unsigned int lowest_avg_output_fps = 0;
+  static std::chrono::steady_clock::time_point last_drop_time;
+  static std::string drop_info;
+  if (!info)
+  {
+    lowest_avg_output_fps = 0;
+    last_drop_time = {};
+    drop_info.clear();
+    return {"--- - --- - ---", ""};
+  }
 
   // Format basic info
   static int rotation_index = 0;
@@ -3286,9 +3267,9 @@ FormattedFpsInfo format_fps_info() {
 
   std::ostringstream basic_info;
   basic_info << std::fixed << std::setprecision(0) << std::setfill('0')
-              << std::setw(3) << info.avg_input_fps << " - "
-              << std::setw(3) << info.avg_output_fps << " - "
-              << std::setw(3) << info.avg_drop_fps;
+              << std::setw(3) << std::lround(info->input) << " - "
+              << std::setw(3) << std::lround(info->output) << " - "
+              << std::setw(3) << std::lround(info->difference);
 
   auto now = std::chrono::steady_clock::now();
   if ((now - last_update) >= UPDATE_INTERVAL) {
@@ -3299,17 +3280,15 @@ FormattedFpsInfo format_fps_info() {
   basic_info << " " << rotation_chars[rotation_index];
 
   // Format drop info
-  static unsigned int lowest_avg_output_fps = 0;
-  static std::chrono::steady_clock::time_point last_drop_time;
   const std::chrono::seconds HOLD_PERIOD(3);
-  static std::string drop_info = "";
 
-  if (info.avg_output_fps < info.avg_input_fps) {
-      if (lowest_avg_output_fps == 0 || info.avg_output_fps < lowest_avg_output_fps) {
-          lowest_avg_output_fps = info.avg_output_fps;
+  const unsigned int outputFps = static_cast<unsigned int>(std::lround(info->output));
+  if (std::lround(info->difference) > 0) {
+      if (lowest_avg_output_fps == 0 || outputFps < lowest_avg_output_fps) {
+          lowest_avg_output_fps = outputFps;
           last_drop_time = now;
       } else if (now - last_drop_time >= HOLD_PERIOD) {
-          lowest_avg_output_fps = info.avg_output_fps;
+          lowest_avg_output_fps = outputFps;
           last_drop_time = now;
       }
       drop_info = std::to_string(lowest_avg_output_fps);
@@ -3329,6 +3308,14 @@ std::string aml_video_fps_info() {
 
 std::string aml_video_fps_drop() {
   return format_fps_info().drop_info;
+}
+
+std::optional<double> aml_video_output_fps()
+{
+  const auto rates = gather_fps_data();
+  if (!rates)
+    return std::nullopt;
+  return rates->output;
 }
 
 void aml_dv_set_disc_session(bool active)
