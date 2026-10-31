@@ -1704,7 +1704,6 @@ bool CAMLCodec::OpenDecoder(bool restart)
   g_resetSinceOpen.store(0, std::memory_order_relaxed);
   logM(LOGDEBUG, "AMLCodec::OpenDecoder ENTER restart={}", restart);
 
-  m_speed = DVD_PLAYSPEED_NORMAL;
   m_drain = false;
   m_pictureEmitted = false;
   m_stillEosSent = false;
@@ -2047,7 +2046,7 @@ bool CAMLCodec::OpenDecoder(bool restart)
        am_private->vcodec.cntl_handle);
   // vcodec is open, update speed if it was
   // changed before VideoPlayer called OpenDecoder.
-  SetSpeed(m_speed);
+  SetSpeed(m_speed, true);
   SetPollDevice(am_private->vcodec.cntl_handle);
 
   return true;
@@ -2302,7 +2301,7 @@ void CAMLCodec::Reset()
   m_starve_bypass = false;
   m_no_data_since_reset = true;
 
-  SetSpeed(m_speed);
+  SetSpeed(m_speed, true);
 
   SetPollDevice(am_private->vcodec.cntl_handle);
 }
@@ -2944,9 +2943,9 @@ void CAMLCodec::SetDrain(bool drain)
   m_drain = drain;
 }
 
-void CAMLCodec::SetSpeed(int speed)
+void CAMLCodec::SetSpeed(int speed, bool force)
 {
-  if (m_speed == speed)
+  if (m_speed == speed && !force)
     return;
 
   logComponentM(LOGDEBUG, LOGVIDEO, "speed({:d})", speed);

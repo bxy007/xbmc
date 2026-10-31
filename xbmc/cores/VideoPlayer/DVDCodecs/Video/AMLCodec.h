@@ -273,7 +273,7 @@ public:
   int           AddHDR10PData(const uint8_t *pData, size_t size);
   CDVDVideoCodec::VCReturn GetPicture(VideoPicture& videoPicture);
 
-  void          SetSpeed(int speed);
+  void          SetSpeed(int speed, bool force = false);
   void          SetDrain(bool drain);
   void          SetEof();
   void          SetVideoRect(const CRect &SrcRect, const CRect &DestRect);
