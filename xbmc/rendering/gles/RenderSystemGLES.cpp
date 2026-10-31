@@ -1033,6 +1033,10 @@ void CRenderSystemGLES::InitialiseShaders()
     defines += "#define KODI_TRANSFER_PQ 1\n";
   else if (m_guiHdr == GuiHdr::HDR)
     defines += "#define KODI_TRANSFER_HDR 1\n";
+#if defined(HAS_LIBAMCODEC)
+  else
+    defines += "#define KODI_GUI_SDR_SATURATION 1\n";
+#endif
 
   std::string definesPma = defines + "#define KODI_PREMULTIPLIED_ALPHA 1\n";
   std::string definesSdrImageSubs = definesPma + "#define KODI_SDR_IMAGE_SUBS 1\n";

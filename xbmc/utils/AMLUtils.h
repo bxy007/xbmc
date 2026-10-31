@@ -205,6 +205,7 @@ void aml_set_transfer_pq(StreamHdrType hdrType, unsigned int bitDepth,
                          std::optional<unsigned int> override_mode = std::nullopt);
 void aml_set_osd_pq_bypass(StreamHdrType hdrType);
 bool aml_gui_pq_is_final_stage();
+bool aml_gui_uses_hardware_sdr();
 void aml_set_linux_osd_sdr8(StreamHdrType hdrType, unsigned int bitDepth = 0,
                             std::optional<unsigned int> override_mode = std::nullopt);
 StreamHdrType aml_get_output_hdr_type(StreamHdrType sourceType);

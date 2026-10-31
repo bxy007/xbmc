@@ -539,6 +539,11 @@ float CWinSystemAmlogic::GetGuiSdrPeakLuminance() const
 
 float CWinSystemAmlogic::GetGuiSdrSaturation() const
 {
+  // Native SDR keeps its original appearance. With Core2 SDR input only the
+  // optional saturation adjustment runs on the GPU; transfer remains hardware.
+  if (GetGfxContext().GetGuiHdr() == GuiHdr::SDR && !aml_gui_uses_hardware_sdr())
+    return 1.0f;
+
   const auto settings = CServiceBroker::GetSettingsComponent()->GetSettings();
 
   const StreamHdrType hdrType =

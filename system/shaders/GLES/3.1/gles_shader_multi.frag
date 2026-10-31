@@ -118,6 +118,15 @@ void main()
 #elif defined(KODI_TRANSFER_HDR)
   if (rgb.a > 0.0 && m_guiTransferBypass < 0.5)
     rgb.rgb = adjustGuiForHdrOutput(rgb.rgb);
+#elif defined(KODI_GUI_SDR_SATURATION)
+  // Keep SDR transfer values for Core2; a custom saturation needs no PQ pass.
+  if (rgb.a > 0.0 && abs(uGuiParams0.w - 1.0) > 0.0001)
+  {
+    vec3 linear = pow(max(rgb.rgb, vec3(0.0)), vec3(1.0 / 0.45));
+    vec3 luma = vec3(dot(linear, vec3(0.2126, 0.7152, 0.0722)));
+    rgb.rgb = pow(clamp(mix(luma, linear, uGuiParams0.w), vec3(0.0), vec3(1.0)),
+                  vec3(0.45));
+  }
 #endif
 
 #if defined(KODI_LIMITED_RANGE)

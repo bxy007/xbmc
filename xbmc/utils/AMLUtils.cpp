@@ -1884,6 +1884,7 @@ static void aml_dv_open_impl(StreamHdrType hdrType,
       if (dv_mode == DV_MODE_ON_DEMAND)
         aml_dv_reset_osd_max();
       vs10_mode = aml_dv_on(vs10_mode);
+      aml_apply_pq_input_state(hdrType, bitDepth, vs10_mode);
     }
     else if (aml_is_dv_enable() && vs10_mode == DOLBY_VISION_OUTPUT_MODE_BYPASS) // DV BYPASS, and it is on - then switch it off.
       aml_dv_off();
@@ -2266,24 +2267,60 @@ bool aml_gui_pq_is_final_stage()
   return s_guiPqIsFinalStage.load(std::memory_order_relaxed);
 }
 
-static bool aml_dv_use_sdr_gui(StreamHdrType hdrType, unsigned int mode)
+static bool aml_dv_hdr_or_dv_content(StreamHdrType hdrType)
 {
-  // Core2 accepts SDR RGB and performs the graphics transfer/gamut conversion
-  // in hardware. Keep video OSD/subtitles on their existing PQ path. A custom
-  // shader saturation still needs that path, including on the idle desktop.
-  return aml_dv_mode() == DV_MODE_ON && !aml_dv_playback_active() &&
-         hdrType == StreamHdrType::HDR_TYPE_NONE &&
-         (mode == DOLBY_VISION_OUTPUT_MODE_IPT ||
-          mode == DOLBY_VISION_OUTPUT_MODE_IPT_TUNNEL) &&
-         CSysfsPath("/sys/module/amdolby_vision/parameters/aml_linux_osd_sdr8").Exists() &&
-         settings()->GetInt(CSettings::SETTING_VIDEOSCREEN_GUISATURATION_DOLBYVISION) == 50;
+  switch (hdrType)
+  {
+    case StreamHdrType::HDR_TYPE_DOLBYVISION:
+    case StreamHdrType::HDR_TYPE_HDR10:
+    case StreamHdrType::HDR_TYPE_HDR10PLUS:
+    case StreamHdrType::HDR_TYPE_HLG:
+    case StreamHdrType::HDR_TYPE_HDR_VIVID:
+      return true;
+    default:
+      return false;
+  }
 }
 
-void aml_set_linux_osd_sdr8(StreamHdrType hdrType, unsigned int bitDepth,
+static bool aml_dv_hdr_output_mode(unsigned int mode)
+{
+  return mode == DOLBY_VISION_OUTPUT_MODE_IPT ||
+         mode == DOLBY_VISION_OUTPUT_MODE_IPT_TUNNEL ||
+         mode == DOLBY_VISION_OUTPUT_MODE_HDR10;
+}
+
+static unsigned int aml_gui_vs10_mode(std::optional<unsigned int> override_mode)
+{
+  // Only explicit handoffs may describe an engine that has not started yet.
+  // Stored per-source conversion preferences are not the current output mode.
+  if (aml_dv_mode() == DV_MODE_OFF)
+    return DOLBY_VISION_OUTPUT_MODE_BYPASS;
+  if (override_mode)
+    return *override_mode;
+  return aml_is_dv_enable() ? aml_dv_dolby_vision_mode()
+                            : DOLBY_VISION_OUTPUT_MODE_BYPASS;
+}
+
+static bool aml_dv_use_sdr_gui(StreamHdrType hdrType, unsigned int mode)
+{
+  // A graphics plane has one transfer function. Mixed HDR playback needs PQ
+  // graphics; idle and SDR playback can leave transfer/gamut mapping to Core2.
+  return aml_dv_hdr_output_mode(mode) &&
+         (!aml_dv_playback_active() || !aml_dv_hdr_or_dv_content(hdrType)) &&
+         CSysfsPath("/sys/module/amdolby_vision/parameters/aml_linux_osd_sdr8").Exists();
+}
+
+static std::atomic<bool> s_guiHardwareSdr{false};
+
+bool aml_gui_uses_hardware_sdr()
+{
+  return s_guiHardwareSdr.load(std::memory_order_relaxed);
+}
+
+void aml_set_linux_osd_sdr8(StreamHdrType hdrType, unsigned int /* bitDepth */,
                             std::optional<unsigned int> override_mode)
 {
-  const unsigned int vs10_mode =
-      override_mode.value_or(aml_vs10_by_hdrtype(hdrType, bitDepth));
+  const unsigned int vs10_mode = aml_gui_vs10_mode(override_mode);
 
   bool sdr8;
   if (aml_dv_use_sdr_gui(hdrType, vs10_mode))
@@ -2304,6 +2341,8 @@ void aml_set_linux_osd_sdr8(StreamHdrType hdrType, unsigned int bitDepth,
     const auto previous = osdSdr8.Get<std::string>();
     const bool wasSdr8 = previous && (*previous == "Y" || *previous == "1");
     osdSdr8.Set(sdr8);
+    if (sdr8 && aml_is_dv_enable())
+      aml_dv_reset_osd_max();
     if (previous && wasSdr8 != sdr8 && aml_is_dv_enable())
     {
       // The parameter has no setter callback. Re-evaluate Core2's g_format
@@ -2314,36 +2353,33 @@ void aml_set_linux_osd_sdr8(StreamHdrType hdrType, unsigned int bitDepth,
   logComponentM(LOGDEBUG, LOGVIDEO, "amdolby_vision aml_linux_osd_sdr8 [{}]", sdr8 ? "true" : "false");
 }
 
-void aml_set_transfer_pq(StreamHdrType hdrType, unsigned int bitDepth,
+void aml_set_transfer_pq(StreamHdrType hdrType, unsigned int /* bitDepth */,
                          std::optional<unsigned int> override_mode)
 {
-  const unsigned int vs10_mode =
-      override_mode.value_or(aml_vs10_by_hdrtype(hdrType, bitDepth));
+  const unsigned int vs10_mode = aml_gui_vs10_mode(override_mode);
+  const bool hardwareSdr = aml_dv_use_sdr_gui(hdrType, vs10_mode);
+  s_guiHardwareSdr.store(hardwareSdr, std::memory_order_relaxed);
   // Match Core2's input format; the HDMI output remains Dolby Vision.
-  if (aml_is_dv_enable() && aml_dv_use_sdr_gui(hdrType, vs10_mode))
+  if (hardwareSdr)
   {
     CServiceBroker::GetWinSystem()->GetGfxContext().SetTransferPQ(false);
-    logM(LOGDEBUG, "DV idle GUI: SDR RGB rendered directly, Core2 performs output transfer");
+    logM(LOGDEBUG, "DV GUI: SDR RGB rendered directly, Core2 performs output transfer");
     return;
   }
 
   // Configure GUI/OSD for HDR PQ when display is in HDR PQ mode
   bool hdr_display(CServiceBroker::GetWinSystem()->IsHDRDisplay() || aml_display_support_dv());
-  bool dv_on(aml_is_dv_enable());
+  const bool dv_on = vs10_mode != DOLBY_VISION_OUTPUT_MODE_BYPASS;
   bool hdr(false);
 
-  if (hdr_display) // Only relevant with an hdr_display
+  if (dv_on)
+    hdr = aml_dv_hdr_output_mode(vs10_mode);
+  else if (hdr_display) // Native passthrough, without a Core2 conversion.
   {
     // TODO: any need to test display supports each hdr content (inc fallback) specifically?
     hdr = ((hdrType != StreamHdrType::HDR_TYPE_NONE) &&
            (hdrType != StreamHdrType::HDR_TYPE_HLG) &&
            (hdrType != StreamHdrType::HDR_TYPE_HDR_VIVID));
-
-    // Check for vs10 up or down mapping.
-    if (dv_on) {
-      hdr = (((vs10_mode == DOLBY_VISION_OUTPUT_MODE_BYPASS) && hdr) ||
-              (vs10_mode <= DOLBY_VISION_OUTPUT_MODE_HDR10));
-    }
   }
 
   CLog::Log(LOGDEBUG, "AMLUtils::{} - {}DV support, {}, HDR type is {}, transfer PQ is {}",

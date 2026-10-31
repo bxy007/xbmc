@@ -112,6 +112,15 @@ void main()
 #elif defined(KODI_TRANSFER_HDR)
   if (m_guiTransferBypass < 0.5)
     gl_FragColor.rgb = adjustGuiForHdrOutput(gl_FragColor.rgb);
+#elif defined(KODI_GUI_SDR_SATURATION)
+  // Keep SDR transfer values for Core2; a custom saturation needs no PQ pass.
+  if (gl_FragColor.a > 0.0 && abs(m_sdrSaturation - 1.0) > 0.0001)
+  {
+    vec3 linear = pow(max(gl_FragColor.rgb, vec3(0.0)), vec3(1.0 / 0.45));
+    vec3 luma = vec3(dot(linear, vec3(0.2126, 0.7152, 0.0722)));
+    gl_FragColor.rgb = pow(clamp(mix(luma, linear, m_sdrSaturation), vec3(0.0), vec3(1.0)),
+                  vec3(0.45));
+  }
 #endif
 
 #if defined(KODI_LIMITED_RANGE)

@@ -457,7 +457,7 @@ void CAdvancedSettings::Initialize()
   m_guiMaxDirtyRegions = 4;
   m_guiSkipSleepActiveWindow = 250;
   m_guiMenuIdleFrameRateCap = 0;
-  m_guiSkinHdrFbo = 0;
+  m_guiSkinHdrFbo = 1;
   m_guiOsdGuestComposite = 0;
   m_guiOsdTrace = 0;
   m_guiMipMapping = false;
