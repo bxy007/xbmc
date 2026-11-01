@@ -665,8 +665,12 @@ bool CDolbyVisionAML::Setup()
 
   aml_dv_write_vsvdb_policy();
 
-  // Turn on dv - if dv mode is on, limit the menu luminance as menu now can be in DV/HDR.
-  aml_dv_start();
+  // The kernel display state survives a Kodi crash. Reconcile both the
+  // graphics input and output before drawing the new process's SDR GUI.
+  if (aml_dv_mode() == DV_MODE_ON)
+    aml_dv_start();
+  else
+    aml_dv_close();
 
   aml_apply_hdr10_overrides();
 

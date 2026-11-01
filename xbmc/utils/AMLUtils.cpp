@@ -1996,7 +1996,7 @@ void aml_dv_close()
   if (aml_dv_mode() != DV_MODE_ON)
     aml_apply_pq_input_state(StreamHdrType::HDR_TYPE_NONE, 0);
 
-  if (aml_is_dv_enable() && (aml_dv_mode() == DV_MODE_ON_DEMAND))
+  if (aml_is_dv_enable() && (aml_dv_mode() != DV_MODE_ON))
     aml_dv_off(true);
   else if (CServiceBroker::GetDataCacheCore().GetVideoHdrType() != StreamHdrType::HDR_TYPE_NONE &&
            aml_dv_mode() != DV_MODE_ON)
