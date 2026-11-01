@@ -68,6 +68,7 @@ public:
                    AutoUpdateJob isAutoUpdate);
 
   bool DoWork() override;
+  bool ShouldCancel(unsigned int progress, unsigned int total) const override;
 
   static constexpr auto TYPE_DOWNLOAD = "DOWNLOAD";
   static constexpr auto TYPE_INSTALL = "INSTALL";
@@ -669,6 +670,8 @@ bool CAddonInstallJob::GetAddon(const std::string& addonID, RepositoryPtr& repo,
 
 bool CAddonInstallJob::DoWork()
 {
+  if (ShouldCancel(0, 1))
+    return false;
   m_currentType = CAddonInstallJob::TYPE_DOWNLOAD;
 
   SetTitle(StringUtils::Format(g_localizeStrings.Get(24057), m_addon->Name()));
@@ -799,6 +802,10 @@ bool CAddonInstallJob::DoWork()
       installFrom = package;
     }
   }
+
+  // Do not unload an installed add-on after shutdown cancelled its download.
+  if (ShouldCancel(0, 1))
+    return false;
 
   m_currentType = CAddonInstallJob::TYPE_INSTALL;
 
@@ -980,6 +987,15 @@ bool CAddonInstallJob::DoWork()
   return true;
 }
 
+bool CAddonInstallJob::ShouldCancel(unsigned int progress, unsigned int total) const
+{
+  // Automatic updates and dependencies can run synchronously inside another
+  // job's completion callback, without their own JobManager callback pointer.
+  const auto jobManager = CServiceBroker::GetJobManager();
+  return (jobManager && !jobManager->IsRunning()) ||
+         CFileOperationJob::ShouldCancel(progress, total);
+}
+
 bool CAddonInstallJob::DownloadPackage(const std::string &path, const std::string &dest)
 {
   if (ShouldCancel(0, 1))
@@ -988,8 +1004,11 @@ bool CAddonInstallJob::DownloadPackage(const std::string &path, const std::strin
   SetText(g_localizeStrings.Get(24078));
 
   // need to download/copy the package first
+  CURL downloadUrl(path);
+  if (downloadUrl.IsProtocol("http") || downloadUrl.IsProtocol("https"))
+    downloadUrl.SetProtocolOption("cancelonshutdown", "true");
   CFileItemList list;
-  list.Add(std::make_shared<CFileItem>(path, false));
+  list.Add(std::make_shared<CFileItem>(downloadUrl, false));
   list[0]->Select(true);
 
   return DoFileOperation(CFileOperationJob::ActionReplace, list, dest, true);

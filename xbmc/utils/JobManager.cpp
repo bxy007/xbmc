@@ -197,6 +197,12 @@ void CJobManager::Restart()
   m_running = true;
 }
 
+bool CJobManager::IsRunning() const
+{
+  std::lock_guard lock(m_section);
+  return m_running;
+}
+
 void CJobManager::CancelJobs()
 {
   std::unique_lock lock(m_section);

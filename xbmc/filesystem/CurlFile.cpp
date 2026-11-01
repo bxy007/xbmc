@@ -18,6 +18,7 @@
 #include "settings/SettingsComponent.h"
 #include "threads/SystemClock.h"
 #include "utils/Base64.h"
+#include "utils/JobManager.h"
 #include "utils/XTimeUtils.h"
 
 #include <algorithm>
@@ -127,10 +128,21 @@ extern "C" int transfer_abort_callback(void *clientp,
                curl_off_t ultotal,
                curl_off_t ulnow)
 {
+  if (clientp && static_cast<CCurlFile::CReadState*>(clientp)->ShouldCancelOnShutdown())
+    return 1;
   if(dlnow > 0)
     return 1;
   else
     return 0;
+}
+
+extern "C" int shutdown_abort_callback(void* clientp,
+                                       curl_off_t,
+                                       curl_off_t,
+                                       curl_off_t,
+                                       curl_off_t)
+{
+  return static_cast<CCurlFile::CReadState*>(clientp)->ShouldCancelOnShutdown() ? 1 : 0;
 }
 
 /* fix for silly behavior of realloc */
@@ -479,6 +491,13 @@ void CCurlFile::SetCommonOptions(CReadState* state, bool failOnError /* = true *
 
   g_curlInterface.easy_reset(h);
 
+  if (state->m_cancelOnShutdown)
+  {
+    g_curlInterface.easy_setopt(h, CURLOPT_NOPROGRESS, 0);
+    g_curlInterface.easy_setopt(h, CURLOPT_XFERINFOFUNCTION, shutdown_abort_callback);
+    g_curlInterface.easy_setopt(h, CURLOPT_XFERINFODATA, state);
+  }
+
   g_curlInterface.easy_setopt(h, CURLOPT_DEBUGFUNCTION, debug_callback);
 
   if( CServiceBroker::GetSettingsComponent()->GetAdvancedSettings()->m_logLevel >= LOG_LEVEL_DEBUG )
@@ -742,6 +761,7 @@ void CCurlFile::SetCorrectHeaders(CReadState* state)
 
 void CCurlFile::ParseAndCorrectUrl(CURL &url2)
 {
+  m_state->m_cancelOnShutdown = false;
   std::string strProtocol = url2.GetTranslatedProtocol();
   url2.SetProtocol(strProtocol);
 
@@ -896,6 +916,8 @@ void CCurlFile::ParseAndCorrectUrl(CURL &url2)
           m_skipshout = true;
         else if (name == "seekable" && value == "0")
           m_seekable = false;
+        else if (name == "cancelonshutdown")
+          m_state->m_cancelOnShutdown = value == "true" || value == "1";
         else if (name == "accept-charset")
           SetAcceptCharset(value);
         else if (name == "sslcipherlist")
@@ -1438,6 +1460,7 @@ int64_t CCurlFile::Seek(int64_t iFilePosition, int iWhence)
       m_oldState          = m_state;
       m_state             = new CReadState();
       m_state->m_fileSize = m_oldState->m_fileSize;
+      m_state->m_cancelOnShutdown = m_oldState->m_cancelOnShutdown;
       g_curlInterface.easy_acquire(url.GetProtocol().c_str(),
                                   url.GetHostName().c_str(),
                                   &m_state->m_easyHandle,
@@ -1724,8 +1747,18 @@ ssize_t CCurlFile::CReadState::Read(void* lpBuf, size_t uiBufSize)
 }
 
 /* use to attempt to fill the read buffer up to requested number of bytes */
+bool CCurlFile::CReadState::ShouldCancelOnShutdown() const
+{
+  if (!m_cancelOnShutdown)
+    return false;
+  const auto jobManager = CServiceBroker::GetJobManager();
+  return jobManager && !jobManager->IsRunning();
+}
+
 int8_t CCurlFile::CReadState::FillBuffer(unsigned int want)
 {
+  if (ShouldCancelOnShutdown())
+    return FILLBUFFER_FAIL;
   int retry = 0;
   fd_set fdread;
   fd_set fdwrite;
@@ -1737,6 +1770,8 @@ int8_t CCurlFile::CReadState::FillBuffer(unsigned int want)
   {
     if (m_cancelled)
       return FILLBUFFER_NO_DATA;
+    if (ShouldCancelOnShutdown())
+      return FILLBUFFER_FAIL;
 
     /* if there is data in overflow buffer, try to use that first */
     if (m_overflowSize)
@@ -1754,6 +1789,8 @@ int8_t CCurlFile::CReadState::FillBuffer(unsigned int want)
     }
 
     CURLMcode result = g_curlInterface.multi_perform(m_multiHandle, &m_stillRunning);
+    if (ShouldCancelOnShutdown())
+      return FILLBUFFER_FAIL;
     if (!m_stillRunning)
     {
       if (result == CURLM_OK)
@@ -1878,7 +1915,10 @@ int8_t CCurlFile::CReadState::FillBuffer(unsigned int want)
         g_curlInterface.multi_fdset(m_multiHandle, &fdread, &fdwrite, &fdexcep, &maxfd);
 
         long timeout = 0;
-        if (CURLM_OK != g_curlInterface.multi_timeout(m_multiHandle, &timeout) || timeout == -1 || timeout < 200)
+        // Opted-in package reads must notice shutdown even when libcurl has
+        // no near-term timer and the peer stops sending data.
+        if (m_cancelOnShutdown ||
+            CURLM_OK != g_curlInterface.multi_timeout(m_multiHandle, &timeout) || timeout == -1 || timeout < 200)
           timeout = 200;
 
         XbmcThreads::EndTime<> endTime{std::chrono::milliseconds(timeout)};

@@ -109,6 +109,7 @@ namespace XFILE
           unsigned int m_overflowSize; // size of the overflow buffer
           int m_stillRunning; // Is background url fetch still in progress
           bool m_cancelled;
+          bool m_cancelOnShutdown = false;
           int64_t m_fileSize;
           int64_t m_filePos;
           bool m_bFirstLoop;
@@ -134,6 +135,7 @@ namespace XFILE
           ssize_t Read(void* lpBuf, size_t uiBufSize);
           bool ReadString(char *szLine, int iLineLength);
           int8_t FillBuffer(unsigned int want);
+          bool ShouldCancelOnShutdown() const;
           void SetReadBuffer(const void* lpBuf, int64_t uiBufSize);
 
           void SetResume(void);

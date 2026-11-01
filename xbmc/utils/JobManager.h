@@ -292,6 +292,9 @@ public:
    */
   void Restart();
 
+  /*! \brief Whether this manager is still accepting work. */
+  bool IsRunning() const;
+
   /*!
    \brief Checks to see if any jobs of a specific type are currently processing.
    \param type Job type to search for
