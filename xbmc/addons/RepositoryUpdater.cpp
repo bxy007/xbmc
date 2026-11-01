@@ -28,6 +28,7 @@
 #include "settings/Settings.h"
 #include "settings/SettingsComponent.h"
 #include "settings/lib/Setting.h"
+#include "threads/SingleLock.h"
 #include "utils/JobManager.h"
 #include "utils/ProgressJob.h"
 #include "utils/log.h"
@@ -147,6 +148,11 @@ CRepositoryUpdater::~CRepositoryUpdater()
   CServiceBroker::GetSettingsComponent()->GetSettings()->UnregisterCallback(this);
 
   m_addonMgr.Events().Unsubscribe(this);
+
+  // A timer callback accesses the updater's members. Finish it before their
+  // destruction, without holding the lock that CheckForUpdates acquires.
+  std::lock_guard timerLock(m_timerSection);
+  m_timer.Stop(true);
 }
 
 void CRepositoryUpdater::OnEvent(const ADDON::AddonEvent& event)
@@ -236,11 +242,15 @@ void CRepositoryUpdater::CheckForUpdates(const ADDON::RepositoryPtr& repo, bool 
   if (job == m_jobs.end())
   {
     auto* job = new CRepositoryUpdateJob(repo);
-    m_jobs.push_back(job);
     m_doneEvent.Reset();
     if (showProgress)
       SetProgressIndicator(job);
-    CServiceBroker::GetJobManager()->AddJob(job, this, CJob::PRIORITY_LOW);
+    if (CServiceBroker::GetJobManager()->AddJob(job, this, CJob::PRIORITY_LOW) != 0)
+      m_jobs.push_back(job);
+    else if (m_jobs.empty())
+      // Shutdown rejects and deletes the job. Do not retain its dangling pointer
+      // or leave Await blocked for a completion callback that will never arrive.
+      m_doneEvent.Set();
   }
   else
   {
@@ -320,9 +330,14 @@ void CRepositoryUpdater::ScheduleUpdate(UpdateScheduleType scheduleType)
 {
   using namespace std::chrono;
 
-  std::lock_guard lock(m_criticalSection);
-  
+  // OnJobComplete can call us with this recursive lock already held. Release
+  // every level before joining the timer: its callback takes the same lock.
+  // Serialize stop/start separately, including callers entering without it.
+  CSingleExit leave(m_criticalSection);
+  std::lock_guard timerLock(m_timerSection);
   m_timer.Stop(true);
+
+  std::lock_guard lock(m_criticalSection);
 
   if (CAddonSystemSettings::GetInstance().GetAddonAutoUpdateMode() == AUTO_UPDATES_NEVER)
     return;

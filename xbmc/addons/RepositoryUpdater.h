@@ -15,6 +15,7 @@
 #include "utils/Job.h"
 
 #include <memory>
+#include <mutex>
 #include <vector>
 
 class CDateTime;
@@ -96,6 +97,7 @@ private:
   CDateTime ClosestNextCheck() const;
 
   CCriticalSection m_criticalSection;
+  std::mutex m_timerSection;
   CTimer m_timer;
   CEvent m_doneEvent;
   std::vector<CRepositoryUpdateJob*> m_jobs;
