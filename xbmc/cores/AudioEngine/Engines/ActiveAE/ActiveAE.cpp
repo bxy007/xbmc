@@ -2121,7 +2121,12 @@ bool CActiveAE::NeedReconfigureSink()
 
   const AESinkDevice dev = CAESinkFactory::ParseDevice(device);
 
-  return !CompareFormat(newFormat, m_sinkFormat) || m_currDevice.compare(dev.name) != 0 ||
+  // A sink may negotiate a different format (for example S24 instead of float).
+  // Match Configure(): an unchanged request can reuse that accepted format.
+  // Otherwise we drain the sink here but Configure() never reinitializes it.
+  return (!CompareFormat(newFormat, m_sinkFormat) &&
+          !CompareFormat(newFormat, m_sinkRequestFormat)) ||
+         m_currDevice.compare(dev.name) != 0 ||
          m_settings.driver.compare(dev.driver) != 0;
 }
 
