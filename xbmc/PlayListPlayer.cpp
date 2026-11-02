@@ -1023,6 +1023,13 @@ void PLAYLIST::CPlayListPlayer::OnApplicationMessage(KODI::MESSAGING::ThreadMess
     g_application.Restart(true);
     break;
 
+  case TMSG_MEDIA_UPDATE_AUDIO:
+    if (!CServiceBroker::GetAppComponents()
+             .GetComponent<CApplicationPlayer>()
+             ->OnAudioSettingsChanged())
+      g_application.Restart(true);
+    break;
+
   case TMSG_MEDIA_STOP:
   {
     // restore to previous window if needed

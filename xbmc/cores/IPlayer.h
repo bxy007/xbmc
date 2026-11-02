@@ -141,6 +141,8 @@ public:
   virtual int GetAudioStreamCount() const { return 0; }
   virtual int  GetAudioStream()       { return -1; }
   virtual void SetAudioStream(int iStream) {}
+  // Return true when audio settings can be applied without reopening the media.
+  virtual bool OnAudioSettingsChanged() { return false; }
   virtual void GetAudioStreamInfo(int index, AudioStreamInfo& info) const {}
 
   virtual int GetVideoStream() const { return -1; }

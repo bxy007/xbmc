@@ -789,6 +789,15 @@ void CVideoPlayerAudio::Process()
         onlyPrioMsgs = true;
       }
     }
+    else if (pMsg->IsType(CDVDMsg::PLAYER_AUDIO_SETTINGS_CHANGED))
+    {
+      CLog::Log(LOGDEBUG, "CVideoPlayerAudio: audio settings changed, checking for passthrough");
+      // Select the codec on its owning thread using the latest settings and
+      // speed policy. The next frame recreates the sink only if its format
+      // changed; never submit a frame owned by the replaced codec.
+      if (m_pAudioCodec && SwitchCodecIfNeeded())
+        audioframe.nb_frames = audioframe.framesOut = 0;
+    }
     else if (pMsg->IsType(CDVDMsg::PLAYER_DISPLAY_RESET))
     {
       m_displayReset = true;

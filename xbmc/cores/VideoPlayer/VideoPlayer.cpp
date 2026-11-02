@@ -4027,6 +4027,11 @@ void CVideoPlayer::HandleMessages()
         m_subtitleDemuxerEof = false;
       }
     }
+    else if (pMsg->IsType(CDVDMsg::PLAYER_AUDIO_SETTINGS_CHANGED))
+    {
+      m_VideoPlayerAudio->SendMessage(
+          std::make_shared<CDVDMsg>(CDVDMsg::PLAYER_AUDIO_SETTINGS_CHANGED), 1);
+    }
     else if (pMsg->IsType(CDVDMsg::PLAYER_SET_AUDIOSTREAM))
     {
       auto pMsg2 = std::static_pointer_cast<CDVDMsgPlayerSetAudioStream>(pMsg);
@@ -7286,6 +7291,17 @@ int CVideoPlayer::GetAudioStream()
 {
   std::unique_lock<CCriticalSection> lock(m_content.m_section);
   return m_content.m_audioIndex;
+}
+
+bool CVideoPlayer::OnAudioSettingsChanged()
+{
+  if (!m_messenger.IsInited())
+    return false;
+
+  // Keep the input, demuxer, video and playlist alive. Reopening a disc image
+  // also emits a playback-stop event, which can stop the replacement player.
+  m_messenger.Put(std::make_shared<CDVDMsg>(CDVDMsg::PLAYER_AUDIO_SETTINGS_CHANGED));
+  return true;
 }
 
 void CVideoPlayer::SetAudioStream(int iStream)

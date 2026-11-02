@@ -313,6 +313,7 @@ public:
   int GetAudioStreamCount() const override;
   int GetAudioStream() override;
   void SetAudioStream(int iStream) override;
+  bool OnAudioSettingsChanged() override;
 
   int GetVideoStream() const override;
   int GetVideoStreamCount() const override;

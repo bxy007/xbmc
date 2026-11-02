@@ -132,7 +132,7 @@ void CApplicationSettingsHandling::OnSettingChanged(const std::shared_ptr<const 
   }
   else if (settingId == CSettings::SETTING_AUDIOOUTPUT_PASSTHROUGH)
   {
-    CServiceBroker::GetAppMessenger()->PostMsg(TMSG_MEDIA_RESTART);
+    CServiceBroker::GetAppMessenger()->PostMsg(TMSG_MEDIA_UPDATE_AUDIO);
   }
 }
 

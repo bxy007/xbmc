@@ -684,6 +684,12 @@ void CApplicationPlayer::SetAudioStream(int iStream)
   }
 }
 
+bool CApplicationPlayer::OnAudioSettingsChanged()
+{
+  const std::shared_ptr<IPlayer> player = GetInternal();
+  return player && player->OnAudioSettingsChanged();
+}
+
 void CApplicationPlayer::GetSubtitleStreamInfo(int index, SubtitleStreamInfo& info) const
 {
   const std::shared_ptr<const IPlayer> player = GetInternal();
