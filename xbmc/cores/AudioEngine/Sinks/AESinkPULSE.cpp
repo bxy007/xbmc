@@ -260,6 +260,10 @@ static void SinkCallback(pa_context* c,
 
   std::lock_guard lock(p->m_sec);
 
+  auto* ae = CServiceBroker::GetActiveAE();
+  if (!ae)
+    return;
+
   if (p->IsInitialized())
   {
     if ((t & PA_SUBSCRIPTION_EVENT_FACILITY_MASK) == PA_SUBSCRIPTION_EVENT_SINK)
@@ -267,12 +271,12 @@ static void SinkCallback(pa_context* c,
       if ((t & PA_SUBSCRIPTION_EVENT_TYPE_MASK) == PA_SUBSCRIPTION_EVENT_NEW)
       {
         CLog::Log(LOGDEBUG, "Sink appeared");
-        CServiceBroker::GetActiveAE()->DeviceCountChange("PULSE");
+        ae->DeviceCountChange("PULSE");
       }
       else if ((t & PA_SUBSCRIPTION_EVENT_TYPE_MASK) == PA_SUBSCRIPTION_EVENT_REMOVE)
       {
         CLog::Log(LOGDEBUG, "Sink removed");
-        CServiceBroker::GetActiveAE()->DeviceCountChange("PULSE");
+        ae->DeviceCountChange("PULSE");
       }
       else if ((t & PA_SUBSCRIPTION_EVENT_TYPE_MASK) == PA_SUBSCRIPTION_EVENT_CHANGE)
       {
@@ -654,10 +658,11 @@ static bool SetupContext(const char* host,
 
 CDriverMonitor::~CDriverMonitor()
 {
-  m_isInit = false;
-
   if (m_pMainLoop)
     pa_threaded_mainloop_stop(m_pMainLoop);
+
+  // The event thread can read this flag until the mainloop has joined.
+  m_isInit = false;
 
   if (m_pContext)
   {

@@ -2365,8 +2365,10 @@ bool CApplication::Stop(int exitCode)
       gui->GetAudioManager().DeInitialize();
 
     // shutdown the AudioEngine
-    CServiceBroker::UnregisterAE();
+    // Shutdown joins the sink device monitors. Keep their audio engine valid
+    // until callbacks have stopped, then remove it from the service broker.
     m_pActiveAE->Shutdown();
+    CServiceBroker::UnregisterAE();
     m_pActiveAE.reset();
 
     CLog::Log(LOGINFO, "Application stopped");
