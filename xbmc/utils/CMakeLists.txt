@@ -75,6 +75,7 @@ set(SOURCES ActorProtocol.cpp
             StreamUtils.cpp
             StringUtils.cpp
             StringValidation.cpp
+            SubtitleLanguage.cpp
             SystemInfo.cpp
             Temperature.cpp
             TextSearch.cpp
@@ -189,6 +190,7 @@ set(HEADERS ActorProtocol.h
             StreamUtils.h
             StringUtils.h
             StringValidation.h
+            SubtitleLanguage.h
             SystemInfo.h
             Temperature.h
             TextSearch.h

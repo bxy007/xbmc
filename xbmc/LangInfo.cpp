@@ -881,7 +881,17 @@ void CLangInfo::SetSubtitleLanguage(const std::string& language, bool isIso6392 
   }
   else
   {
-    if (g_LangCodeExpander.ConvertToISO6391(language, langISO6392))
+    bool converted = g_LangCodeExpander.ConvertToISO6391(language, langISO6392);
+    if (!converted)
+    {
+      // Language addon names can resolve to locales such as zh-cn rather than
+      // ISO 639-1 codes. Use their primary language for stream preferences.
+      const std::string locale = ConvertEnglishNameToAddonLocale(language);
+      if (!locale.empty())
+        converted = g_LangCodeExpander.ConvertToISO6391(locale.substr(0, locale.find('-')),
+                                                      langISO6392);
+    }
+    if (converted)
     {
       // if following conversion (to ISO 639-2) fails it should be because
       // the language code has been defined by the user, so ignore it

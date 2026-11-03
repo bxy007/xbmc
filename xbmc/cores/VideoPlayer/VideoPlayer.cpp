@@ -64,6 +64,7 @@
 #include "utils/StreamDetails.h"
 #include "utils/StreamUtils.h"
 #include "utils/StringUtils.h"
+#include "utils/SubtitleLanguage.h"
 #include "utils/URIUtils.h"
 #include "utils/Variant.h"
 #include "utils/log.h"
@@ -172,7 +173,9 @@ public:
       return false;
     }
 
-    const bool isSameSubLang = g_LangCodeExpander.CompareISO639Codes(ss.language, m_subLang);
+    const bool isSameSubLang =
+        g_LangCodeExpander.CompareISO639Codes(ss.language, m_subLang) ||
+        (CSubtitleLanguage::IsChinese(ss.language) && CSubtitleLanguage::IsChinese(m_subLang));
 
     if (m_isPrefHearingImp)
     {
@@ -324,8 +327,12 @@ public:
 
     PREDICATE_RETURN(isLexternal, isRexternal);
 
-    const bool isLSameSubLang = g_LangCodeExpander.CompareISO639Codes(lh.language, m_subLang);
-    const bool isRSameSubLang = g_LangCodeExpander.CompareISO639Codes(rh.language, m_subLang);
+    const bool isLSameSubLang =
+        g_LangCodeExpander.CompareISO639Codes(lh.language, m_subLang) ||
+        (CSubtitleLanguage::IsChinese(lh.language) && CSubtitleLanguage::IsChinese(m_subLang));
+    const bool isRSameSubLang =
+        g_LangCodeExpander.CompareISO639Codes(rh.language, m_subLang) ||
+        (CSubtitleLanguage::IsChinese(rh.language) && CSubtitleLanguage::IsChinese(m_subLang));
 
     if (m_isPrefHearingImp)
     {
@@ -387,6 +394,15 @@ public:
     PREDICATE_RETURN(isLincluded && lh.flags & FLAG_DEFAULT && isLSameSubLang,
                      isRincluded && rh.flags & FLAG_DEFAULT && isRSameSubLang);
     PREDICATE_RETURN(isLincluded && isLSameSubLang, isRincluded && isRSameSubLang);
+
+    // Only break a tie left by the existing saved-stream, source, accessibility,
+    // language and default-track rules. Unlabelled Chinese tracks retain order.
+    if (!lh.language.empty() && lh.language != "und" &&
+        !rh.language.empty() && rh.language != "und")
+    {
+      PREDICATE_RETURN(CSubtitleLanguage::IsSimplifiedChinese(lh.language, lh.name),
+                       CSubtitleLanguage::IsSimplifiedChinese(rh.language, rh.name));
+    }
 
     if (!m_isPrefForced && isLincluded && (lh.language.empty() || lh.language == "und"))
     {
