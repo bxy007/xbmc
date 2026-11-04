@@ -121,7 +121,10 @@ JSONRPC_STATUS CFileOperations::GetDirectory(const std::string &method, ITranspo
         items[i]->SetPath(url.GetWithoutUserDetails());
       }
 
-      if ((media == "video" && items[i]->HasVideoInfoTag()) ||
+      // A video database lookup of a folder can return a movie inside it.
+      // Keep the directory identity instead of replacing it with that file.
+      if (items[i]->m_bIsFolder ||
+          (media == "video" && items[i]->HasVideoInfoTag()) ||
           (media == "music" && items[i]->HasMusicInfoTag()) ||
           (media == "picture" && items[i]->HasPictureInfoTag()) ||
            media == "files" ||
