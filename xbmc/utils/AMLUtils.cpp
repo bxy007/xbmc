@@ -45,6 +45,7 @@
 #include "utils/AudioSyncReset.h"
 #include "windowing/GraphicContext.h"
 #include "windowing/amlogic/WinSystemAmlogic.h"
+#include "windowing/amlogic/DolbyVisionAML.h"
 #include "utils/RegExp.h"
 #include "filesystem/SpecialProtocol.h"
 #include "rendering/RenderSystem.h"
@@ -1806,6 +1807,8 @@ static void aml_dv_open_impl(StreamHdrType hdrType,
   if (allowDeferred)
     s_dvPlaybackActive = true;
 
+  CDolbyVisionAML::ValidateOutputSettings();
+
   CDVCoreGuard dvlock(__FUNCTION__);
   if (!dvlock.Owns())
   {
@@ -2188,6 +2191,8 @@ void aml_dv_start()
   if (aml_dv_mode() != DV_MODE_ON)
     return;
 
+  CDolbyVisionAML::ValidateOutputSettings();
+
   CDVCoreGuard dvlock(__FUNCTION__);
   if (!dvlock.Owns())
   {
@@ -2195,9 +2200,12 @@ void aml_dv_start()
     return;
   }
   aml_dv_reset_osd_max();
-  aml_apply_pq_input_state(StreamHdrType::HDR_TYPE_NONE, 0, DOLBY_VISION_OUTPUT_MODE_IPT);
-  aml_dv_on(DOLBY_VISION_OUTPUT_MODE_IPT);
-  aml_apply_pq_output_state(StreamHdrType::HDR_TYPE_NONE, 0, DOLBY_VISION_OUTPUT_MODE_IPT);
+  const unsigned int mode = aml_dv_type() == DV_TYPE_VS10_ONLY
+                                ? DOLBY_VISION_OUTPUT_MODE_SDR10
+                                : DOLBY_VISION_OUTPUT_MODE_IPT;
+  aml_apply_pq_input_state(StreamHdrType::HDR_TYPE_NONE, 0, mode);
+  aml_dv_on(mode);
+  aml_apply_pq_output_state(StreamHdrType::HDR_TYPE_NONE, 0, mode);
 }
 
 void aml_dv_set_subtitles(bool visible)

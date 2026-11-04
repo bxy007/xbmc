@@ -19,6 +19,7 @@ public:
 
   // Setup
   bool Setup();
+  static void ValidateOutputSettings();
 
   // implementation of IAnnouncer
   void Announce(ANNOUNCEMENT::AnnouncementFlag flag,
