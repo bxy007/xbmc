@@ -962,7 +962,8 @@ static unsigned int aml_vs10_by_hdrtype(StreamHdrType hdrType, unsigned int bitD
       vs10_mode = aml_vs10_by_setting(CSettings::SETTING_COREELEC_AMLOGIC_DV_VS10_HDR10PLUS);
       break;
     case StreamHdrType::HDR_TYPE_HDR_VIVID:
-      if (aml_display_support_hdrvivid())
+      if (!settings()->GetBool(CSettings::SETTING_COREELEC_AMLOGIC_DV_HDRVIVID_CONVERT) &&
+          aml_display_support_hdrvivid())
         break;
       [[fallthrough]];
     case StreamHdrType::HDR_TYPE_HLG:

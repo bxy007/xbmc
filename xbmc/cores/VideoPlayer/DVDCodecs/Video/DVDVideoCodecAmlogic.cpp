@@ -629,16 +629,16 @@ bool CDVDVideoCodecAmlogic::Open(CDVDStreamInfo &hints, CDVDCodecOptions &option
           m_bitstream->SetConvertHdr10PlusPeakBrightnessSource(peakBrightnessSource);
         }
 
-        if (aml_display_support_hdrvivid())
-        {
-          CLog::Log(LOGINFO, "{}::{} - HDR Vivid receiver mode available; keep native metadata instead of DV conversion",
-                    __MODULE_NAME__, __FUNCTION__);
-        }
-        else if (settings->GetBool(CSettings::SETTING_COREELEC_AMLOGIC_DV_HDRVIVID_CONVERT))
+        if (settings->GetBool(CSettings::SETTING_COREELEC_AMLOGIC_DV_HDRVIVID_CONVERT))
         {
           CLog::Log(LOGDEBUG, "{}::{} - HEVC bitstream - if HDR Vivid then statistics will be converted to Dolby Vision P8.1",
             __MODULE_NAME__, __FUNCTION__);
           m_bitstream->SetConvertHdrVivid(true);
+        }
+        else if (aml_display_support_hdrvivid())
+        {
+          CLog::Log(LOGINFO, "{}::{} - HDR Vivid conversion disabled; keep native metadata for receiver output",
+                    __MODULE_NAME__, __FUNCTION__);
         }
 
         // If HDR10 or Dual Priority HDR10+ and doing VS10 - remove the HDR10+ and DV if present to avoid conflict with VS10.
