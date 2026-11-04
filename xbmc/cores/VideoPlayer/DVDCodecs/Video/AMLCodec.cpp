@@ -1883,6 +1883,9 @@ bool CAMLCodec::OpenDecoder(bool restart)
 
   if (!restart)
   {
+    // GUI transfer selection during open needs the current source, before
+    // SetProcessInfoVideoDetails publishes the remaining stream information.
+    m_dataCacheCore.SetVideoColorTransferCharacteristic(m_hints.colorTransferCharacteristic);
     aml_dv_open(m_hints.hdrType, m_hints.bitdepth, m_hints.colorPrimaries);
   }
 

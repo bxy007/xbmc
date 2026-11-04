@@ -468,7 +468,7 @@ bool CWinSystemAmlogic::IsHDRDisplay()
     if (valstr.find("Hybrid Log-Gamma: 1") != std::string::npos)
       m_hdr_caps.SetHLG();
 
-    if (valstr.find("CUVA supported: 1") != std::string::npos)
+    if (valstr.find("CUVA native RX: 1\n") != std::string::npos)
       m_hdr_caps.SetHDRVivid();
   }
 
@@ -479,7 +479,8 @@ bool CWinSystemAmlogic::IsHDRDisplay()
       m_hdr_caps.SetDolbyVision();
   }
 
-  return (m_hdr_caps.SupportsHDR10() | m_hdr_caps.SupportsHDR10Plus() | m_hdr_caps.SupportsHLG());
+  return (m_hdr_caps.SupportsHDR10() | m_hdr_caps.SupportsHDR10Plus() |
+          m_hdr_caps.SupportsHLG() | m_hdr_caps.SupportsHDRVivid());
 }
 
 CHDRCapabilities CWinSystemAmlogic::GetDisplayHDRCapabilities() const

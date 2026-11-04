@@ -930,6 +930,20 @@ int aml_blackout_policy(int new_blackout)
   return 0;
 }
 
+bool aml_display_support_hdrvivid()
+{
+  // This capability includes both receiver-mode EDID support and a usable
+  // native EMP transmitter. An older kernel must retain conversion fallback.
+  const auto caps = CSysfsPath("/sys/class/amhdmitx/amhdmitx0/hdr_cap").Get<std::string>();
+  return caps && caps->find("CUVA native RX: 1\n") != std::string::npos;
+}
+
+static bool aml_hdrvivid_is_pq(StreamHdrType hdrType)
+{
+  return hdrType == StreamHdrType::HDR_TYPE_HDR_VIVID &&
+         CServiceBroker::GetDataCacheCore().GetVideoColorTransferCharacteristic() == AVCOL_TRC_SMPTE2084;
+}
+
 static unsigned int aml_vs10_by_hdrtype(StreamHdrType hdrType, unsigned int bitDepth)
 {
   unsigned int vs10_mode = DOLBY_VISION_OUTPUT_MODE_BYPASS;
@@ -947,8 +961,11 @@ static unsigned int aml_vs10_by_hdrtype(StreamHdrType hdrType, unsigned int bitD
     case StreamHdrType::HDR_TYPE_HDR10PLUS:
       vs10_mode = aml_vs10_by_setting(CSettings::SETTING_COREELEC_AMLOGIC_DV_VS10_HDR10PLUS);
       break;
-    case StreamHdrType::HDR_TYPE_HLG:
     case StreamHdrType::HDR_TYPE_HDR_VIVID:
+      if (aml_display_support_hdrvivid())
+        break;
+      [[fallthrough]];
+    case StreamHdrType::HDR_TYPE_HLG:
       vs10_mode = aml_vs10_by_setting(CSettings::SETTING_COREELEC_AMLOGIC_DV_VS10_HDRHLG);
       break;
     case StreamHdrType::HDR_TYPE_DOLBYVISION:
@@ -2254,7 +2271,8 @@ void aml_hevc_nal_skip_policy(const int value)
 void aml_set_osd_pq_bypass(StreamHdrType hdrType)
 {
   const bool enable = ((hdrType == StreamHdrType::HDR_TYPE_HDR10) ||
-                       (hdrType == StreamHdrType::HDR_TYPE_HDR10PLUS));
+                       (hdrType == StreamHdrType::HDR_TYPE_HDR10PLUS) ||
+                       aml_hdrvivid_is_pq(hdrType));
 
   s_guiPqIsFinalStage.store(enable, std::memory_order_relaxed);
 
@@ -2329,7 +2347,7 @@ void aml_set_linux_osd_sdr8(StreamHdrType hdrType, unsigned int /* bitDepth */,
   else if (vs10_mode == DOLBY_VISION_OUTPUT_MODE_BYPASS)
     sdr8 = (hdrType == StreamHdrType::HDR_TYPE_NONE) ||
            (hdrType == StreamHdrType::HDR_TYPE_HLG) ||
-           (hdrType == StreamHdrType::HDR_TYPE_HDR_VIVID);
+           (hdrType == StreamHdrType::HDR_TYPE_HDR_VIVID && !aml_hdrvivid_is_pq(hdrType));
   else if (vs10_mode == DOLBY_VISION_OUTPUT_MODE_SDR10)
     sdr8 = true;
   else
@@ -2380,7 +2398,7 @@ void aml_set_transfer_pq(StreamHdrType hdrType, unsigned int /* bitDepth */,
     // TODO: any need to test display supports each hdr content (inc fallback) specifically?
     hdr = ((hdrType != StreamHdrType::HDR_TYPE_NONE) &&
            (hdrType != StreamHdrType::HDR_TYPE_HLG) &&
-           (hdrType != StreamHdrType::HDR_TYPE_HDR_VIVID));
+           (hdrType != StreamHdrType::HDR_TYPE_HDR_VIVID || aml_hdrvivid_is_pq(hdrType)));
   }
 
   CLog::Log(LOGDEBUG, "AMLUtils::{} - {}DV support, {}, HDR type is {}, transfer PQ is {}",
@@ -2394,7 +2412,7 @@ void aml_set_transfer_pq(StreamHdrType hdrType, unsigned int /* bitDepth */,
 
   const bool hlg_output = hdr_display &&
                           (hdrType == StreamHdrType::HDR_TYPE_HLG ||
-                           hdrType == StreamHdrType::HDR_TYPE_HDR_VIVID) &&
+                           (hdrType == StreamHdrType::HDR_TYPE_HDR_VIVID && !aml_hdrvivid_is_pq(hdrType))) &&
                           !dv_on;
   if (hlg_output)
     CServiceBroker::GetWinSystem()->GetGfxContext().SetGuiHdr(GuiHdr::HDR);
@@ -2459,6 +2477,8 @@ static bool aml_dv_has_hdr10_graphics(const DOVIStreamInfo& doviStreamInfo)
 
 static bool aml_has_hdr10_graphics(StreamHdrType hdrType)
 {
+  if (aml_hdrvivid_is_pq(hdrType))
+    return true;
   switch (hdrType)
   {
     case StreamHdrType::HDR_TYPE_HDR10:

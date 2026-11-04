@@ -100,6 +100,7 @@ int  aml_get_cpufamily_id();
 bool aml_display_support_hdr_pq();
 bool aml_display_support_hdr_hlg();
 bool aml_display_support_hdr10plus();
+bool aml_display_support_hdrvivid();
 bool aml_display_support_dv();
 struct AMLHdmiAudioCaps
 {

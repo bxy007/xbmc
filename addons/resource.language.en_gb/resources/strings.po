@@ -25071,7 +25071,7 @@ msgstr ""
 #. "Dolby Vision HDR Vivid"
 #: system/settings/settings.xml
 msgctxt "#60136"
-msgid "Set to On to convert each HDR Vivid frame's MaxRGB statistics into a DV profile 8.1 RPU during playback. Vivid tone-mapping curves are not rewritten as Dolby trims. An existing Dolby Vision RPU is left unchanged."
+msgid "Set to On to convert each HDR Vivid frame's MaxRGB statistics into a DV profile 8.1 RPU during playback. Vivid tone-mapping curves are not rewritten as Dolby trims. An existing Dolby Vision RPU is left unchanged. Native HDR Vivid receiver output takes priority when available."
 msgstr ""
 
 #. "Dolby Vision HDR10+"
