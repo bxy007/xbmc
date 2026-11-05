@@ -218,6 +218,8 @@ public:
   }
 
   int m_3dSubtitlePlane;
+  // Existing track tags consulted only to avoid redundant background OCR.
+  std::string identificationMetadata;
   AVColorTransferCharacteristic colorTransferCharacteristic{AVCOL_TRC_UNSPECIFIED};
 };
 

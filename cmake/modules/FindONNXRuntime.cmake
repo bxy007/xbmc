@@ -1,0 +1,11 @@
+# Optional CPU subtitle recognition; other platforms keep the original behavior.
+find_path(ONNXRUNTIME_INCLUDE_DIR onnxruntime_cxx_api.h PATH_SUFFIXES onnxruntime)
+find_library(ONNXRUNTIME_LIBRARY onnxruntime)
+include(FindPackageHandleStandardArgs)
+find_package_handle_standard_args(ONNXRuntime REQUIRED_VARS ONNXRUNTIME_INCLUDE_DIR ONNXRUNTIME_LIBRARY)
+if(ONNXRUNTIME_FOUND)
+  set(ONNXRUNTIME_INCLUDE_DIRS ${ONNXRUNTIME_INCLUDE_DIR})
+  set(ONNXRUNTIME_LIBRARIES ${ONNXRUNTIME_LIBRARY})
+  set(ONNXRUNTIME_DEFINITIONS -DHAS_PGS_OCR=1)
+endif()
+mark_as_advanced(ONNXRUNTIME_INCLUDE_DIR ONNXRUNTIME_LIBRARY)

@@ -1114,6 +1114,7 @@ void CVideoPlayerVideo::Flush(bool sync)
 }
 
 void CVideoPlayerVideo::ProcessOverlays(const VideoPicture& picture, double pts) const {
+  uint64_t generation;
   double subsPts = pts - m_iSubtitleDelay.load(std::memory_order_relaxed);
 
   // remove any overlays that are out of time
@@ -1128,6 +1129,7 @@ void CVideoPlayerVideo::ProcessOverlays(const VideoPicture& picture, double pts)
 
   {
     std::unique_lock lock(*m_pOverlayContainer);
+    generation = m_renderManager.GetSubtitleGeneration();
 
     VecOverlays* pVecOverlays = m_pOverlayContainer->GetOverlays();
     containerSize = pVecOverlays->size();
@@ -1193,7 +1195,7 @@ void CVideoPlayerVideo::ProcessOverlays(const VideoPicture& picture, double pts)
   for (auto& overlay : overlays)
   {
     double pts2 = overlay->bForced ? pts : subsPts;
-    m_renderManager.AddOverlay(overlay, pts2);
+    m_renderManager.AddOverlay(overlay, pts2, generation);
   }
 }
 

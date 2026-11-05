@@ -242,6 +242,7 @@ set(optional_deps Alsa
                   MDNS
                   MicroHttpd
                   NFS
+                  ONNXRuntime
                   Pipewire>=0.3.50
                   Plist
                   PulseAudio

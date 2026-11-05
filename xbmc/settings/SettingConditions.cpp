@@ -445,6 +445,9 @@ void CSettingConditions::Initialize()
   m_simpleConditions.emplace("have_webos");
 #endif
 
+#ifdef HAS_PGS_OCR
+  m_simpleConditions.insert("has_pgs_ocr");
+#endif
 #ifdef HAVE_LCMS2
   m_simpleConditions.emplace("have_lcms2");
 #endif

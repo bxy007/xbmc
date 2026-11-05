@@ -2334,6 +2334,18 @@ CDemuxStream* CDVDDemuxFFmpeg::AddStream(int streamIdx)
           stream = st;
           st->colorTransferCharacteristic = pStream->codecpar->color_trc;
 
+          if (pStream->codecpar->codec_id == AV_CODEC_ID_HDMV_PGS_SUBTITLE)
+          {
+            for (const char* key : {"description", "comment", "summary"})
+            {
+              if (const auto* existing = av_dict_get(pStream->metadata, key, nullptr, 0))
+              {
+                st->identificationMetadata += " ";
+                st->identificationMetadata += existing->value;
+              }
+            }
+          }
+
           if (auto tag = av_dict_get(pStream->metadata, "title", nullptr, 0))
             st->m_description = tag->value;
 

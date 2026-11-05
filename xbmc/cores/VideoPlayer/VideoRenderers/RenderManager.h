@@ -110,7 +110,9 @@ public:
 
   bool Configure(const VideoPicture& picture, float fps, unsigned int orientation, StreamHdrType hdrType, int buffers = 0);
   bool AddVideoPicture(const VideoPicture& picture, volatile std::atomic_bool& bStop, EINTERLACEMETHOD deintMethod, bool wait);
-  void AddOverlay(std::shared_ptr<CDVDOverlay> o, double pts);
+  void AddOverlay(std::shared_ptr<CDVDOverlay> o, double pts, uint64_t generation);
+  uint64_t GetSubtitleGeneration() const { return m_subtitleGeneration.load(); }
+  void ReplaceSubtitleOverlays(const VecOverlays& overlays, double delay, bool visible);
   void ShowVideo(bool enable);
   void PauseAsyncVideoLayerPoll();
   void WaitAsyncMainPace();
@@ -203,6 +205,7 @@ protected:
 
   CBaseRenderer *m_pRenderer = nullptr;
   OVERLAY::CRenderer m_overlays;
+  std::atomic<uint64_t> m_subtitleGeneration{0};
   int m_lastPushedActiveTopPx{-1};
   int m_lastPushedActiveBottomPx{-1};
   int m_lastActiveAreaTopPct{-1};

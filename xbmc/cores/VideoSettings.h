@@ -209,6 +209,8 @@ public:
   int m_AudioStream;
   float m_VolumeAmplification;
   int m_SubtitleStream;
+  // Runtime provenance only; not persisted or compared as a video preference.
+  bool m_SubtitleSelectionSaved{false};
   float m_SubtitleDelay;
   int m_subtitleVerticalPosition{0};
   bool m_subtitleVerticalPositionSave{false};

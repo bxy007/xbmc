@@ -1,4 +1,6 @@
-set(SOURCES DVDFactorySubtitle.cpp
+set(SOURCES PGSIdentify.cpp
+            PGSProbe.cpp
+            DVDFactorySubtitle.cpp
             DVDSubtitleLineCollection.cpp
             DVDSubtitleParserMicroDVD.cpp
             DVDSubtitleParserMPL2.cpp
@@ -29,5 +31,9 @@ set(HEADERS DVDFactorySubtitle.h
             SubtitleParserWebVTT.h
             SubtitlesAdapter.h
             SubtitlesStyle.h)
+
+if(ONNXRUNTIME_FOUND)
+  list(APPEND SOURCES PGSOcr.cpp)
+endif()
 
 core_add_library(dvdsubtitles)

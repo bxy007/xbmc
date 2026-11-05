@@ -154,6 +154,9 @@ public:
   static constexpr auto SETTING_MYVIDEOS_EXTRACTTHUMB = "myvideos.extractthumb";
   static constexpr auto SETTING_MYVIDEOS_STACKVIDEOS = "myvideos.stackvideos";
   static constexpr auto SETTING_LOCALE_SUBTITLELANGUAGE = "locale.subtitlelanguage";
+  static constexpr auto SETTING_SUBTITLES_IDENTIFYPGS = "subtitles.identifypgs";
+  static constexpr auto SETTING_SUBTITLES_PGSAUTOSWITCH = "subtitles.pgsautoswitch";
+  static constexpr auto SETTING_SUBTITLES_PGSPREFERREDTYPE = "subtitles.pgspreferredtype";
   static constexpr auto SETTING_SUBTITLES_PARSECAPTIONS = "subtitles.parsecaptions";
   static constexpr auto SETTING_SUBTITLES_PGSVERTICALMODE = "subtitles.pgsverticalmode";
   static constexpr auto SETTING_SUBTITLES_PGSCOLORSPACE = "subtitles.pgscolorspace";

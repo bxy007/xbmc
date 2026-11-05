@@ -26938,3 +26938,77 @@ msgstr ""
 msgctxt "#65124"
 msgid "HDR (BT.2020 PQ)"
 msgstr ""
+
+#. PGS description. The ★ marker is added by the player.
+msgctxt "#44400"
+msgid "Simplified Chinese"
+msgstr ""
+
+#. PGS description. The ★ marker is added by the player.
+msgctxt "#44401"
+msgid "Traditional Chinese"
+msgstr ""
+
+#. PGS description. The ★ marker is added by the player.
+msgctxt "#44402"
+msgid "Simplified Chinese / English bilingual"
+msgstr ""
+
+#. PGS description. The ★ marker is added by the player.
+msgctxt "#44403"
+msgid "Traditional Chinese / English bilingual"
+msgstr ""
+
+#. PGS description. The ★ marker is added by the player.
+msgctxt "#44404"
+msgid "Chinese / English bilingual (script unknown)"
+msgstr ""
+
+#. PGS description. The ★ marker is added by the player.
+msgctxt "#44405"
+msgid "Identify Chinese PGS subtitle types"
+msgstr ""
+
+#. PGS description. The ★ marker is added by the player.
+msgctxt "#44406"
+msgid "Identify Simplified/Traditional Chinese and Chinese/English bilingual PGS subtitles in the background. Existing descriptive track names are preserved. Generated descriptions start with ★; track selection and media files are preserved."
+msgstr ""
+
+#. PGS description. The ★ marker is added by the player.
+msgctxt "#44407"
+msgid "Mixed Chinese scripts"
+msgstr ""
+
+#. PGS description. The ★ marker is added by the player.
+msgctxt "#44408"
+msgid "Chinese script unknown"
+msgstr ""
+
+#. PGS description. The ★ marker is added by the player.
+msgctxt "#44412"
+msgid "Signs"
+msgstr ""
+
+#. PGS description. The ★ marker is added by the player.
+msgctxt "#44413"
+msgid "Contains forced subtitles"
+msgstr ""
+
+msgctxt "#44414"
+msgid "Automatically switch after identification"
+msgstr ""
+
+
+msgctxt "#44415"
+msgid "Switch once to a matching PGS track after its type is known. Manual subtitle selection or visibility changes during playback take precedence."
+msgstr ""
+
+
+msgctxt "#44416"
+msgid "Preferred subtitle type"
+msgstr ""
+
+
+msgctxt "#44417"
+msgid "Prioritize identifying this type. If no matching track is found after sampling, use the same Chinese script with the opposite mono/bilingual type. Unconfirmed tracks do not trigger fallback."
+msgstr ""

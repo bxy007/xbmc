@@ -14,6 +14,7 @@
 #include "DVDCodecs/Overlay/DVDOverlaySpu.h"
 #include "DVDDemuxers/DemuxStreamSSIF.h"
 #include "DVDSubtitles/DVDSubtitleParser.h"
+#include "VideoRenderers/RenderManager.h"
 #include "ServiceBroker.h"
 #include "cores/VideoPlayer/Interface/DemuxPacket.h"
 #include "cores/VideoPlayer/Interface/TimingConstants.h"
@@ -26,8 +27,10 @@
 
 using namespace std::chrono_literals;
 
-CVideoPlayerSubtitle::CVideoPlayerSubtitle(CDVDOverlayContainer* pOverlayContainer, CProcessInfo &processInfo)
-: CThread("VideoPlayerSubtitle"), IDVDStreamPlayer(processInfo), m_messageQueue("subtitle")
+CVideoPlayerSubtitle::CVideoPlayerSubtitle(CDVDOverlayContainer* pOverlayContainer, CProcessInfo &processInfo,
+                                         CRenderManager& renderManager)
+: CThread("VideoPlayerSubtitle"), IDVDStreamPlayer(processInfo),
+  m_renderManager(renderManager), m_messageQueue("subtitle")
 {
   m_pOverlayContainer = pOverlayContainer;
   m_lastPts = DVD_NOPTS_VALUE;
@@ -66,11 +69,31 @@ std::shared_ptr<CDVDOverlayGroup> InitialiseNewOverlayGroup(std::shared_ptr<CDVD
 }
 } // namespace
 
-void CVideoPlayerSubtitle::HandleMessage(const std::shared_ptr<CDVDMsg>& pMsg)
+void CVideoPlayerSubtitle::HandleMessage(const std::shared_ptr<CDVDMsg>& pMsg,
+                                       CDVDOverlayContainer* replayContainer)
 {
   std::lock_guard lock(m_section);
 
-  if (pMsg->IsType(CDVDMsg::DEMUXER_PACKET))
+  auto* container = replayContainer ? replayContainer : m_pOverlayContainer;
+  if (pMsg->IsType(CDVDMsg::SUBTITLE_REPLAY))
+  {
+    const auto replay = std::static_pointer_cast<CDVDMsgSubtitleReplay>(pMsg);
+    CDVDOverlayContainer pending;
+    for (const auto& packet : replay->packets)
+    {
+      HandleMessage(packet, &pending);
+      pending.CleanUp(replay->pts);
+    }
+    // No stale caption flashes while replay catches up. Audio/video keep
+    // running; only the completed overlay batch takes the renderer lock.
+    std::lock_guard overlayLock(*m_pOverlayContainer);
+    for (const auto& overlay : *pending.GetOverlays())
+      m_pOverlayContainer->ProcessAndAddOverlayIfValid(overlay);
+    m_renderManager.ReplaceSubtitleOverlays(*pending.GetOverlays(), replay->delay, replay->visible);
+    CLog::Log(LOGDEBUG, "Subtitle switch replay: packets={} overlays={} pts={:.3f}",
+              replay->packets.size(), pending.GetSize(), replay->pts / DVD_TIME_BASE);
+  }
+  else if (pMsg->IsType(CDVDMsg::DEMUXER_PACKET))
   {
     auto pMsgDemuxerPacket = std::static_pointer_cast<CDVDMsgDemuxerPacket>(pMsg);
     DemuxPacket* pPacket = pMsgDemuxerPacket->GetPacket();
@@ -109,11 +132,11 @@ void CVideoPlayerSubtitle::HandleMessage(const std::shared_ptr<CDVDMsg>& pMsg)
               group->m_overlays.emplace_back(overlay);
             else
             {
-              m_pOverlayContainer->ProcessAndAddOverlayIfValid(group);
+              container->ProcessAndAddOverlayIfValid(group);
               group = InitialiseNewOverlayGroup(overlay);
             }
           }
-          m_pOverlayContainer->ProcessAndAddOverlayIfValid(group);
+          container->ProcessAndAddOverlayIfValid(group);
         }
       }
     }
@@ -124,7 +147,7 @@ void CVideoPlayerSubtitle::HandleMessage(const std::shared_ptr<CDVDMsg>& pMsg)
       if (pSPUInfo)
       {
         CLog::Log(LOGDEBUG, "CVideoPlayer::ProcessSubData: Got complete SPU packet");
-        m_pOverlayContainer->ProcessAndAddOverlayIfValid(pSPUInfo);
+        container->ProcessAndAddOverlayIfValid(pSPUInfo);
       }
     }
 

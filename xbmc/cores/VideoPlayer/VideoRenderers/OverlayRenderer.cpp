@@ -9,6 +9,8 @@
 
 #include "OverlayRenderer.h"
 
+#include <cmath>
+
 #include "OverlayRendererUtil.h"
 #include "ServiceBroker.h"
 #include "application/ApplicationComponents.h"
@@ -76,6 +78,48 @@ void CRenderer::AddOverlay(std::shared_ptr<CDVDOverlay> o, double pts, int index
   m_buffers[index].push_back(e);
 
   m_overlayCount[index].fetch_add(1, std::memory_order_relaxed);
+}
+
+void CRenderer::ReplaceSubtitleOverlays(const VecOverlays& overlays,
+                                       const std::array<double, NUM_BUFFERS>& pts,
+                                       double delay, bool visible)
+{
+  std::unique_lock lock(m_section);
+  for (size_t index = 0; index < NUM_BUFFERS; ++index)
+  {
+    m_buffers[index].clear();
+    if (std::isfinite(pts[index]))
+    {
+      for (const auto& overlay : overlays)
+      {
+        if (!overlay->bForced && !visible) continue;
+        const double time = overlay->bForced ? pts[index] : pts[index] - delay;
+        if (overlay->iPTSStartTime > time ||
+            (overlay->iPTSStopTime != 0 && overlay->iPTSStopTime <= time)) continue;
+        if (overlay->IsOverlayType(DVDOVERLAY_TYPE_GROUP))
+        {
+          for (const auto& child : static_cast<const CDVDOverlayGroup&>(*overlay).m_overlays)
+          {
+            SElement element;
+            element.pts = time;
+            element.overlay_dvd = child;
+            m_buffers[index].push_back(std::move(element));
+          }
+        }
+        else
+        {
+          SElement element;
+          element.pts = time;
+          element.overlay_dvd = overlay;
+          m_buffers[index].push_back(std::move(element));
+        }
+      }
+    }
+    m_overlayCount[index].store(m_buffers[index].size(), std::memory_order_relaxed);
+  }
+  // GPU objects are released by the normal render-thread cache collection.
+  m_buffersChanged.store(true, std::memory_order_relaxed);
+  MarkOverlayRenderChanged();
 }
 
 void CRenderer::Release(std::vector<SElement>& list)

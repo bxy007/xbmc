@@ -108,6 +108,9 @@ namespace OVERLAY {
 
     void AddOverlay(std::shared_ptr<CDVDOverlay> o, double pts, int index);
     virtual void Render(int idx, float depth = 0.0f);
+    void ReplaceSubtitleOverlays(const VecOverlays& overlays,
+                                 const std::array<double, NUM_BUFFERS>& pts,
+                                 double delay, bool visible);
 
     /*!
      * \brief Release resources

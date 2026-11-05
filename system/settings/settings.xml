@@ -711,6 +711,38 @@
           </constraints>
           <control type="list" format="string" />
         </setting>
+        <setting id="subtitles.identifypgs" type="boolean" label="44405" help="44406">
+          <requirement>HAS_PGS_OCR</requirement>
+          <level>0</level>
+          <default>true</default>
+          <control type="toggle" />
+        </setting>
+        <setting id="subtitles.pgsautoswitch" type="boolean" label="44414" help="44415">
+          <requirement>HAS_PGS_OCR</requirement>
+          <level>0</level>
+          <default>true</default>
+          <dependencies>
+            <dependency type="enable" setting="subtitles.identifypgs">true</dependency>
+          </dependencies>
+          <control type="toggle" />
+        </setting>
+        <setting id="subtitles.pgspreferredtype" type="integer" label="44416" help="44417">
+          <requirement>HAS_PGS_OCR</requirement>
+          <level>0</level>
+          <default>2</default>
+          <dependencies>
+            <dependency type="enable" setting="subtitles.identifypgs">true</dependency>
+          </dependencies>
+          <constraints>
+            <options>
+              <option label="44400">0</option>
+              <option label="44401">1</option>
+              <option label="44402">2</option>
+              <option label="44403">3</option>
+            </options>
+          </constraints>
+          <control type="spinner" format="string" />
+        </setting>
       </group>
       <group id="3" label="37032">
         <setting id="accessibility.audiovisual" type="boolean" label="37034" help="37035">

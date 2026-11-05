@@ -8,6 +8,8 @@
 
 #include "RenderManager.h"
 
+#include <limits>
+
 #include "FileItem.h"
 #include "cores/VideoPlayer/DVDCodecs/Overlay/DVDOverlay.h"
 
@@ -2147,23 +2149,32 @@ bool CRenderManager::AddVideoPicture(const VideoPicture& picture, volatile std::
   return true;
 }
 
-void CRenderManager::AddOverlay(std::shared_ptr<CDVDOverlay> o, double pts)
+void CRenderManager::AddOverlay(std::shared_ptr<CDVDOverlay> o, double pts, uint64_t generation)
 {
-  int idx;
+  std::unique_lock<CCriticalSection> presentLock(m_presentlock);
+  std::unique_lock<CCriticalSection> dataLock(m_datalock);
+  if (m_free.empty() || generation != m_subtitleGeneration.load()) return;
+  m_overlays.AddOverlay(std::move(o), pts, m_free.front());
+}
+
+void CRenderManager::ReplaceSubtitleOverlays(const VecOverlays& overlays, double delay, bool visible)
+{
+  std::unique_lock<CCriticalSection> presentLock(m_presentlock);
+  std::unique_lock<CCriticalSection> dataLock(m_datalock);
+  ++m_subtitleGeneration; // Reject a concurrently collected old-track snapshot.
+  std::array<double, NUM_BUFFERS> pts;
+  pts.fill(std::numeric_limits<double>::quiet_NaN());
+  const auto include = [&](int index)
   {
-    std::unique_lock<CCriticalSection> lock(m_presentlock);
-
-    if (m_free.empty())
-      return;
-    idx = m_free.front();
-  }
-  std::unique_lock<CCriticalSection> lock(m_datalock);
-
-  const bool isBitmap = o && (o->IsOverlayType(DVDOVERLAY_TYPE_IMAGE) ||
-                              o->IsOverlayType(DVDOVERLAY_TYPE_SPU));
-  const bool isText = o && (o->IsOverlayType(DVDOVERLAY_TYPE_SSA) ||
-                            o->IsOverlayType(DVDOVERLAY_TYPE_TEXT));
-  m_overlays.AddOverlay(std::move(o), pts, idx);
+    if (index >= 0 && index < NUM_BUFFERS) pts[index] = m_Queue[index].pts;
+  };
+  include(m_presentsource);
+  include(m_presentsourcePast);
+  for (const int index : m_queued) include(index);
+  if (m_asyncVideoWorkerActive.load(std::memory_order_relaxed) &&
+      m_asyncMirror.presentsource >= 0 && m_asyncMirror.presentsource < NUM_BUFFERS)
+    pts[m_asyncMirror.presentsource] = m_asyncMirror.pts;
+  m_overlays.ReplaceSubtitleOverlays(overlays, pts, delay, visible);
 }
 
 bool CRenderManager::Supports(ERENDERFEATURE feature) const

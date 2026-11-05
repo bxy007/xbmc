@@ -7,6 +7,8 @@
  */
 
 #include "VideoPlayer.h"
+#include "filesystem/SpecialProtocol.h"
+#include <cmath>
 #include "cores/VideoPlayer/BDStageTrace.h"
 
 #include "DVDCodecs/DVDCodecUtils.h"
@@ -25,6 +27,7 @@
 #include "DVDInputStreams/DVDInputStreamNavigator.h"
 #include "DVDInputStreams/InputStreamPVRBase.h"
 #include "DVDMessage.h"
+#include "DVDSubtitles/SubtitleSwitchPacket.h"
 #include "FileItem.h"
 #include "GUIUserMessages.h"
 #include "LangInfo.h"
@@ -752,7 +755,7 @@ void CVideoPlayer::CreatePlayers()
 
   m_VideoPlayerVideo = new CVideoPlayerVideo(&m_clock, &m_overlayContainer, m_messenger, m_renderManager, *m_processInfo, m_messageQueueTimeSize);
   m_VideoPlayerAudio = new CVideoPlayerAudio(&m_clock, m_messenger, m_renderManager, *m_processInfo, m_messageQueueTimeSize);
-  m_VideoPlayerSubtitle = new CVideoPlayerSubtitle(&m_overlayContainer, *m_processInfo);
+  m_VideoPlayerSubtitle = new CVideoPlayerSubtitle(&m_overlayContainer, *m_processInfo, m_renderManager);
   m_VideoPlayerTeletext = new CDVDTeletextData(*m_processInfo);
   m_VideoPlayerRadioRDS = new CDVDRadioRDSData(*m_processInfo);
   m_VideoPlayerAudioID3 = std::make_unique<CVideoPlayerAudioID3>(*m_processInfo);
@@ -1004,6 +1007,11 @@ void CVideoPlayer::OnStartup()
 
 bool CVideoPlayer::OpenInputStream()
 {
+  m_pgsManualSelection = false;
+  m_pgsAutoSwitchDone = false;
+  m_subtitleSwitchCache.Clear();
+  m_pgsProbe.Reset(CServiceBroker::GetSettingsComponent()->GetSettings()->GetBool(CSettings::SETTING_SUBTITLES_IDENTIFYPGS),
+                   CSpecialProtocol::TranslatePath("special://xbmc/system/ocr"));
   m_menus.reset();
   if (m_pInputStream.use_count() > 1)
     throw std::runtime_error("m_pInputStream reference count is greater than 1");
@@ -1129,6 +1137,7 @@ bool CVideoPlayer::OpenDemuxStream()
 
 void CVideoPlayer::CloseDemuxer()
 {
+  m_subtitleSwitchCache.Clear();
   m_pDemuxer.reset();
   m_SelectionStreams.Clear(STREAM_NONE, STREAM_SOURCE_DEMUX);
 
@@ -1346,6 +1355,7 @@ bool CVideoPlayer::ReadPacket(DemuxPacket*& packet, CDemuxStream*& stream)
     // stream changed, update and open defaults
     if (packet->iStreamId == DMX_SPECIALID_STREAMCHANGE)
     {
+      m_subtitleSwitchCache.Clear();
       m_SelectionStreams.Clear(STREAM_NONE, STREAM_SOURCE_DEMUX);
       m_SelectionStreams.Update(m_pInputStream, m_pDemuxer.get());
       m_pDemuxer->GetPrograms(m_programs);
@@ -1695,6 +1705,7 @@ void CVideoPlayer::Prepare()
 
   IPlayerCallback *cb = &m_callback;
   CFileItem fileItem = m_item;
+  m_pgsVideoSettingsReady = false;
   m_outboundEvents->Submit([=]() {
     cb->RequestVideoSettings(fileItem);
   });
@@ -1899,6 +1910,7 @@ void CVideoPlayer::Process()
 
     // update player state
     UpdatePlayState(200);
+    CheckPGSPreferredSubtitle();
 
     // make sure we run subtitle process here
     m_VideoPlayerSubtitle->UpdatePlaybackPosition(m_clock.GetClock() + m_State.time_offset - m_VideoPlayerVideo->GetSubtitleDelay(), m_State.time_offset);
@@ -2220,6 +2232,18 @@ bool CVideoPlayer::CheckIsCurrent(const CCurrentStream& current,
 
 void CVideoPlayer::ProcessPacket(CDemuxStream* pStream, DemuxPacket* pPacket)
 {
+  CacheSubtitleForSwitch(pStream, pPacket);
+  if (pStream->type == STREAM_SUBTITLE && pStream->codec == AV_CODEC_ID_HDMV_PGS_SUBTITLE &&
+      pPacket->iSize > 0)
+  {
+    const auto* subtitle = dynamic_cast<const CDemuxStreamSubtitle*>(pStream);
+    m_pgsProbe.SetEnabled(CServiceBroker::GetSettingsComponent()->GetSettings()->GetBool(CSettings::SETTING_SUBTITLES_IDENTIFYPGS));
+    m_pgsProbe.Feed({pStream->demuxerId, pStream->source, pStream->uniqueId},
+                    pStream->language, pStream->GetStreamName() + " " + (subtitle ? subtitle->identificationMetadata : ""),
+                    pPacket->pData, pPacket->iSize,
+                    pPacket->pts == DVD_NOPTS_VALUE ? std::numeric_limits<double>::quiet_NaN() : pPacket->pts / DVD_TIME_BASE,
+                    (pStream->flags & FLAG_FORCED) != 0);
+  }
   // process packet if it belongs to selected stream.
   // for dvd's don't allow automatic opening of streams*/
 
@@ -2365,6 +2389,74 @@ DemuxPacket* CopySubtitlePacket(const DemuxPacket* src)
 }
 
 constexpr size_t SUBTITLE_SEEK_CACHE_MAX_BYTES = 32 * 1024 * 1024;
+}
+
+bool CVideoPlayer::CanCacheSubtitleForSwitch(const CDemuxStream* stream) const
+{
+  return stream && stream->type == STREAM_SUBTITLE &&
+         STREAM_SOURCE_MASK(stream->source) == STREAM_SOURCE_DEMUX &&
+         (stream->codec == AV_CODEC_ID_HDMV_PGS_SUBTITLE || IsCachableTextSubtitle(stream->codec)) &&
+         pgs_sub_candidate_language(stream->language, "") != 0 &&
+         m_pInputStream && !m_pInputStream->IsStreamType(DVDSTREAM_TYPE_DVD) && !IsInMenuInternal();
+}
+
+void CVideoPlayer::CacheSubtitleForSwitch(CDemuxStream* stream, const DemuxPacket* packet)
+{
+  if (stream->type != STREAM_SUBTITLE) return;
+  const CSubtitleSwitchCache::Key key{stream->demuxerId, stream->source, stream->uniqueId};
+  if (!CanCacheSubtitleForSwitch(stream) || packet->cryptoInfo ||
+      !SubtitleSwitchCanOmitSideData(
+          static_cast<const AVPacketSideData*>(packet->pSideData), packet->iSideDataElems) ||
+      !packet->pData || packet->iSize <= 0)
+  {
+    m_subtitleSwitchCache.Erase(key);
+    return;
+  }
+  CSubtitleSwitchCache::Packet cached;
+  if (static_cast<size_t>(packet->iSize) > CSubtitleSwitchCache::MAX_TRACK_BYTES)
+  {
+    m_subtitleSwitchCache.Erase(key);
+    return;
+  }
+  cached.data.assign(packet->pData, packet->pData + packet->iSize);
+  cached.pts = packet->pts;
+  cached.dts = packet->dts;
+  cached.duration = packet->duration;
+  cached.correction = packet->m_ptsOffsetCorrection;
+  cached.group = packet->iGroupId;
+  const double pts = m_clock.GetClock() - m_VideoPlayerVideo->GetSubtitleDelay();
+  m_subtitleSwitchCache.Add(key, stream->codec, stream->changes,
+                           stream->codec == AV_CODEC_ID_HDMV_PGS_SUBTITLE, std::move(cached), pts);
+}
+
+bool CVideoPlayer::ReplaySubtitleForSwitch(CDemuxStream* stream)
+{
+  const double pts = m_clock.GetClock() - m_VideoPlayerVideo->GetSubtitleDelay();
+  auto cached = m_subtitleSwitchCache.Get({stream->demuxerId, stream->source, stream->uniqueId},
+                                         stream->codec, stream->changes, pts);
+  std::vector<std::shared_ptr<CDVDMsgDemuxerPacket>> packets;
+  for (const auto& p : cached)
+  {
+    auto* copy = CDVDDemuxUtils::AllocateDemuxPacket(p.data.size());
+    if (!copy) return false;
+    std::memcpy(copy->pData, p.data.data(), p.data.size());
+    copy->iSize = static_cast<int>(p.data.size());
+    copy->pts = p.pts;
+    copy->dts = p.dts;
+    copy->duration = p.duration;
+    copy->m_ptsOffsetCorrection = p.correction;
+    copy->iGroupId = p.group;
+    copy->iStreamId = stream->uniqueId;
+    copy->demuxerId = stream->demuxerId;
+    packets.emplace_back(std::make_shared<CDVDMsgDemuxerPacket>(copy, false));
+  }
+  CLog::Log(LOGDEBUG, "Subtitle switch without seek: stream={} packets={} cacheBytes={}",
+            stream->uniqueId, packets.size(), m_subtitleSwitchCache.Bytes());
+  const bool havePackets = !packets.empty();
+  m_VideoPlayerSubtitle->SendMessage(std::make_shared<CDVDMsgSubtitleReplay>(
+      std::move(packets), pts, m_VideoPlayerVideo->GetSubtitleDelay(),
+      m_processInfo->GetVideoSettings().m_SubtitleOn));
+  return havePackets;
 }
 
 void CVideoPlayer::ProcessSubData(CDemuxStream* pStream, DemuxPacket* pPacket)
@@ -3526,6 +3618,7 @@ bool CVideoPlayer::CheckContinuity(CCurrentStream& current, DemuxPacket* pPacket
        fabs(this_dts - that_dts) < DVD_MSEC_TO_TIME(1000))
     {
       m_offset_pts += correction;
+      m_subtitleSwitchCache.Clear(); // Cached PTS belong to the previous timeline.
       UpdateCorrection(pPacket, correction);
       lastdts = pPacket->dts;
       logComponentM(LOGDEBUG, LOGAVTIMING, "CVideoPlayer::CheckContinuity - update correction: {:f}", correction);
@@ -3699,6 +3792,8 @@ void CVideoPlayer::SendPlayerMessage(std::shared_ptr<CDVDMsg> pMsg, unsigned int
 void CVideoPlayer::OnExit()
 {
   CLog::Log(LOGDEBUG, "CVideoPlayer::OnExit()");
+  m_pgsProbe.Reset(false, "");
+  m_subtitleSwitchCache.Clear();
 
   // set event to inform openfile something went wrong in case openfile is still waiting for this event
   SetCaching(CACHESTATE_DONE);
@@ -4135,8 +4230,21 @@ void CVideoPlayer::HandleMessages()
     else if (pMsg->IsType(CDVDMsg::PLAYER_SET_SUBTITLESTREAM))
     {
       auto pMsg2 = std::static_pointer_cast<CDVDMsgPlayerSetSubtitleStream>(pMsg);
+      const auto settings = CServiceBroker::GetSettingsComponent()->GetSettings();
+      if (pMsg2->IsAutomatic() &&
+          (m_pgsManualSelection || !m_pgsVideoSettingsReady ||
+           m_processInfo->GetVideoSettings().m_SubtitleSelectionSaved ||
+           !settings->GetBool(CSettings::SETTING_SUBTITLES_IDENTIFYPGS) ||
+           !settings->GetBool(CSettings::SETTING_SUBTITLES_PGSAUTOSWITCH)))
+        continue;
 
       SelectionStream& st = m_SelectionStreams.Get(STREAM_SUBTITLE, pMsg2->GetStreamId());
+      if (pMsg2->IsAutomatic() && FindPGSPreferredSubtitle(
+          settings->GetInt(CSettings::SETTING_SUBTITLES_PGSPREFERREDTYPE)) != pMsg2->GetStreamId())
+      {
+        m_pgsAutoSwitchDone = false; // Metadata/preference changed while queued.
+        continue;
+      }
       if(st.source != STREAM_SOURCE_NONE)
       {
         if(st.source == STREAM_SOURCE_NAV && m_pInputStream && m_pInputStream->IsStreamType(DVDSTREAM_TYPE_DVD))
@@ -4153,7 +4261,18 @@ void CVideoPlayer::HandleMessages()
           CloseStream(m_CurrentSubtitle, false);
           if (OpenStream(m_CurrentSubtitle, st.demuxerId, st.id, st.source))
           {
-            QueueSubtitleSwitchSeek(st);
+            if (pMsg2->IsAutomatic())
+            {
+              m_processInfo->GetVideoSettingsLocked().SetSubtitleStream(pMsg2->GetStreamId());
+              CLog::Log(LOGDEBUG, "PGS identification: automatically selected subtitle index={}",
+                        pMsg2->GetStreamId());
+            }
+            auto* subtitle = m_pDemuxer ? m_pDemuxer->GetStream(st.demuxerId, st.id) : nullptr;
+            if (STREAM_SOURCE_MASK(st.source) == STREAM_SOURCE_DEMUX &&
+                CanCacheSubtitleForSwitch(subtitle))
+              ReplaySubtitleForSwitch(subtitle);
+            else if (!pMsg2->IsAutomatic())
+              QueueSubtitleSwitchSeek(st);
             if (m_pInputStream && m_pInputStream->IsStreamType(DVDSTREAM_TYPE_BLURAY) && m_pDemuxer)
             {
               CDemuxStream* ds = m_pDemuxer->GetStream(st.demuxerId, st.id);
@@ -4701,6 +4820,7 @@ bool CVideoPlayer::GetSubtitleVisible() const
 
 void CVideoPlayer::SetSubtitleVisible(bool bVisible)
 {
+  m_pgsManualSelection = true;
   m_messenger.Put(
       std::make_shared<CDVDMsgBool>(CDVDMsg::PLAYER_SET_SUBTITLESTREAM_VISIBLE, bVisible));
   m_processInfo->GetVideoSettingsLocked().SetSubtitleVisible(bVisible);
@@ -5436,6 +5556,8 @@ bool CVideoPlayer::CloseStream(CCurrentStream& current, bool bWaitForBuffers)
 
 void CVideoPlayer::FlushBuffers(double pts, bool accurate, bool sync)
 {
+  m_pgsProbe.Flush();
+  m_subtitleSwitchCache.Clear();
   logComponentM(LOGDEBUG, LOGVIDEO, "CVideoPlayer::FlushBuffers - flushing buffers");
 
   double startpts;
@@ -6782,6 +6904,10 @@ void CVideoPlayer::UpdatePlayState(double timeout)
     state.timeMax = state.timeMax - static_cast<double>(m_Edl.GetTotalCutTime());
   }
 
+  m_pgsProbe.UpdatePlayback(state.time / 1000.0,
+                           m_playSpeed > DVD_PLAYSPEED_PAUSE &&
+                               m_caching == CACHESTATE_DONE && !state.isInMenu);
+
   if (m_caching > CACHESTATE_DONE && m_caching < CACHESTATE_PLAY)
     state.caching = true;
   else
@@ -6857,6 +6983,7 @@ CVideoSettings CVideoPlayer::GetVideoSettings() const
 void CVideoPlayer::SetVideoSettings(CVideoSettings& settings)
 {
   m_processInfo->SetVideoSettings(settings);
+  m_pgsVideoSettingsReady = true;
   m_renderManager.SetVideoSettings(settings);
   const int settingsDelayMs = static_cast<int>(settings.m_AudioDelay * 1000.0f);
   m_renderManager.SetDelay(settingsDelayMs);
@@ -7345,6 +7472,22 @@ void CVideoPlayer::GetSubtitleStreamInfo(int index, SubtitleStreamInfo& info) co
   const SelectionStream& s = m_content.m_selectionStreams.Get(STREAM_SUBTITLE, index);
   info.name = s.name;
 
+  // Labels do not rewrite original metadata. Optional PGS auto-selection
+  // consumes typed evidence separately, never these localized strings.
+  const bool identify = CServiceBroker::GetSettingsComponent()->GetSettings()->GetBool(
+      CSettings::SETTING_SUBTITLES_IDENTIFYPGS);
+  const auto identified = identify ? m_pgsProbe.Get({s.demuxerId, s.source, s.id})
+                                   : pgs_subtitle_info{};
+  if (identified.active && !identified.descriptive_title)
+  {
+    const auto label = pgs_subtitle_info_label(identified, [](uint32_t id) -> std::string
+    {
+      return g_localizeStrings.Get(id);
+    });
+    if (!info.name.empty()) info.name += " ";
+    info.name += "★" + label;
+  }
+
   if (s.type == STREAM_NONE)
     info.name += "(Invalid)";
 
@@ -7355,8 +7498,63 @@ void CVideoPlayer::GetSubtitleStreamInfo(int index, SubtitleStreamInfo& info) co
   STREAM_SOURCE_MASK(s.source) == STREAM_SOURCE_TEXT;
 }
 
+void CVideoPlayer::CheckPGSPreferredSubtitle()
+{
+  const auto settings = CServiceBroker::GetSettingsComponent()->GetSettings();
+  const int preference = settings->GetInt(CSettings::SETTING_SUBTITLES_PGSPREFERREDTYPE);
+  m_pgsProbe.SetPreferredType(preference);
+  if (m_pgsManualSelection || m_pgsAutoSwitchDone || !m_pgsVideoSettingsReady ||
+      m_processInfo->GetVideoSettings().m_SubtitleSelectionSaved ||
+      !settings->GetBool(CSettings::SETTING_SUBTITLES_IDENTIFYPGS) ||
+      !settings->GetBool(CSettings::SETTING_SUBTITLES_PGSAUTOSWITCH) ||
+      !m_processInfo->GetVideoSettings().m_SubtitleOn || IsInMenuInternal())
+    return;
+  const int selected = FindPGSPreferredSubtitle(preference);
+  if (selected < 0) return;
+  const int current = m_SelectionStreams.TypeIndexOf(STREAM_SUBTITLE, m_CurrentSubtitle.source,
+                                                     m_CurrentSubtitle.demuxerId, m_CurrentSubtitle.id);
+  m_pgsAutoSwitchDone = true;
+  if (selected != current)
+    m_messenger.Put(std::make_shared<CDVDMsgPlayerSetSubtitleStream>(selected, true));
+}
+
+int CVideoPlayer::FindPGSPreferredSubtitle(int preference)
+{
+  std::vector<pgs_subtitle_info> candidates(m_SelectionStreams.CountType(STREAM_SUBTITLE));
+  for (size_t index = 0; index < candidates.size(); ++index)
+  {
+    const auto& st = m_SelectionStreams.Get(STREAM_SUBTITLE, static_cast<int>(index));
+    if (!m_pDemuxer || (st.flags & StreamFlags::FLAG_FORCED)) continue;
+    auto* stream = m_pDemuxer->GetStream(st.demuxerId, st.id);
+    if (!stream || stream->type != STREAM_SUBTITLE || stream->codec != AV_CODEC_ID_HDMV_PGS_SUBTITLE)
+      continue;
+    const auto* subtitle = dynamic_cast<const CDemuxStreamSubtitle*>(stream);
+    // Register all candidate metadata before deciding that a preferred type
+    // is absent. A track whose first packet arrives later must not be skipped.
+    const auto title = stream->GetStreamName() + " " + (subtitle ? subtitle->identificationMetadata : "");
+    if (!pgs_sub_candidate_language(stream->language, title)) continue;
+    auto& info = candidates[index];
+    pgs_subtitle_info_from_metadata(&info, stream->language.c_str(), title.c_str(), false);
+    if (info.descriptive_title)
+    {
+      info.sampled = true; // No packet/model/track slot needed for an authoritative title.
+      continue;
+    }
+    m_pgsProbe.Feed({stream->demuxerId, stream->source, stream->uniqueId}, stream->language,
+                   title, nullptr, 0, NAN, (stream->flags & FLAG_FORCED) != 0);
+    const auto observed = m_pgsProbe.Get({st.demuxerId, st.source, st.id});
+    if (observed.active) info = observed;
+    // If the bounded probe cannot admit this track, keep its unresolved
+    // metadata in the choice set rather than incorrectly proving absence.
+  }
+  const int current = m_SelectionStreams.TypeIndexOf(STREAM_SUBTITLE, m_CurrentSubtitle.source,
+                                                     m_CurrentSubtitle.demuxerId, m_CurrentSubtitle.id);
+  return pgs_sub_select_preference(candidates, preference, current);
+}
+
 void CVideoPlayer::SetSubtitle(int iStream)
 {
+  m_pgsManualSelection = true;
   m_messenger.Put(std::make_shared<CDVDMsgPlayerSetSubtitleStream>(iStream));
   m_processInfo->GetVideoSettingsLocked().SetSubtitleStream(iStream);
 }

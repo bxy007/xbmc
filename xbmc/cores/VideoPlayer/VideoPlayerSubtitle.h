@@ -25,11 +25,13 @@ class CDVDSubtitleParser;
 class CDVDInputStreamNavigator;
 class CDVDOverlayCodec;
 class CDemuxStreamSSIF;
+class CRenderManager;
 
 class CVideoPlayerSubtitle : public CThread, public IDVDStreamPlayer
 {
 public:
-  CVideoPlayerSubtitle(CDVDOverlayContainer* pOverlayContainer, CProcessInfo &processInfo);
+  CVideoPlayerSubtitle(CDVDOverlayContainer* pOverlayContainer, CProcessInfo &processInfo,
+                       CRenderManager& renderManager);
   ~CVideoPlayerSubtitle() override;
 
   void UpdatePlaybackPosition(double pts, double offset);
@@ -56,11 +58,13 @@ public:
 protected:
   void Process() override;
   void ProcessParser(double pts, double offset);
-  void HandleMessage(const std::shared_ptr<CDVDMsg>& pMsg);
+  void HandleMessage(const std::shared_ptr<CDVDMsg>& pMsg,
+                     CDVDOverlayContainer* replayContainer = nullptr);
 
 private:
   std::atomic<CDemuxStreamSSIF*> m_pSSIF{nullptr};
   CDVDOverlayContainer* m_pOverlayContainer;
+  CRenderManager& m_renderManager;
 
   std::unique_ptr<CDVDSubtitleParser> m_pSubtitleFileParser;
   std::unique_ptr<CDVDOverlayCodec> m_pOverlayCodec;

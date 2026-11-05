@@ -11,6 +11,8 @@
 #include "DVDClock.h"
 #include "DVDInputStreams/DVDInputStream.h"
 #include "DVDMessageQueue.h"
+#include "DVDSubtitles/PGSProbe.h"
+#include "DVDSubtitles/SubtitleSwitchCache.h"
 #include "Edl.h"
 #include "FileItem.h"
 #include "IVideoPlayer.h"
@@ -504,6 +506,9 @@ protected:
   void UpdateContent();
   void UpdateContentState();
   void QueueSubtitleSwitchSeek(const SelectionStream& stream);
+  void CacheSubtitleForSwitch(CDemuxStream* stream, const DemuxPacket* packet);
+  bool ReplaySubtitleForSwitch(CDemuxStream* stream);
+  bool CanCacheSubtitleForSwitch(const CDemuxStream* stream) const;
 
   void UpdateFileItemStreamDetails(CFileItem& item);
   static std::string GetDvProfileString(const AVDOVIDecoderConfigurationRecord& dovi);
@@ -548,6 +553,13 @@ protected:
   CCurrentStream m_CurrentAudioID3;
 
   CSelectionStreams m_SelectionStreams;
+  CPGSProbe m_pgsProbe;
+  CSubtitleSwitchCache m_subtitleSwitchCache;
+  std::atomic<bool> m_pgsVideoSettingsReady{false};
+  std::atomic<bool> m_pgsManualSelection{false};
+  bool m_pgsAutoSwitchDone{false}; // player thread only
+  void CheckPGSPreferredSubtitle();
+  int FindPGSPreferredSubtitle(int preference);
   std::vector<ProgramInfo> m_programs;
 
   struct SContent

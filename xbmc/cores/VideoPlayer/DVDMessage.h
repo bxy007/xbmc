@@ -14,6 +14,7 @@
 #include <atomic>
 #include <string.h>
 #include <string>
+#include <vector>
 
 struct DemuxPacket;
 
@@ -67,6 +68,7 @@ public:
     // subtitle related messages
     SUBTITLE_CLUTCHANGE,
     SUBTITLE_ADDFILE,
+    SUBTITLE_REPLAY,
 
     VIDEO_DRAIN_FINAL              // no more packets before close or stream replacement
   };
@@ -171,12 +173,14 @@ private:
 class CDVDMsgPlayerSetSubtitleStream : public CDVDMsg
 {
 public:
-  explicit CDVDMsgPlayerSetSubtitleStream(int streamId) : CDVDMsg(PLAYER_SET_SUBTITLESTREAM) { m_streamId = streamId; }
+  explicit CDVDMsgPlayerSetSubtitleStream(int streamId, bool automatic = false) : CDVDMsg(PLAYER_SET_SUBTITLESTREAM), m_streamId(streamId), m_automatic(automatic) {}
   ~CDVDMsgPlayerSetSubtitleStream() override = default;
 
   int GetStreamId() const { return m_streamId; }
+  bool IsAutomatic() const { return m_automatic; }
 private:
   int m_streamId;
+  bool m_automatic;
 };
 
 class CDVDMsgPlayerSetState : public CDVDMsg
@@ -323,6 +327,19 @@ public:
 ////// SUBTITLE_ Messages
 //////
 ////////////////////////////////////////////////////////////////////////////////
+
+// Publish replayed overlays together, after rebuilding the subtitle decoder.
+class CDVDMsgSubtitleReplay : public CDVDMsg
+{
+public:
+  CDVDMsgSubtitleReplay(std::vector<std::shared_ptr<CDVDMsgDemuxerPacket>> packets, double pts,
+                       double delay, bool visible)
+    : CDVDMsg(SUBTITLE_REPLAY), packets(std::move(packets)), pts(pts), delay(delay), visible(visible) {}
+  std::vector<std::shared_ptr<CDVDMsgDemuxerPacket>> packets;
+  double pts;
+  double delay;
+  bool visible;
+};
 
 class CDVDMsgSubtitleClutChange : public CDVDMsg
 {
