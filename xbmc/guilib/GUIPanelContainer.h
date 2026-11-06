@@ -38,6 +38,7 @@ public:
   void OnDown() override;
   bool GetCondition(int condition, int data) const override;
   std::string GetLabel(int info) const override;
+  int GetItemsPerPage() const override { return m_itemsPerPage * m_itemsPerRow; }
 protected:
   bool MoveUp(bool wrapAround) override;
   bool MoveDown(bool wrapAround) override;

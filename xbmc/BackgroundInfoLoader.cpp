@@ -13,6 +13,7 @@
 #include "threads/Thread.h"
 #include "utils/log.h"
 
+#include <algorithm>
 #include <mutex>
 
 CBackgroundInfoLoader::CBackgroundInfoLoader() = default;
@@ -92,7 +93,7 @@ void CBackgroundInfoLoader::Run()
   Reset();
 }
 
-void CBackgroundInfoLoader::Load(CFileItemList& items)
+void CBackgroundInfoLoader::Load(CFileItemList& items, int selectedItem, int priorityRadius)
 {
   StopThread();
 
@@ -101,8 +102,26 @@ void CBackgroundInfoLoader::Load(CFileItemList& items)
 
   std::lock_guard lock(m_lock);
 
-  for (int nItem=0; nItem < items.Size(); nItem++)
-    m_vecItems.push_back(items[nItem]);
+  const int count = items.Size();
+  m_vecItems.reserve(count);
+  int first = 0;
+  int end = 0;
+  if (selectedItem >= 0 && selectedItem < count)
+  {
+    priorityRadius = std::clamp(priorityRadius, 0, count);
+    first = selectedItem - std::min(selectedItem, priorityRadius);
+    end = selectedItem + std::min(count - selectedItem - 1, priorityRadius) + 1;
+    m_vecItems.push_back(items[selectedItem]);
+    for (int i = first; i < end; ++i)
+    {
+      if (i != selectedItem)
+        m_vecItems.push_back(items[i]);
+    }
+  }
+  for (int i = 0; i < first; ++i)
+    m_vecItems.push_back(items[i]);
+  for (int i = end; i < count; ++i)
+    m_vecItems.push_back(items[i]);
 
   m_pVecItems = &items;
   m_bStop = false;

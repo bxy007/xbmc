@@ -30,6 +30,7 @@ public:
   ~CGUIWindowVideoBase(void) override;
   bool OnMessage(CGUIMessage& message) override;
   bool OnAction(const CAction &action) override;
+  void Process(unsigned int currentTime, CDirtyRegionList& dirtyregions) override;
 
   /*! \brief Gets called to process the "info" action for the given file item
    Default implementation shows a dialog containing information for the movie/episode/...
@@ -72,6 +73,7 @@ protected:
   bool GetDirectory(const std::string &strDirectory, CFileItemList &items) override;
   void OnItemLoaded(CFileItem* pItem) override {};
   void GetGroupedItems(CFileItemList &items) override;
+  void OnFilterItems(const std::string& filter) override;
 
   bool CheckFilterAdvanced(CFileItemList &items) const override;
   bool CanContainFilter(const std::string &strDirectory) const override;
@@ -136,6 +138,8 @@ protected:
   bool m_stackingAvailable;
 
 private:
+  bool m_thumbLoaderPending{false};
+
   /*!
    \brief Lookup the information of an item and display an Info dialog
    \param item the item to lookup

@@ -32,7 +32,9 @@ public:
   CBackgroundInfoLoader();
   ~CBackgroundInfoLoader() override;
 
-  void Load(CFileItemList& items);
+  // Load the selected item and its neighbours first, without changing the GUI list.
+  // Callers without a selection retain the original order.
+  void Load(CFileItemList& items, int selectedItem = -1, int priorityRadius = 0);
   bool IsLoading();
   void Run() override;
   void SetObserver(IBackgroundLoaderObserver* pObserver);

@@ -29,6 +29,7 @@
 #include "filesystem/MultiPathDirectory.h"
 #include "filesystem/VideoDatabaseDirectory.h"
 #include "guilib/GUIComponent.h"
+#include "guilib/GUIBaseContainer.h"
 #include "guilib/GUIKeyboardFactory.h"
 #include "guilib/GUIWindowManager.h"
 #include "guilib/LocalizeStrings.h"
@@ -94,6 +95,23 @@ CGUIWindowVideoBase::CGUIWindowVideoBase(int id, const std::string &xmlFile)
 
 CGUIWindowVideoBase::~CGUIWindowVideoBase() = default;
 
+void CGUIWindowVideoBase::Process(unsigned int currentTime, CDirtyRegionList& dirtyregions)
+{
+  CGUIMediaWindow::Process(currentTime, dirtyregions);
+
+  if (m_thumbLoaderPending)
+  {
+    // Grouping starts before sorting and history selection are restored. Wait
+    // until the view has also calculated its layout, then prioritise one page
+    // on either side of the selection. Only the worker's pointer order changes.
+    m_thumbLoaderPending = false;
+    const auto* container =
+        dynamic_cast<const CGUIBaseContainer*>(GetControl(m_viewControl.GetCurrentControl()));
+    m_thumbLoader.Load(*m_vecItems, m_viewControl.GetSelectedItem(),
+                       container ? container->GetItemsPerPage() : 0);
+  }
+}
+
 bool CGUIWindowVideoBase::OnAction(const CAction &action)
 {
   if (action.GetID() == ACTION_SCAN_ITEM)
@@ -116,6 +134,7 @@ bool CGUIWindowVideoBase::OnMessage(CGUIMessage& message)
   switch ( message.GetMessage() )
   {
   case GUI_MSG_WINDOW_DEINIT:
+    m_thumbLoaderPending = false;
     if (m_thumbLoader.IsLoading())
       m_thumbLoader.StopThread();
     m_database.Close();
@@ -983,7 +1002,7 @@ bool CGUIWindowVideoBase::OnPlayMedia(const std::shared_ptr<CFileItem>& pItem,
   const auto& components = CServiceBroker::GetAppComponents();
   const auto appPlayer = components.GetComponent<CApplicationPlayer>();
   if (!appPlayer->IsPlayingVideo())
-    m_thumbLoader.Load(*m_vecItems);
+    m_thumbLoaderPending = true;
 
   return true;
 }
@@ -1159,9 +1178,8 @@ bool CGUIWindowVideoBase::Update(const std::string &strDirectory, bool updateFil
   if (!CGUIMediaWindow::Update(strDirectory, updateFilterPath))
     return false;
 
-  // might already be running from GetGroupedItems
-  if (!m_thumbLoader.IsLoading())
-    m_thumbLoader.Load(*m_vecItems);
+  // Start after the first layout pass, with the restored selection prioritised.
+  m_thumbLoaderPending = true;
 
   UpdateVideoVersionItems();
 
@@ -1220,6 +1238,14 @@ bool CGUIWindowVideoBase::StackingAvailable(const CFileItemList &items)
            items.IsVideoDb() || url.IsProtocol("playlistvideo"));
 }
 
+void CGUIWindowVideoBase::OnFilterItems(const std::string& filter)
+{
+  // Stop the old worker before filtering replaces or mutates its list items.
+  m_thumbLoader.StopThread();
+  m_thumbLoaderPending = false;
+  CGUIMediaWindow::OnFilterItems(filter);
+}
+
 void CGUIWindowVideoBase::GetGroupedItems(CFileItemList &items)
 {
   CGUIMediaWindow::GetGroupedItems(items);
@@ -1254,11 +1280,8 @@ void CGUIWindowVideoBase::GetGroupedItems(CFileItemList &items)
     }
   }
 
-  // reload thumbs after filtering and grouping
-  if (m_thumbLoader.IsLoading())
-    m_thumbLoader.StopThread();
-
-  m_thumbLoader.Load(items);
+  // Filtering still has to sort, bind the view and restore its selection.
+  m_thumbLoaderPending = true;
 }
 
 bool CGUIWindowVideoBase::CheckFilterAdvanced(CFileItemList &items) const

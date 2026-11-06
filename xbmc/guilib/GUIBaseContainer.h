@@ -64,6 +64,7 @@ public:
   std::string GetDescription() const override;
   void SaveStates(std::vector<CControlState> &states) override;
   virtual int GetSelectedItem() const;
+  virtual int GetItemsPerPage() const { return m_itemsPerPage; }
 
   void DoProcess(unsigned int currentTime, CDirtyRegionList &dirtyregions) override;
   void Process(unsigned int currentTime, CDirtyRegionList &dirtyregions) override;
