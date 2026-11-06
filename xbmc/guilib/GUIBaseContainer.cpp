@@ -1547,21 +1547,16 @@ int CGUIBaseContainer::GetCurrentPage() const
 
 void CGUIBaseContainer::GetCacheOffsets(int &cacheBefore, int &cacheAfter) const
 {
+  // Keep the idle cache on both sides while scrolling. Layout contents and
+  // focus animations can extend beyond the nominal row/item bounds. Dropping
+  // the trailing cache can therefore hide visible content at a row boundary
+  // and recreate it as soon as scrolling stops.
+  cacheBefore = m_cacheItems / 2;
+  cacheAfter = m_cacheItems / 2;
   if (m_scroller.IsScrollingDown())
-  {
-    cacheBefore = 0;
     cacheAfter = m_cacheItems;
-  }
   else if (m_scroller.IsScrollingUp())
-  {
     cacheBefore = m_cacheItems;
-    cacheAfter = 0;
-  }
-  else
-  {
-    cacheBefore = m_cacheItems / 2;
-    cacheAfter = m_cacheItems / 2;
-  }
 }
 
 void CGUIBaseContainer::SetCursor(int cursor)
