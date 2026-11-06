@@ -47,10 +47,6 @@ void CGUIPanelContainer::Process(unsigned int currentTime, CDirtyRegionList &dir
   int cacheBefore, cacheAfter;
   GetCacheOffsets(cacheBefore, cacheAfter);
 
-  // Free memory not used on screen
-  if ((int)m_items.size() > m_itemsPerPage + cacheBefore + cacheAfter)
-    FreeMemory(CorrectOffset(offset - cacheBefore, 0), CorrectOffset(offset + m_itemsPerPage + 1 + cacheAfter, 0));
-
   CPoint origin = CPoint(m_posX, m_posY) + m_renderOffset;
   float pos = (m_orientation == VERTICAL) ? origin.y : origin.x;
   float end = (m_orientation == VERTICAL) ? m_posY + m_height : m_posX + m_width;
@@ -84,6 +80,15 @@ void CGUIPanelContainer::Process(unsigned int currentTime, CDirtyRegionList &dir
     }
     current++;
   }
+
+  // A fractional scroll position can expose one more row than m_itemsPerPage.
+  // CorrectOffset(..., 0) only includes its first column. Track every item
+  // actually processed, otherwise incremental cleanup loses the remaining
+  // columns and their layouts retain poster textures indefinitely.
+  if ((int)m_items.size() > m_itemsPerPage + cacheBefore + cacheAfter)
+    FreeMemory(CorrectOffset(offset - cacheBefore, 0),
+               std::max(CorrectOffset(offset + m_itemsPerPage + 1 + cacheAfter, 0),
+                        current - 1));
 
   // when we are scrolling up, offset will become lower (integer division, see offset calc)
   // to have same behaviour when scrolling down, we need to set page control to offset+1
