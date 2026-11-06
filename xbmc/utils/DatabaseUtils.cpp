@@ -430,7 +430,7 @@ bool DatabaseUtils::GetFieldValue(const dbiplus::field_value &fieldValue, CVaria
   return false;
 }
 
-bool DatabaseUtils::GetDatabaseResults(const MediaType &mediaType, const FieldList &fields, const std::unique_ptr<dbiplus::Dataset> &dataset, DatabaseResults &results)
+bool DatabaseUtils::GetDatabaseResults(const MediaType &mediaType, const FieldList &fields, const std::unique_ptr<dbiplus::Dataset> &dataset, DatabaseResults &results, bool fieldsInSelectOrder)
 {
   if (dataset->num_rows() == 0)
     return true;
@@ -456,7 +456,13 @@ bool DatabaseUtils::GetDatabaseResults(const MediaType &mediaType, const FieldLi
   std::vector<int> fieldIndexLookup;
   fieldIndexLookup.reserve(fields.size());
   for (auto it = fields.begin(); it != fields.end(); ++it)
-    fieldIndexLookup.push_back(GetFieldIndex(*it, mediaType));
+  {
+    const int index = fieldsInSelectOrder ? static_cast<int>(fieldIndexLookup.size())
+                                         : GetFieldIndex(*it, mediaType);
+    if (index < 0 || static_cast<size_t>(index) >= resultSet.record_header.size())
+      return false;
+    fieldIndexLookup.push_back(index);
+  }
 
   results.reserve(resultSet.records.size() + offset);
   for (unsigned int index = 0; index < resultSet.records.size(); index++)

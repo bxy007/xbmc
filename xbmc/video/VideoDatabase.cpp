@@ -8290,6 +8290,166 @@ std::string RewriteVideoVersionURL(const std::string& baseDir, const CVideoInfoT
 }
 } // unnamed namespace
 
+namespace
+{
+// SQLite owns filtering, ordering and paging for ordinary movie queries. Text
+// uses the existing natural collation without stripping language articles;
+// numeric fields are compared as numbers rather than formatted sort labels.
+std::string GetSQLiteMovieOrder(const SortDescription& sorting)
+{
+  const std::string direction = sorting.sortOrder == SortOrderDescending ? " DESC" : " ASC";
+  const auto text = [](Field field)
+  {
+    return "COALESCE(" + DatabaseUtils::GetField(field, MediaTypeMovie,
+                                               DatabaseQueryPartSelect) + ", '') COLLATE ALPHANUM";
+  };
+  const auto number = [](Field field)
+  {
+    return "CAST(COALESCE(" + DatabaseUtils::GetField(field, MediaTypeMovie,
+                                                    DatabaseQueryPartSelect) + ", 0) AS REAL)";
+  };
+  std::string primary;
+  bool titleTie = true;
+  switch (sorting.sortBy)
+  {
+    case SortByLabel:
+    case SortByTitle:
+      primary = text(FieldTitle);
+      titleTie = false;
+      break;
+    case SortBySortTitle:
+      primary = "COALESCE(NULLIF(" + DatabaseUtils::GetField(FieldSortTitle, MediaTypeMovie,
+                                                            DatabaseQueryPartSelect) +
+                ", ''), movie_view.c00, '') COLLATE ALPHANUM";
+      titleTie = false;
+      break;
+    case SortByOriginalTitle:
+      primary = "COALESCE(NULLIF(" + DatabaseUtils::GetField(FieldOriginalTitle, MediaTypeMovie,
+                                                            DatabaseQueryPartSelect) +
+                ", ''), movie_view.c00, '') COLLATE ALPHANUM";
+      titleTie = false;
+      break;
+    case SortByYear:
+      primary = "CAST(COALESCE(substr(movie_view.premiered, 1, 4), '0') AS INTEGER)";
+      break;
+    case SortByRating: primary = number(FieldRating); break;
+    case SortByUserRating: primary = number(FieldUserRating); break;
+    case SortByVotes: primary = number(FieldVotes); break;
+    case SortByTop250: primary = number(FieldTop250); break;
+    case SortByTime: primary = number(FieldTime); break;
+    case SortByPlaycount: primary = number(FieldPlaycount); break;
+    case SortByLastPlayed: primary = text(FieldLastPlayed); break;
+    case SortByDateAdded:
+      primary = text(FieldDateAdded);
+      titleTie = false;
+      break;
+    case SortByFile: primary = text(FieldFilename); break;
+    case SortByPath:
+      primary = "COALESCE(movie_view.strPath, '') || COALESCE(movie_view.strFilename, '')";
+      primary = "(" + primary + ") COLLATE ALPHANUM";
+      break;
+    case SortByGenre: primary = text(FieldGenre); break;
+    case SortByCountry: primary = text(FieldCountry); break;
+    case SortByStudio: primary = text(FieldStudio); break;
+    case SortByMPAA: primary = text(FieldMPAA); break;
+    default:
+      return {}; // Stream-derived/custom sorts retain the existing sorter.
+  }
+  std::string order = " ORDER BY " + primary + direction;
+  if (titleTie && !(sorting.sortAttributes & SortAttributeIgnoreLabel))
+    order += ", " + text(FieldTitle) + direction;
+  // Keep equal keys deterministic, including different versions of one movie.
+  return order + ", movie_view.idMovie" + direction +
+         ", movie_view.videoVersionIdFile" + direction;
+}
+} // namespace
+
+bool CVideoDatabase::GetSortedMoviePage(const std::string& sqlFilter,
+                                      const SortDescription& sorting,
+                                      const FieldList& fields,
+                                      DatabaseResults& results,
+                                      int& total)
+{
+  // Use the same column positions as the full-view sorter, including its date
+  // and label conversions. This query reads the schema only, not movie records.
+  if (!m_pDS->query("SELECT * FROM movie_view LIMIT 0"))
+    return false;
+  const auto headers = m_pDS->get_result_set().record_header;
+  std::string projection;
+  for (const auto field : fields)
+  {
+    const int index = DatabaseUtils::GetFieldIndex(field, MediaTypeMovie);
+    if (index < 0 || static_cast<size_t>(index) >= headers.size())
+    {
+      m_pDS->close();
+      return false;
+    }
+    projection += "movie_view." + headers[index].name + ", ";
+  }
+  projection += "movie_view.idMovie, movie_view.videoVersionIdFile";
+  total = RunQuery("SELECT " + projection + " FROM movie_view " + sqlFilter);
+  if (total <= 0)
+  {
+    m_pDS->close();
+    return total == 0;
+  }
+  if (!DatabaseUtils::GetDatabaseResults(MediaTypeMovie, fields, m_pDS, results, true))
+  {
+    m_pDS->close();
+    return false;
+  }
+  SortUtils::Sort(sorting, results);
+
+  // A movie may have several video versions. Keep both IDs, not just idMovie,
+  // and restore the chosen order after the full-record lookup.
+  using MovieKey = std::pair<int, int>;
+  std::vector<MovieKey> selected;
+  std::set<int> fileIds;
+  const auto& records = m_pDS->get_result_set().records;
+  for (const auto& result : results)
+  {
+    const auto* row = records.at(result.at(FieldRow).asUnsignedInteger());
+    const int movieId = row->at(fields.size()).get_asInt();
+    const int fileId = row->at(fields.size() + 1).get_asInt();
+    selected.emplace_back(movieId, fileId);
+    fileIds.insert(fileId);
+  }
+  m_pDS->close();
+  results.clear();
+  if (selected.empty())
+    return true;
+
+  std::string ids;
+  for (int id : fileIds)
+  {
+    if (!ids.empty())
+      ids += ',';
+    ids += std::to_string(id);
+  }
+  if (RunQuery("SELECT * FROM movie_view WHERE videoVersionIdFile IN (" + ids + ")") < 0)
+    return false;
+
+  std::map<MovieKey, std::vector<unsigned int>> rowsByKey;
+  const auto& details = m_pDS->get_result_set().records;
+  for (unsigned int i = 0; i < details.size(); ++i)
+  {
+    const auto* row = details[i];
+    rowsByKey[{row->at(0).get_asInt(),
+               row->at(VIDEODB_DETAILS_MOVIE_VERSION_FILEID).get_asInt()}].push_back(i);
+  }
+  std::map<MovieKey, size_t> nextRow;
+  for (const auto& key : selected)
+  {
+    const auto found = rowsByKey.find(key);
+    if (found == rowsByKey.end() || nextRow[key] >= found->second.size())
+      continue; // A concurrent library update may have removed a selected version.
+    DatabaseResult result;
+    result[FieldRow] = found->second[nextRow[key]++];
+    results.emplace_back(std::move(result));
+  }
+  return true;
+}
+
 bool CVideoDatabase::GetMoviesByWhere(const std::string& strBaseDir, const Filter &filter, CFileItemList& items, const SortDescription &sortDescription /* = SortDescription() */, int getDetails /* = VideoDbDetailsNone */)
 {
   try
@@ -8313,6 +8473,67 @@ bool CVideoDatabase::GetMoviesByWhere(const std::string& strBaseDir, const Filte
     if (!CDatabase::BuildSQL(strSQLExtra, extFilter, strSQLExtra))
       return false;
 
+    SortDescription resultSorting = sortDescription;
+    // Limited home widgets must not materialize every movie (including artwork XML)
+    // just to display a handful of items. SQLite uses SQL for supported sorts;
+    // other backends keep the existing paths. Leave custom projections/joins/groups and
+    // pre-existing SQL ordering/limits on the original path.
+    const bool plainQuery =
+        (extFilter.fields.empty() || extFilter.fields == "*") && extFilter.join.empty() &&
+        extFilter.group.empty() && extFilter.order.empty() && extFilter.limit.empty() &&
+        sorting.sortBy == sortDescription.sortBy &&
+        sorting.sortOrder == sortDescription.sortOrder &&
+        sorting.limitStart == sortDescription.limitStart &&
+        sorting.limitEnd == sortDescription.limitEnd;
+    const bool canLimit = plainQuery && sorting.limitStart >= 0 &&
+                          sorting.limitEnd > sorting.limitStart;
+    bool sqlSorted = false;
+    if (m_sqlite && plainQuery && sorting.limitStart >= 0 &&
+        (sorting.limitEnd <= 0 || sorting.limitEnd > sorting.limitStart))
+    {
+      const std::string order = GetSQLiteMovieOrder(sorting);
+      if (!order.empty())
+      {
+        total = static_cast<int>(strtol(
+            GetSingleValue(PrepareSQL(strSQL, "COUNT(1)") + strSQLExtra, m_pDS).c_str(),
+            nullptr, 10));
+        strSQLExtra += order;
+        if (sorting.limitEnd > 0)
+          strSQLExtra += DatabaseUtils::BuildLimitClause(sorting.limitEnd, sorting.limitStart);
+        else if (sorting.limitStart > 0)
+          strSQLExtra += PrepareSQL(" LIMIT -1 OFFSET %i", sorting.limitStart);
+        // Even unlimited requests use this ordering, so full lists and pages agree.
+        resultSorting = SortDescription();
+        sqlSorted = true;
+      }
+    }
+    if (!sqlSorted && canLimit &&
+        (sorting.sortBy == SortByRandom || sorting.sortBy == SortByDateAdded))
+    {
+      total = static_cast<int>(strtol(
+          GetSingleValue(PrepareSQL(strSQL, "COUNT(1)") + strSQLExtra, m_pDS).c_str(),
+          nullptr, 10));
+      // Preserve the legacy SortUtils behaviour for an out-of-range offset.
+      if (sorting.limitStart == 0 || sorting.limitStart < total)
+      {
+        if (sorting.sortBy == SortByRandom)
+          strSQLExtra += " ORDER BY RANDOM()"; // MySQL's dataset translates this to RAND().
+        else
+        {
+          // ByDateAdded compares the timestamp, then the numeric movie ID.
+          // NULL and empty timestamps both become an empty string in SortUtils.
+          const char* direction = sorting.sortOrder == SortOrderDescending ? " DESC" : " ASC";
+          strSQLExtra += PrepareSQL(
+              " ORDER BY COALESCE(movie_view.dateAdded, '')%s, movie_view.idMovie%s",
+              direction, direction);
+        }
+        strSQLExtra += DatabaseUtils::BuildLimitClause(sorting.limitEnd, sorting.limitStart);
+        // SQL already sorted and paged the rows. Do not randomize or apply the
+        // offset a second time when converting them to DatabaseResults.
+        resultSorting = SortDescription();
+      }
+    }
+
     // Apply the limiting directly here if there's no special sorting but limiting
     if (extFilter.limit.empty() && sorting.sortBy == SortByNone &&
         (sorting.limitStart > 0 || sorting.limitEnd > 0 ||
@@ -8322,23 +8543,37 @@ bool CVideoDatabase::GetMoviesByWhere(const std::string& strBaseDir, const Filte
       strSQLExtra += DatabaseUtils::BuildLimitClause(sorting.limitEnd, sorting.limitStart);
     }
 
-    strSQL = PrepareSQL(strSQL, !extFilter.fields.empty() ? extFilter.fields.c_str() : "*") + strSQLExtra;
-
-    int iRowsFound = RunQuery(strSQL);
-
-    // store the total value of items as a property
-    if (total < iRowsFound)
-      total = iRowsFound;
-    items.SetProperty("total", total);
-
-    if (iRowsFound <= 0)
-      return iRowsFound == 0;
-
     DatabaseResults results;
-    results.reserve(iRowsFound);
+    FieldList sortFields;
+    const bool compactSort = !sqlSorted && canLimit && sorting.sortBy != SortByNone &&
+                             sorting.sortBy != SortByRandom && sorting.sortBy != SortByDateAdded &&
+                             DatabaseUtils::GetSelectFields(
+                                 SortUtils::GetFieldsForSorting(sortDescription.sortBy),
+                                 MediaTypeMovie, sortFields);
+    if (compactSort)
+    {
+      if (!GetSortedMoviePage(strSQLExtra, sortDescription, sortFields, results, total))
+        return false;
+    }
+    else
+    {
+      strSQL = PrepareSQL(strSQL, !extFilter.fields.empty() ? extFilter.fields.c_str() : "*") + strSQLExtra;
 
-    if (!SortUtils::SortFromDataset(sortDescription, MediaTypeMovie, m_pDS, results))
-      return false;
+      int iRowsFound = RunQuery(strSQL);
+
+      if (total < iRowsFound)
+        total = iRowsFound;
+      if (iRowsFound <= 0)
+      {
+        items.SetProperty("total", total);
+        return iRowsFound == 0;
+      }
+
+      results.reserve(iRowsFound);
+      if (!SortUtils::SortFromDataset(resultSorting, MediaTypeMovie, m_pDS, results))
+        return false;
+    }
+    items.SetProperty("total", total);
 
     // get data from returned rows
     items.Reserve(results.size());

@@ -1194,6 +1194,11 @@ protected:
   std::string GetValueString(const CVideoInfoTag &details, int min, int max, const SDbTableOffsets *offsets) const;
 
 private:
+  bool GetSortedMoviePage(const std::string& sqlFilter,
+                         const SortDescription& sorting,
+                         const FieldList& fields,
+                         DatabaseResults& results,
+                         int& total);
   void CreateTables() override;
   void CreateAnalytics() override;
   void UpdateTables(int version) override;

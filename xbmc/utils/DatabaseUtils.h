@@ -183,7 +183,8 @@ public:
   static bool GetSelectFields(const Fields &fields, const MediaType &mediaType, FieldList &selectFields);
 
   static bool GetFieldValue(const dbiplus::field_value &fieldValue, CVariant &variantValue);
-  static bool GetDatabaseResults(const MediaType &mediaType, const FieldList &fields, const std::unique_ptr<dbiplus::Dataset> &dataset, DatabaseResults &results);
+  // fieldsInSelectOrder is for compact projections whose first columns are exactly fields.
+  static bool GetDatabaseResults(const MediaType &mediaType, const FieldList &fields, const std::unique_ptr<dbiplus::Dataset> &dataset, DatabaseResults &results, bool fieldsInSelectOrder = false);
 
   static std::string BuildLimitClause(int end, int start = 0);
   static std::string BuildLimitClauseOnly(int end, int start = 0);
