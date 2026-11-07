@@ -309,21 +309,26 @@ void CGUIListItem::FreeIcons()
 
 void CGUIListItem::FreeMemory(bool immediately)
 {
-  if (m_layout)
+  // Release the layouts outside of the lock; freeing them needs the graphics context.
+  std::unique_ptr<CGUIListItemLayout> layout;
+  std::unique_ptr<CGUIListItemLayout> focusedLayout;
   {
-    m_layout->FreeResources(immediately);
-    m_layout.reset();
+    std::unique_lock lock(m_layoutSection);
+    layout = std::move(m_layout);
+    focusedLayout = std::move(m_focusedLayout);
   }
-  if (m_focusedLayout)
-  {
-    m_focusedLayout->FreeResources(immediately);
-    m_focusedLayout.reset();
-  }
+
+  if (layout)
+    layout->FreeResources(immediately);
+  if (focusedLayout)
+    focusedLayout->FreeResources(immediately);
 }
 
 void CGUIListItem::SetLayout(std::unique_ptr<CGUIListItemLayout> layout)
 {
-  m_layout = std::move(layout);
+  // Destroy the old layout with the parameter, after releasing the lock.
+  std::unique_lock lock(m_layoutSection);
+  m_layout.swap(layout);
 }
 
 CGUIListItemLayout *CGUIListItem::GetLayout() const {
@@ -332,16 +337,21 @@ CGUIListItemLayout *CGUIListItem::GetLayout() const {
 
 void CGUIListItem::SetFocusedLayout(std::unique_ptr<CGUIListItemLayout> layout)
 {
-  m_focusedLayout = std::move(layout);
+  std::unique_lock lock(m_layoutSection);
+  m_focusedLayout.swap(layout);
 }
 
 CGUIListItemLayout *CGUIListItem::GetFocusedLayout() const {
   return m_focusedLayout.get();
 }
 
-void CGUIListItem::SetInvalid() const {
-  if (m_layout) m_layout->SetInvalid();
-  if (m_focusedLayout) m_focusedLayout->SetInvalid();
+void CGUIListItem::SetInvalid() const
+{
+  std::unique_lock lock(m_layoutSection);
+  if (m_layout)
+    m_layout->SetInvalid();
+  if (m_focusedLayout)
+    m_focusedLayout->SetInvalid();
 }
 
 void CGUIListItem::SetProperty(const std::string &strKey, const CVariant &value)

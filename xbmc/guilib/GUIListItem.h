@@ -13,6 +13,8 @@
 \brief
 */
 
+#include "threads/CriticalSection.h"
+
 #include <map>
 #include <memory>
 #include <string>
@@ -180,6 +182,7 @@ protected:
 
   std::unique_ptr<CGUIListItemLayout> m_layout;
   std::unique_ptr<CGUIListItemLayout> m_focusedLayout;
+  mutable CCriticalSection m_layoutSection; // SetInvalid() is called from other threads
   bool m_bSelected;     // item is selected or not
   unsigned int m_currentItem; // current item number within container (starting at 1)
 
