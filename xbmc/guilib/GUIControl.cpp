@@ -125,19 +125,22 @@ void CGUIControl::DoProcess(unsigned int currentTime, CDirtyRegionList &dirtyreg
   bool changed = (m_controlDirtyState & DIRTY_STATE_CONTROL) != 0 || (m_bInvalidated && IsVisible());
   m_controlDirtyState = 0;
 
-  const GUIVISIBLE visibleBeforeAnimate = m_visible;
-
+  const bool wasVisible = IsVisible();
   const bool animated = Animate(currentTime);
 
   const bool culled = m_transform.alpha <= 0.01f;
 
   const bool cullingChanged = m_isCulled != culled;
 
-  if (cullingChanged || (animated && (IsVisible() || m_visible != visibleBeforeAnimate)))
+  // Hidden animations do not draw, but delays, focus actions and closing must finish.
+  if (cullingChanged || (animated && (wasVisible || IsVisible())))
   {
     m_isCulled = false;
     MarkDirtyRegion();
   }
+  else if (animated && (m_visible == DELAYED || IsAnimating(ANIM_TYPE_FOCUS) ||
+                        IsAnimating(ANIM_TYPE_UNFOCUS) || IsAnimating(ANIM_TYPE_WINDOW_CLOSE)))
+    MarkDirtyRegion(DIRTY_STATE_CHILD);
   m_isCulled = culled;
 
   if (IsVisible())
