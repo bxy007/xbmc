@@ -1881,15 +1881,12 @@ bool CAMLCodec::OpenDecoder(bool restart)
   am_private->gcodec.dec_mode    = STREAM_TYPE_FRAME;
   am_private->gcodec.video_path  = FRAME_BASE_PATH_AMLVIDEO_AMVIDEO;
 
-  if (!restart)
-  {
-    // GUI transfer selection during open needs the current source, before
-    // SetProcessInfoVideoDetails publishes the remaining stream information.
-    m_dataCacheCore.SetVideoColorTransferCharacteristic(m_hints.colorTransferCharacteristic);
-    aml_dv_open(m_hints.hdrType, m_hints.bitdepth, m_hints.colorPrimaries);
-  }
-
+  // GUI transfer/bypass selection needs this stream's DV profile and base-layer
+  // compatibility before configuring the output, including the first open.
   SetProcessInfoVideoDetails();
+
+  if (!restart)
+    aml_dv_open(m_hints.hdrType, m_hints.bitdepth, m_hints.colorPrimaries);
 
   // Setup Codec for DV Content
   if ((hints.hdrType == StreamHdrType::HDR_TYPE_DOLBYVISION) && aml_dv_decoder_enabled())

@@ -2277,11 +2277,59 @@ void aml_hevc_nal_skip_policy(const int value)
   CSysfsPath("/sys/module/amvdec_h265/parameters/nal_skip_policy", value);  
 }
 
+static bool aml_dv_has_hdr10_graphics(const DOVIStreamInfo& doviStreamInfo)
+{
+  if (!doviStreamInfo.has_config)
+    return false;
+
+  switch (doviStreamInfo.dovi.dv_profile)
+  {
+    case 7:
+      return true;
+    case 8:
+    case 10:
+      return doviStreamInfo.dovi.dv_bl_signal_compatibility_id == 1 ||
+             doviStreamInfo.dovi.dv_bl_signal_compatibility_id == 6;
+    default:
+      return false;
+  }
+}
+
+static bool aml_has_hdr10_graphics(StreamHdrType hdrType)
+{
+  if (aml_hdrvivid_is_pq(hdrType))
+    return true;
+  switch (hdrType)
+  {
+    case StreamHdrType::HDR_TYPE_HDR10:
+    case StreamHdrType::HDR_TYPE_HDR10PLUS:
+      return true;
+    case StreamHdrType::HDR_TYPE_DOLBYVISION:
+    {
+      auto& cache = CServiceBroker::GetDataCacheCore();
+      const auto info = cache.GetVideoDoViStreamInfo();
+      if (info.has_config)
+        return aml_dv_has_hdr10_graphics(info);
+
+      // Blu-ray/Annex B can identify DV without a container configuration
+      // record. Use explicit HDR10 base-layer VUI, not a guessed DV profile.
+      // Missing tags, HLG, full-range IPT and known non-HDR10 profiles must
+      // not enter this fallback.
+      return cache.GetVideoColorPrimaries() == AVCOL_PRI_BT2020 &&
+             cache.GetVideoColorTransferCharacteristic() == AVCOL_TRC_SMPTE2084 &&
+             cache.GetVideoColorSpace() == AVCOL_SPC_BT2020_NCL &&
+             cache.GetVideoColorRange() == AVCOL_RANGE_MPEG;
+    }
+    default:
+      return false;
+  }
+}
+
 void aml_set_osd_pq_bypass(StreamHdrType hdrType)
 {
-  const bool enable = ((hdrType == StreamHdrType::HDR_TYPE_HDR10) ||
-                       (hdrType == StreamHdrType::HDR_TYPE_HDR10PLUS) ||
-                       aml_hdrvivid_is_pq(hdrType));
+  // A DV stream can be playing its HDR10-compatible base layer with Core2
+  // disabled. Its GUI is already PQ too; do not convert it a second time.
+  const bool enable = aml_has_hdr10_graphics(hdrType);
 
   s_guiPqIsFinalStage.store(enable, std::memory_order_relaxed);
 
@@ -2449,56 +2497,30 @@ static StreamHdrType aml_get_final_hdr_type(StreamHdrType hdrType, unsigned int 
 
 StreamHdrType aml_get_output_hdr_type(StreamHdrType sourceType)
 {
-  if (!aml_is_dv_enable())
-    return sourceType;
-
-  switch (aml_dv_dolby_vision_mode())
+  if (aml_is_dv_enable())
   {
-    case DOLBY_VISION_OUTPUT_MODE_HDR10:
-      return StreamHdrType::HDR_TYPE_HDR10;
-    case DOLBY_VISION_OUTPUT_MODE_IPT:
-    case DOLBY_VISION_OUTPUT_MODE_IPT_TUNNEL:
-      return StreamHdrType::HDR_TYPE_DOLBYVISION;
-    case DOLBY_VISION_OUTPUT_MODE_SDR10:
-      return StreamHdrType::HDR_TYPE_NONE;
-    default:
-      return sourceType;
+    switch (aml_dv_dolby_vision_mode())
+    {
+      case DOLBY_VISION_OUTPUT_MODE_HDR10:
+        return StreamHdrType::HDR_TYPE_HDR10;
+      case DOLBY_VISION_OUTPUT_MODE_IPT:
+      case DOLBY_VISION_OUTPUT_MODE_IPT_TUNNEL:
+        return StreamHdrType::HDR_TYPE_DOLBYVISION;
+      case DOLBY_VISION_OUTPUT_MODE_SDR10:
+        return StreamHdrType::HDR_TYPE_NONE;
+      default:
+        break;
+    }
   }
-}
 
-static bool aml_dv_has_hdr10_graphics(const DOVIStreamInfo& doviStreamInfo)
-{
-  if (!doviStreamInfo.has_config)
-    return false;
+  // Without DV processing, HDR10-compatible DV uses the base-layer output.
+  // Select the HDR10 GUI controls rather than the source's DV controls.
+  // Do not infer HDR10 for Profile 5 or HLG/SDR-compatible base layers.
+  if (sourceType == StreamHdrType::HDR_TYPE_DOLBYVISION &&
+      aml_has_hdr10_graphics(sourceType))
+    return StreamHdrType::HDR_TYPE_HDR10;
 
-  switch (doviStreamInfo.dovi.dv_profile)
-  {
-    case 7:
-      return true;
-    case 8:
-    case 10:
-      return doviStreamInfo.dovi.dv_bl_signal_compatibility_id == 1 ||
-             doviStreamInfo.dovi.dv_bl_signal_compatibility_id == 6;
-    default:
-      return false;
-  }
-}
-
-static bool aml_has_hdr10_graphics(StreamHdrType hdrType)
-{
-  if (aml_hdrvivid_is_pq(hdrType))
-    return true;
-  switch (hdrType)
-  {
-    case StreamHdrType::HDR_TYPE_HDR10:
-    case StreamHdrType::HDR_TYPE_HDR10PLUS:
-      return true;
-    case StreamHdrType::HDR_TYPE_DOLBYVISION:
-      return aml_dv_has_hdr10_graphics(
-          CServiceBroker::GetDataCacheCore().GetVideoDoViStreamInfo());
-    default:
-      return false;
-  }
+  return sourceType;
 }
 
 static GuiHdr aml_gui_hdr(StreamHdrType hdrType, unsigned int bitDepth)
