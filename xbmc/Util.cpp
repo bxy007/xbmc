@@ -2356,6 +2356,47 @@ std::string CUtil::GetVobSubIdxFromSub(const std::string& vobSub)
   return std::string();
 }
 
+namespace
+{
+std::string ExternalAudioResourceKey(const std::string& path)
+{
+  CURL url(path);
+  if (URIUtils::HasParentInHostname(url))
+    url.SetHostName(ExternalAudioResourceKey(url.GetHostName()));
+  else
+  {
+    std::string host = url.GetHostName();
+    StringUtils::ToLower(host);
+    url.SetHostName(host);
+  }
+
+  if (url.IsProtocol("dav"))
+    url.SetProtocol("http");
+  else if (url.IsProtocol("davs"))
+    url.SetProtocol("https");
+
+  if (URIUtils::HasEncodedFilename(url))
+  {
+    auto parts = StringUtils::Split(url.GetFileName(), "/");
+    for (auto& part : parts)
+    {
+      // Decode one path segment, keeping literal '+' and encoded separators
+      // distinct from spaces and real directory separators.
+      StringUtils::Replace(part, "+", "%2B");
+      part = CURL::Encode(CURL::Decode(part));
+    }
+    url.SetFileName(StringUtils::Join(parts, "/"));
+  }
+
+  url.SetDomain("");
+  url.SetUserName("");
+  url.SetPassword("");
+  url.SetProtocolOptions("");
+  // Keep URL queries: two query values may select different media resources.
+  return url.Get();
+}
+}
+
 void CUtil::ScanForExternalAudio(const std::string& videoPath, std::vector<std::string>& vecAudio)
 {
   CFileItem item(videoPath, false);
@@ -2377,6 +2418,8 @@ void CUtil::ScanForExternalAudio(const std::string& videoPath, std::vector<std::
 
   std::vector<std::string> exts = StringUtils::Split(CServiceBroker::GetFileExtensionProvider().GetMusicExtensions(), "|");
 
+  const size_t originalSize = vecAudio.size();
+
   CVideoDatabase database;
   database.Open();
   bool useAllExternalAudio = database.GetUseAllExternalAudioForVideo(videoPath);
@@ -2390,6 +2433,36 @@ void CUtil::ScanForExternalAudio(const std::string& videoPath, std::vector<std::
   }
   else
     ScanPathsForAssociatedItems(strAudio, items, exts, vecAudio);
+
+  // A Blu-ray playlist and its ISO are different URLs for the same source.
+  // Remove only newly found aliases of that source, keeping the main input
+  // and independent audio files, including other music ISO images.
+  std::string sourcePath = videoPath;
+  if (URIUtils::IsBlurayPath(videoPath))
+    sourcePath = URIUtils::GetDiscFile(videoPath);
+  else
+  {
+    const CURL url(videoPath);
+    if (url.IsProtocol("udf"))
+      sourcePath = url.GetHostName();
+  }
+  if (sourcePath.empty())
+    sourcePath = videoPath;
+
+  const std::string sourceKey = ExternalAudioResourceKey(sourcePath);
+  const std::string videoKey = ExternalAudioResourceKey(videoPath);
+  vecAudio.erase(std::remove_if(vecAudio.begin() + originalSize, vecAudio.end(),
+                               [&sourceKey, &videoKey](const std::string& audioPath)
+                               {
+                                 const auto key = ExternalAudioResourceKey(audioPath);
+                                 const bool sameSource = key == sourceKey || key == videoKey;
+                                 if (sameSource)
+                                   CLog::Log(LOGDEBUG,
+                                             "ScanForExternalAudio - ignoring source alias {}",
+                                             CURL::GetRedacted(audioPath));
+                                 return sameSource;
+                               }),
+                 vecAudio.end());
 }
 
 bool CUtil::CanBindPrivileged()
