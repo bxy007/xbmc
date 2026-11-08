@@ -27012,3 +27012,13 @@ msgstr ""
 msgctxt "#44417"
 msgid "Prioritize identifying this type. If no matching track is found after sampling, use the same Chinese script with the opposite mono/bilingual type. Unconfirmed tracks do not trigger fallback."
 msgstr ""
+
+#. Experimental DV-std source-YCbCr output toggle.
+msgctxt "#69260"
+msgid "Output as YCbCr (test)"
+msgstr ""
+
+#. Help for the experimental DV-std source-YCbCr output toggle.
+msgctxt "#69261"
+msgid "Use experimental YCbCr transmission with DV-std output. Unsupported sources retain the normal Dolby Vision path. GUI and subtitle brightness or transparency may be incorrect. Off by default."
+msgstr ""

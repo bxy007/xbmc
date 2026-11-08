@@ -29,4 +29,7 @@ public:
 
   // implementation of ISettingCallback
   void OnSettingChanged(const std::shared_ptr<const CSetting>& setting) override;
+
+private:
+  static void ApplyStdYcbcrSetting();
 };

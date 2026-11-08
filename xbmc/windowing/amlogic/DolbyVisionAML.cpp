@@ -653,6 +653,35 @@ void CDolbyVisionAML::ValidateOutputSettings()
 
 static enum DV_TYPE previous_dv_type = DV_TYPE_DISPLAY_LED;
 
+void CDolbyVisionAML::ApplyStdYcbcrSetting()
+{
+  CSysfsPath path("/sys/module/amdolby_vision/parameters/dv_std_ycc");
+  if (!path.Exists())
+    return;
+
+  const auto s = settings();
+  const bool enabled = s->GetBool(CSettings::SETTING_COREELEC_AMLOGIC_DV_STD_YCBCR) &&
+      s->GetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_TYPE) == DV_TYPE_DISPLAY_LED &&
+      s->GetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_MODE) != DV_MODE_OFF &&
+      s->GetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_VIDEO_PROCESSOR) == 0;
+  const std::string requested = enabled ? "Y" : "N";
+  if (path.Get<std::string>() == requested)
+    return;
+
+  try
+  {
+    path.Set(requested);
+    if (path.Get<std::string>() != requested)
+      CLog::Log(LOGERROR, "Dolby Vision: YCbCr test setting did not read back as {}", requested);
+    else
+      CLog::Log(LOGDEBUG, "Dolby Vision: YCbCr test request {}", requested);
+  }
+  catch (const std::exception& e)
+  {
+    CLog::Log(LOGERROR, "Dolby Vision: failed to apply YCbCr test setting: {}", e.what());
+  }
+}
+
 bool CDolbyVisionAML::Setup()
 {
   CLog::Log(LOGDEBUG, "CDolbyVisionAML::Setup - Begin");
@@ -661,6 +690,7 @@ bool CDolbyVisionAML::Setup()
   {
     set_visible(CSettings::SETTING_COREELEC_AMLOGIC_DV_MODE, false);
     settings()->SetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_MODE, DV_MODE_OFF);
+    ApplyStdYcbcrSetting();
     CLog::Log(LOGDEBUG, "CDolbyVisionAML::Setup - Device does not support Dolby Vision - exiting setup");
     return false;
   }
@@ -684,6 +714,8 @@ bool CDolbyVisionAML::Setup()
 
   set_visible(CSettings::SETTING_COREELEC_AMLOGIC_DV_MODE_ON_LUMINANCE, true);
   set_visible(CSettings::SETTING_COREELEC_AMLOGIC_DV_TYPE, true);
+  set_visible(CSettings::SETTING_COREELEC_AMLOGIC_DV_STD_YCBCR,
+              CSysfsPath("/sys/module/amdolby_vision/parameters/dv_std_ycc").Exists());
   set_visible(CSettings::SETTING_COREELEC_AMLOGIC_DV_VIDEO_PROCESSOR, true);
   set_visible(CSettings::SETTING_COREELEC_AMLOGIC_DV_VIDEO_PROCESSOR_TM, true);
   set_visible(CSettings::SETTING_COREELEC_AMLOGIC_DV_TYPE_VP_AUTO, true);
@@ -718,6 +750,7 @@ bool CDolbyVisionAML::Setup()
   settingSet.insert(CSettings::SETTING_COREELEC_AMLOGIC_DV_MODE_ON_LUMINANCE);
   settingSet.insert(CSettings::SETTING_VIDEOSCREEN_GUISATURATION_DOLBYVISION);
   settingSet.insert(CSettings::SETTING_COREELEC_AMLOGIC_DV_TYPE);
+  settingSet.insert(CSettings::SETTING_COREELEC_AMLOGIC_DV_STD_YCBCR);
   settingSet.insert(CSettings::SETTING_COREELEC_AMLOGIC_DV_TYPE_ASSIGNED);
   settingSet.insert(CSettings::SETTING_COREELEC_AMLOGIC_DV_VIDEO_PROCESSOR);
   settingSet.insert(CSettings::SETTING_COREELEC_AMLOGIC_DV_TYPE_VP_AUTO);
@@ -748,6 +781,7 @@ bool CDolbyVisionAML::Setup()
   announcer->AddAnnouncer(this);
 
   aml_dv_write_vsvdb_policy();
+  ApplyStdYcbcrSetting();
 
   // The kernel display state survives a Kodi crash. Reconcile both the
   // graphics input and output before drawing the new process's SDR GUI.
@@ -766,6 +800,14 @@ bool CDolbyVisionAML::Setup()
 void CDolbyVisionAML::OnSettingChanged(const std::shared_ptr<const CSetting>& setting) 
 {
   if (!setting) return;
+
+  if (setting->GetId() == CSettings::SETTING_COREELEC_AMLOGIC_DV_STD_YCBCR)
+  {
+    // The kernel owns the frame-matched transition; do not restart the
+    // display pipeline or rewrite VSVDB solely for this switch.
+    ApplyStdYcbcrSetting();
+    return;
+  }
 
   if (setting->GetId() == CSettings::SETTING_VIDEOSCREEN_GUISATURATION_DOLBYVISION)
   {
@@ -936,6 +978,11 @@ void CDolbyVisionAML::OnSettingChanged(const std::shared_ptr<const CSetting>& se
   {
     set_vsvdb_payload_ver(dv_type, max_lum_nits_value, source_max_pq);
   }
+
+  if (settingId == CSettings::SETTING_COREELEC_AMLOGIC_DV_MODE ||
+      settingId == CSettings::SETTING_COREELEC_AMLOGIC_DV_TYPE ||
+      settingId == CSettings::SETTING_COREELEC_AMLOGIC_DV_VIDEO_PROCESSOR)
+    ApplyStdYcbcrSetting();
 }
 
 void CDolbyVisionAML::Announce(ANNOUNCEMENT::AnnouncementFlag flag,
@@ -944,7 +991,11 @@ void CDolbyVisionAML::Announce(ANNOUNCEMENT::AnnouncementFlag flag,
               const CVariant& data)
 {
   // When Wake from Suspend re-trigger DV if in DV_MODE_ON
-  if ((flag == ANNOUNCEMENT::System) && (message == "OnWake")) aml_dv_start();
+  if ((flag == ANNOUNCEMENT::System) && (message == "OnWake"))
+  {
+    ApplyStdYcbcrSetting();
+    aml_dv_start();
+  }
 
   if ((flag == ANNOUNCEMENT::Player) && (message == "OnStop")) aml_dv_restore_gui_osd_max();
 }
