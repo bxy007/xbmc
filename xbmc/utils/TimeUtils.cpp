@@ -10,8 +10,9 @@
 #include "XBDateTime.h"
 #include "windowing/GraphicContext.h"
 
+#include <algorithm>
 #include <chrono>
-#include <limits>
+#include <cmath>
 
 #if   defined(TARGET_DARWIN)
 #include <mach/mach_time.h>
@@ -25,6 +26,8 @@
 namespace
 {
 auto startTime = std::chrono::steady_clock::now();
+double frameTimeExact = 0.0;
+double framePeriod = 0.0;
 }
 
 int64_t CurrentHostCounter(void)
@@ -64,16 +67,25 @@ unsigned int CTimeUtils::frameTime = 0;
 void CTimeUtils::UpdateFrameTime(bool flip)
 {
   const auto now = std::chrono::steady_clock::now();
-  const unsigned int currentTime = static_cast<unsigned int>(
-      std::chrono::duration_cast<std::chrono::milliseconds>(now - startTime).count());
-  const unsigned int framedur = static_cast<unsigned int>(
-      1000.0 / static_cast<double>(CServiceBroker::GetWinSystem()->GetGfxContext().GetFPS()));
-  const unsigned int elapsed = currentTime - frameTime;
+  const double currentTime =
+      std::chrono::duration<double, std::milli>(now - startTime).count();
+  const double fps = CServiceBroker::GetWinSystem()->GetGfxContext().GetFPS();
+  const double period = 1000.0 / (std::isfinite(fps) && fps > 0.0 ? fps : 60.0);
 
-  if (framedur == 0 || elapsed > std::numeric_limits<unsigned int>::max() / 2)
-    return;
+  // Keep fractional display periods: truncating 16.67 ms to 16 ms at 60 Hz
+  // periodically advances animations by two frames to catch up with the clock.
+  // Leave half a period of scheduling tolerance, and resync after a long gap
+  // or a refresh-rate change without moving the animation clock backwards.
+  const double target = currentTime - period / 2.0;
+  const double steps = std::round((target - frameTimeExact) / period);
+  if (period != framePeriod || steps > 8.0)
+    frameTimeExact = std::max(frameTimeExact, target);
+  else if (steps > 0.0)
+    frameTimeExact += steps * period;
+  framePeriod = period;
 
-  frameTime += framedur * ((elapsed + framedur - 1) / framedur);
+  // Preserve the unsigned millisecond API and its wraparound behaviour.
+  frameTime = static_cast<unsigned int>(static_cast<uint64_t>(frameTimeExact));
 }
 
 unsigned int CTimeUtils::GetFrameTime()
