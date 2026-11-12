@@ -2481,9 +2481,15 @@ CDemuxStream* CDVDDemuxFFmpeg::AddStream(int streamIdx)
     {
       stream->dvdNavId = pStream->id;
 
+      // AddStream also refreshes an existing stream when late codec parameters
+      // arrive. Only a different FFmpeg stream can be a duplicate of this PID.
       auto it = std::find_if(m_streams.begin(), m_streams.end(),
-        [&stream](const std::pair<int, CDemuxStream*>& v)
-        {return (v.second->dvdNavId == stream->dvdNavId) && (v.second->type == stream->type); });
+                             [&stream, streamIdx](const auto& v)
+                             {
+                               return v.first != streamIdx &&
+                                      v.second->dvdNavId == stream->dvdNavId &&
+                                      v.second->type == stream->type;
+                             });
 
       if (it != m_streams.end())
       {
