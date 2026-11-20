@@ -1476,7 +1476,7 @@
         </setting>
         <setting id="myvideos.extractflags" type="boolean" label="20433" help="36178">
           <level>2</level>
-          <default>true</default>
+          <default>false</default>
           <control type="toggle" />
         </setting>
         <setting id="myvideos.extracthdr10plus" type="boolean" label="60665" help="60666">
@@ -1489,7 +1489,7 @@
         </setting>
         <setting id="myvideos.extractchapterthumbs" type="boolean" label="37044" help="37045">
           <level>2</level>
-          <default>true</default>
+          <default>false</default>
           <control type="toggle" />
         </setting>
       </group>
@@ -1724,7 +1724,7 @@
         </setting>
         <setting id="myvideos.extractthumb" type="boolean" label="38190" help="36180">
           <level>1</level>
-          <default>true</default>
+          <default>false</default>
           <dependencies>
             <dependency type="visible" setting="videolibrary.artworklevel" operator="!is">3</dependency>
           </dependencies>
