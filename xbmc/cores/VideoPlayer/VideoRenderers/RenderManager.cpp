@@ -369,6 +369,7 @@ bool CRenderManager::Configure()
     m_bTriggerUpdateResolution = true;
     m_presentstep = PRESENT_IDLE;
     m_presentpts = DVD_NOPTS_VALUE;
+    m_displayedPts = DVD_NOPTS_VALUE;
     m_lateframes = -1;
     NotifyPresentWaiters();
     m_renderedOverlay.store(false, std::memory_order_relaxed);
@@ -457,15 +458,27 @@ void CRenderManager::FrameMove()
   bool firstFrame = false;
   UpdateResolution();
 
+  m_overlays.PrepareMenu(m_firstVideoFrameSubmitted.load(std::memory_order_acquire));
+
   {
     std::unique_lock lock(m_statelock);
 
     if (m_renderState == STATE_UNCONFIGURED)
+    {
+      lock.unlock();
+      m_playerPort->UpdateGuiRender(m_overlays.HasMenu() ||
+                                    m_renderedOverlay.load(std::memory_order_relaxed));
       return;
+    }
     else if (m_renderState == STATE_CONFIGURING)
     {
       if (!VideoWorkerParked())
+      {
+        lock.unlock();
+        m_playerPort->UpdateGuiRender(m_overlays.HasMenu() ||
+                                      m_renderedOverlay.load(std::memory_order_relaxed));
         return;
+      }
       lock.unlock();
       if (!Configure())
         return;
@@ -477,7 +490,8 @@ void CRenderManager::FrameMove()
 
   if (!m_asyncVideoWorkerActive.load(std::memory_order_relaxed))
     VideoBody(firstFrame);
-  else if (firstFrame)
+  else if (firstFrame || m_overlays.HasMenu() ||
+           m_renderedOverlay.load(std::memory_order_relaxed))
     m_playerPort->UpdateGuiRender(true);
 
   ManageCaptures();
@@ -864,6 +878,7 @@ bool CRenderManager::AsyncVideoWorkerIteration()
   {
     ++s_fsel;
     m_pRenderer->RenderVideoLayerCommit(source, src, dst);
+    m_firstVideoFrameSubmitted.store(true, std::memory_order_release);
     ++s_commits;
     m_pRenderer->EndAsyncVideoLayerRender(source);
     m_dataCacheCore.SetRenderPts(m_presentpts -
@@ -993,12 +1008,17 @@ void CRenderManager::UnInit()
     logM(LOGERROR, "UnInit entered with the async video worker still active");
 
   m_overlays.UnInit();
+  m_firstVideoFrameSubmitted.store(false, std::memory_order_relaxed);
   m_debugRenderer.Dispose();
 
   DeleteRenderer();
 
   m_renderState = STATE_UNCONFIGURED;
   logComponentM(LOGDEBUG, LOGVIDEO, "RenderManager.state -> UNCONFIGURED (UnInit)");
+  {
+    std::unique_lock lock2(m_presentlock);
+    m_displayedPts = DVD_NOPTS_VALUE;
+  }
   m_picture.Reset();
   m_bRenderGUI = false;
   CServiceBroker::GetWinSystem()->GetGfxContext().SetHDRType(m_picture.hdrType);
@@ -1040,6 +1060,7 @@ bool CRenderManager::Flush(bool wait, bool saveBuffers)
         m_presentstarted = false;
         m_presentsource = 0;
         m_presentsourcePast = -1;
+        m_displayedPts = DVD_NOPTS_VALUE;
         m_presentstep = PRESENT_IDLE;
         for (int i = 0; i < m_QueueSize; i++)
           m_free.push_back(i);
@@ -1472,16 +1493,14 @@ void CRenderManager::Render(bool clear, DWORD flags, DWORD alpha, bool gui)
 
     if (!m_presentstarted || (m_renderState != STATE_CONFIGURED))
     {
-      static int s_lastSkipState = -1;
-      static bool s_lastSkipPresent = false;
-      const int curState = static_cast<int>(m_renderState);
-      if (curState != s_lastSkipState || m_presentstarted != s_lastSkipPresent)
+      lock.unlock();
+      if (gui)
       {
-        logComponentM(LOGDEBUG, LOGVIDEO,
-                      "RenderManager.Render skipped: presentStarted={} state={} gui={}",
-                      m_presentstarted, curState, gui);
-        s_lastSkipState = curState;
-        s_lastSkipPresent = m_presentstarted;
+        const bool hasMenu = m_overlays.HasMenu();
+        m_renderedOverlay.store(hasMenu, std::memory_order_relaxed);
+        if (hasMenu)
+          m_overlays.RenderMenuPlane(
+              CServiceBroker::GetWinSystem()->GetGfxContext().GetViewWindow());
       }
       return;
     }
@@ -1802,6 +1821,9 @@ void CRenderManager::Render(bool clear, DWORD flags, DWORD alpha, bool gui)
 
 bool CRenderManager::IsGuiLayer()
 {
+  if (m_overlays.HasMenu())
+    return true;
+
   std::unique_lock<CCriticalSection> lock(m_statelock);
 
   if (!m_pRenderer)
@@ -1842,6 +1864,7 @@ bool CRenderManager::IsVideoLayer() const {
 void inline CRenderManager::RenderUpdate(bool clear, unsigned int flags, unsigned int alpha)
 {
   m_pRenderer->RenderUpdate(m_presentsource, m_presentsourcePast, clear, flags, alpha);
+  m_firstVideoFrameSubmitted.store(true, std::memory_order_release);
   m_dataCacheCore.SetRenderPts(m_presentpts - m_displayLatency.load(std::memory_order_relaxed));
   m_dataCacheCore.SetVideoDoViLookupPts(m_Queue[m_presentsource].pts);
 }
@@ -2370,6 +2393,7 @@ void CRenderManager::PrepareNextRender()
     m_presentstarted = true;
     m_queued.pop_front();
     m_presentpts = m_Queue[m_presentsource].pts;
+    m_displayedPts = m_Queue[m_presentsource].pts;
     NotifyPresentWaiters();
 
     m_playerPort->UpdateRenderBuffers(m_queued.size(), m_discard.size(), m_free.size());
@@ -2383,6 +2407,7 @@ void CRenderManager::PrepareNextRender()
     m_presentstarted = true;
     m_queued.pop_front();
     m_presentpts = m_Queue[m_presentsource].pts - frametime / 2;
+    m_displayedPts = m_Queue[m_presentsource].pts;
     NotifyPresentWaiters();
     if (m_cadenceArmed)
       m_cadenceHalf++;
@@ -2403,6 +2428,7 @@ void CRenderManager::DiscardBufferLocked()
     m_discard.push_back(m_queued.front());
     m_queued.pop_front();
   }
+  m_displayedPts = DVD_NOPTS_VALUE;
 
   if (m_presentstep == PRESENT_READY)
     m_presentstep = PRESENT_IDLE;
@@ -2424,6 +2450,36 @@ double CRenderManager::GetRenderPts()
 {
   return (m_presentpts.load(std::memory_order_relaxed) -
           m_displayLatency.load(std::memory_order_relaxed));
+}
+
+double CRenderManager::GetDisplayedPts()
+{
+  std::unique_lock lock(m_presentlock);
+
+  return m_displayedPts;
+}
+
+CRenderManager::OnScreenClock CRenderManager::GetOnScreenClock()
+{
+  std::unique_lock lock(m_presentlock);
+
+  return {m_dvdClock.GetClock() -
+              DVD_MSEC_TO_TIME(static_cast<double>(m_videoDelay.load(std::memory_order_relaxed))),
+          !m_queued.empty()};
+}
+
+double CRenderManager::GetPresentedPts()
+{
+  std::unique_lock lock(m_presentlock);
+
+  if (m_displayedPts == DVD_NOPTS_VALUE || m_queued.empty())
+    return m_displayedPts;
+
+  // the picture on screen stays until the next one, which waits for its pts
+  const double onScreen =
+      m_dvdClock.GetClock() -
+      DVD_MSEC_TO_TIME(static_cast<double>(m_videoDelay.load(std::memory_order_relaxed)));
+  return std::max(m_displayedPts, std::min(onScreen, m_Queue[m_queued.front()].pts));
 }
 
 void CRenderManager::CheckEnableClockSync()

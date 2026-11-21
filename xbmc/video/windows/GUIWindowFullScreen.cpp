@@ -84,6 +84,12 @@ bool CGUIWindowFullScreen::OnAction(const CAction &action)
   const auto appPlayer = components.GetComponent<CApplicationPlayer>();
   switch (action.GetID())
   {
+  case ACTION_NAV_BACK:
+  case ACTION_PREVIOUS_MENU:
+    if (appPlayer->OnFullscreenBack())
+      return true;
+    break;
+
   case ACTION_SHOW_OSD:
     ToggleOSD();
     return true;

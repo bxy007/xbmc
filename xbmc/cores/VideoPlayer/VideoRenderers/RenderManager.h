@@ -32,6 +32,7 @@
 
 #include "PlatformDefs.h"
 
+class CDVDMenuPlane;
 class CRenderCapture;
 struct VideoPicture;
 
@@ -95,6 +96,11 @@ public:
    */
   void SetSubtitleVerticalPosition(const int value, bool save);
 
+  void SetMenuPlane(std::shared_ptr<CDVDMenuPlane> menuPlane)
+  {
+    m_overlays.SetMenuPlane(std::move(menuPlane));
+  }
+
   unsigned int AllocRenderCapture();
   void ReleaseRenderCapture(unsigned int captureId);
   void StartRenderCapture(unsigned int captureId, unsigned int width, unsigned int height, int flags);
@@ -136,6 +142,31 @@ public:
   bool GetStats(int &lateframes, double &pts, int &queued, int &discard);
 
   double GetRenderPts();
+
+  /**
+   * The pts of the frame on the video plane, DVD_NOPTS_VALUE until the first frame after a
+   * configure, flush or discard is presented
+   */
+  double GetDisplayedPts();
+
+  struct OnScreenClock
+  {
+    double clock{DVD_NOPTS_VALUE};
+    bool hasNextPicture{false};
+  };
+
+  /**
+   * The clock time of the picture on screen (with user video delay) and whether a next picture is
+   * queued to follow the one currently presented
+   */
+  OnScreenClock GetOnScreenClock();
+
+  /**
+   * The time on screen: the displayed pts while it is the last picture known, else the on-screen
+   * clock floored at the displayed pts and capped at the next queued picture; DVD_NOPTS_VALUE while
+   * the displayed pts is unknown
+   */
+  double GetPresentedPts();
 
   /**
    * Video player call this on flush in oder to discard any queued frames
@@ -239,6 +270,7 @@ protected:
   CEvent m_asyncMainPaceEvent;
   std::atomic<uint32_t> m_asyncMainPaceSets{0};
   std::atomic<bool> m_renderedOverlay{false};
+  std::atomic<bool> m_firstVideoFrameSubmitted{false};
   std::atomic_bool m_renderDebug{false};
   std::atomic_bool m_renderDebugVideo{false};
   XbmcThreads::EndTime<> m_debugTimer;
@@ -308,6 +340,7 @@ protected:
   int m_NumberBuffers = 0;
   std::atomic<int> m_lateframes{-1};
   std::atomic<double> m_presentpts{0.0};
+  double m_displayedPts{DVD_NOPTS_VALUE};
   EPRESENTSTEP m_presentstep = PRESENT_IDLE;
   bool m_cadenceArmed = false;
   int m_cadenceCalls = 0;

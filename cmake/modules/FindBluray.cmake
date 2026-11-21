@@ -43,6 +43,27 @@ if(BLURAY_FOUND)
   set(BLURAY_INCLUDE_DIRS ${BLURAY_INCLUDE_DIR})
   set(BLURAY_DEFINITIONS -DHAVE_LIBBLURAY=1)
 
+  include(CheckSymbolExists)
+  set(CMAKE_REQUIRED_INCLUDES ${BLURAY_INCLUDE_DIR})
+  set(CMAKE_REQUIRED_LIBRARIES ${BLURAY_LIBRARY})
+  foreach(symbol bd_presented
+                 bd_set_presentation_hold
+                 bd_set_presentation_clock
+                 BD_PRESENTED_ALL
+                 BD_SEEK_REARMS_PLAYLIST_END
+                 BD_PRESENTED_TITLE_END)
+    check_symbol_exists(${symbol} libbluray/bluray.h LIBBLURAY_HAS_${symbol})
+    if(NOT LIBBLURAY_HAS_${symbol})
+      message(FATAL_ERROR "libbluray lacks ${symbol} of the CoreELEC presentation hold API")
+    endif()
+  endforeach()
+  check_symbol_exists(bd_bdj_video_active libbluray/bluray.h LIBBLURAY_HAS_BDJ_VIDEO_ACTIVE)
+  if(LIBBLURAY_HAS_BDJ_VIDEO_ACTIVE)
+    list(APPEND BLURAY_DEFINITIONS -DHAVE_LIBBLURAY_BDJ_VIDEO_ACTIVE=1)
+  endif()
+  unset(CMAKE_REQUIRED_INCLUDES)
+  unset(CMAKE_REQUIRED_LIBRARIES)
+
   # todo: improve syntax
   if (NOT CORE_PLATFORM_NAME_LC STREQUAL windowsstore)
     list(APPEND BLURAY_DEFINITIONS -DHAVE_LIBBLURAY_BDJ=1)

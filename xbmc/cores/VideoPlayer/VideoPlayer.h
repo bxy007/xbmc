@@ -32,6 +32,7 @@
 #include <chrono>
 #include <map>
 #include <memory>
+#include <optional>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -50,6 +51,7 @@ struct SPlayerState
     dts = DVD_NOPTS_VALUE;
     player_state  = "";
     isInMenu = false;
+    canCloseDiscPopup = false;
     menuType = MenuType::NONE;
     chapter = 0;
     chapters.clear();
@@ -76,6 +78,7 @@ struct SPlayerState
 
   std::string player_state; // full player state
   bool isInMenu;
+  bool canCloseDiscPopup;
   MenuType menuType;
   bool streamsReady;
 
@@ -94,6 +97,8 @@ struct SPlayerState
 };
 
 class CDVDInputStream;
+class CDVDInputStreamBluray;
+class CDVDMenuPlane;
 
 class CDVDDemux;
 class CDemuxStreamVideo;
@@ -347,6 +352,7 @@ public:
   void WaitAsyncMainPace() override;
   uint64_t GetVisibleOverlaySetSignature(bool& animated) const override;
   bool OnAction(const CAction &action) override;
+  bool OnFullscreenBack() override;
 
   void GetAudioStreamInfo(int index, AudioStreamInfo& info) const override;
 
@@ -406,6 +412,28 @@ protected:
   void DestroyPlayers();
 
   void Prepare();
+  std::shared_ptr<CDVDInputStreamBluray> GetBlurayInputStream() const;
+  bool IsBlurayTitleEnded() const;
+  bool IsBlurayTitleEndWait() const;
+  bool IsBlurayTitleEndHeld() const;
+  bool IsBlurayTailInTitle() const;
+  bool TakeBlurayItemAbandoned();
+  bool IsBlurayJumpPending() const;
+  bool PollBlurayEvents();
+  std::optional<double> GetBlurayItemEnd() const;
+  bool IsBlurayClockKnown() const;
+  bool IsBlurayLastPictureHeld();
+  double GetBlurayPresentedTime();
+  void ReportBlurayPresented();
+  std::pair<double, double> GetBlurayPresentationClock();
+  void ReportBlurayReadPresented();
+  void ReportBlurayItemPlayedOut();
+  void CloseSubtitleForNextStream();
+  bool PlayNavTail();
+  void SendVideoDrain();
+  bool DropInNavTail(CDVDMsg& msg);
+  bool SelectDiscStream(const SelectionStream& st);
+  bool TakeDiscAudioPick(CDemuxStream* stream);
   bool OpenStream(CCurrentStream& current, int64_t demuxerId, int iStream, int source, bool reset = true);
   bool OpenAudioStream(CDVDStreamInfo& hint, bool reset = true);
   bool OpenVideoStream(CDVDStreamInfo& hint, bool reset = true);
@@ -419,6 +447,7 @@ protected:
   */
   void AdaptForcedSubtitles();
   bool CloseStream(CCurrentStream& current, bool bWaitForBuffers);
+  void SwitchAudioStream(int64_t demuxerId, int iStream, int source);
 
   bool CheckIsCurrent(const CCurrentStream& current, CDemuxStream* stream, DemuxPacket* pkg);
   void ProcessPacket(CDemuxStream* pStream, DemuxPacket* pPacket);
@@ -467,11 +496,12 @@ protected:
   double GetQueueTime() const;
   CacheInfo GetCachingTimes();
 
-  void FlushBuffers(double pts, bool accurate, bool sync);
+  void FlushBuffers(double pts, bool accurate, bool sync, bool nav = false);
   void DrainStreamsAtBoundary();
 
   void HandleMessages();
   void HandlePlaySpeed();
+  void ReportAVStarted();
   bool IsInMenuInternal() const;
   void SynchronizeDemuxer();
   void CheckAutoSceneSkip();
@@ -613,8 +643,18 @@ protected:
 
   CDVDClock m_clock;
   CDVDOverlayContainer m_overlayContainer;
+  std::shared_ptr<CDVDMenuPlane> m_menuPlane;
 
   std::shared_ptr<CDVDInputStream> m_pInputStream;
+  //! written on the player thread, read by SetVideoSettings from any thread
+  std::atomic<bool> m_blurayMenu{false};
+  bool m_navTail{false};
+  bool m_videoDrained{false};
+  bool m_playersFlushed{false};
+  double m_lastVideoPts{DVD_NOPTS_VALUE};
+  bool m_navStop{false};
+  bool m_navStopped{false};
+  bool m_discAudioPick{false};
   std::unique_ptr<CDVDDemux> m_pDemuxer;
   std::shared_ptr<CDVDDemux> m_pSubtitleDemuxer;
   std::unordered_map<int64_t, std::shared_ptr<CDVDDemux>> m_subtitleDemuxerMap;

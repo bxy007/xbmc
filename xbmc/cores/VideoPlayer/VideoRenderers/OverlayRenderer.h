@@ -18,12 +18,14 @@
 
 #include <atomic>
 #include <array>
+#include <chrono>
 #include <map>
 #include <memory>
 #include <vector>
 
 typedef struct ass_image ASS_Image;
 
+class CDVDMenuPlane;
 class CDVDOverlay;
 class CDVDOverlayLibass;
 class CDVDOverlayImage;
@@ -52,6 +54,7 @@ namespace OVERLAY {
     virtual ~COverlay();
 
     virtual void Render(SRenderState& state) = 0;
+    virtual void UpdateFromImage(const CDVDOverlayImage& o) {}
 
     enum EType
     {
@@ -108,6 +111,10 @@ namespace OVERLAY {
 
     void AddOverlay(std::shared_ptr<CDVDOverlay> o, double pts, int index);
     virtual void Render(int idx, float depth = 0.0f);
+    void SetMenuPlane(std::shared_ptr<CDVDMenuPlane> menuPlane);
+    void PrepareMenu(bool firstVideoFrameSubmitted);
+    void RenderMenuPlane(const CRect& view);
+    bool HasMenu() const { return m_hasMenu.load(std::memory_order_relaxed); }
     void ReplaceSubtitleOverlays(const VecOverlays& overlays,
                                  const std::array<double, NUM_BUFFERS>& pts,
                                  double delay, bool visible);
@@ -164,6 +171,8 @@ namespace OVERLAY {
     };
 
     void Render(COverlay* o) const;
+    void RenderMenu();
+    void SetMenuAlone(bool alone);
     void RenderOverlay(COverlay* o, SRenderState state) const;
     SRenderState ComputeBaseState(const COverlay* o) const;
     bool IsSubtitleTextCandidate(const COverlay* o, const SRenderState& state) const;
@@ -237,5 +246,11 @@ namespace OVERLAY {
 
     std::shared_ptr<struct KODI::SUBTITLES::STYLE::style> m_overlayStyle;
     std::atomic<bool> m_isSettingsChanged{false};
+    std::shared_ptr<CDVDMenuPlane> m_menuPlane;
+    std::vector<SElement> m_menu;
+    uint64_t m_menuSequence{0};
+    std::chrono::steady_clock::time_point m_menuStartupDeadline{};
+    bool m_menuAlone{false};
+    std::atomic<bool> m_hasMenu{false};
   };
 }

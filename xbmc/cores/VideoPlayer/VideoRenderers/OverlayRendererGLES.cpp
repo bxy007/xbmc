@@ -20,14 +20,19 @@
 #include "rendering/GLExtensions.h"
 #include "rendering/MatrixGL.h"
 #include "rendering/gles/RenderSystemGLES.h"
+#include "settings/Settings.h"
+#include "settings/SettingsComponent.h"
 #include "utils/GLUtils.h"
 #include "utils/MathUtils.h"
 #include "utils/log.h"
 #include "utils/LogThrottle.h"
 #include "windowing/WinSystem.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstring>
+#include <mutex>
 #include <utility>
 
 // GLES2.0 cant do CLAMP, but can do CLAMP_TO_EDGE.
@@ -65,6 +70,103 @@ ShaderMethodGLES GetOverlayTextureShaderMethod(bool isHdrPqAuthored, bool pma)
                         "overlay shader -> {} (isHdrPqAuthored={} pma={} pqOutput={})",
                         method, isHdrPqAuthored, pma, pqOutput);
   return method;
+}
+
+bool QueryBgraTextureFormat(GLenum& internalFormat, GLenum& externalFormat)
+{
+  internalFormat = GL_RGBA;
+  externalFormat = GL_RGBA;
+  auto* renderSystem = dynamic_cast<CRenderSystemGLES*>(CServiceBroker::GetRenderSystem());
+  if (!renderSystem)
+    return false;
+  if (renderSystem->IsExtSupported("GL_EXT_texture_format_BGRA8888") ||
+      renderSystem->IsExtSupported("GL_IMG_texture_format_BGRA8888"))
+  {
+    internalFormat = externalFormat = GL_BGRA_EXT;
+    return true;
+  }
+  if (renderSystem->IsExtSupported("GL_APPLE_texture_format_BGRA8888"))
+  {
+    externalFormat = GL_BGRA_EXT;
+    return true;
+  }
+  return false;
+}
+
+inline uint32_t SwapRB(uint32_t px)
+{
+  return (px & 0xFF00FF00u) | ((px & 0x00FF0000u) >> 16) | ((px & 0x000000FFu) << 16);
+}
+
+BDJ_COLOR::BakeKey QueryCurrentOverlayBakeKey(bool isHdrPqAuthored)
+{
+  BDJ_COLOR::BakeKey key{};
+  auto* winSystem = CServiceBroker::GetWinSystem();
+  if (!winSystem)
+    return key;
+
+  auto& gfx = winSystem->GetGfxContext();
+  const GuiHdr guiHdr = gfx.GetGuiHdr();
+  const bool pqOutput = gfx.IsTransferPQ();
+  key.limitedRange = winSystem->UseLimitedColor();
+  key.srgbDecode = winSystem->GetGuiSrgbDecode() > 0.5f;
+
+  const auto settingsComp = CServiceBroker::GetSettingsComponent();
+  const auto settings = settingsComp ? settingsComp->GetSettings() : nullptr;
+
+  if (isHdrPqAuthored)
+  {
+    if (pqOutput)
+    {
+      key.mode = BDJ_COLOR::BakeMode::HDR_PGS_PQ_OUT;
+      key.peak = settings
+                     ? static_cast<float>(std::clamp(
+                           settings->GetInt(CSettings::SETTING_VIDEOSCREEN_HDRPGSPEAKLUMINANCE), 0,
+                           100)) /
+                           50.0f
+                     : 1.0f;
+      key.saturation =
+          settings ? static_cast<float>(std::clamp(
+                         settings->GetInt(CSettings::SETTING_VIDEOSCREEN_HDRPGSSATURATION), 0,
+                         100)) /
+                         50.0f
+                   : 1.0f;
+    }
+    else
+    {
+      key.mode = BDJ_COLOR::BakeMode::HDR_PGS_SDR_OUT;
+    }
+  }
+  else
+  {
+    if (pqOutput)
+    {
+      key.mode = BDJ_COLOR::BakeMode::SDR_SUBS_PQ_OUT;
+      key.peak = settings
+                     ? static_cast<float>(std::clamp(
+                           settings->GetInt(CSettings::SETTING_VIDEOSCREEN_SDRPGSPEAKLUMINANCE), 0,
+                           100)) /
+                           50.0f
+                     : 1.0f;
+      key.saturation =
+          settings ? static_cast<float>(std::clamp(
+                         settings->GetInt(CSettings::SETTING_VIDEOSCREEN_SDRPGSSATURATION), 0,
+                         100)) /
+                         50.0f
+                   : 1.0f;
+    }
+    else if (guiHdr == GuiHdr::HDR)
+    {
+      key.mode = BDJ_COLOR::BakeMode::SDR_GUI_HDR_OUT;
+      key.peak = winSystem->GetGuiSdrPeakLuminance();
+      key.saturation = winSystem->GetGuiSdrSaturation();
+    }
+    else
+    {
+      key.mode = BDJ_COLOR::BakeMode::PASSTHROUGH_SDR;
+    }
+  }
+  return key;
 }
 } // namespace
 
@@ -187,61 +289,117 @@ COverlayTextureGLES::COverlayTextureGLES(const CDVDOverlayImage& o, CRect& rSour
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
 
-  std::vector<uint32_t> rgbaCopy;
-  const uint32_t* rgbaPtr = nullptr;
-  if (o.palette.empty())
+  if (o.m_persistentSurface)
   {
-    rgbaCopy.resize(o.width * o.height);
-    m_pma = !!USE_PREMULTIPLIED_ALPHA;
-    const uint32_t* src = reinterpret_cast<const uint32_t*>(o.pixels.data());
-    const int srcStride = o.linesize / 4;
-    if (m_pma)
+    auto& surface = *o.m_persistentSurface;
+    m_pma = true;
+    m_hasMipmaps = false;
+    m_bgraSupported = QueryBgraTextureFormat(m_internalFormat, m_externalFormat);
+
+    const bool isHdrPq = surface.isHdrPq.load(std::memory_order_relaxed);
+    const BDJ_COLOR::BakeKey desired = QueryCurrentOverlayBakeKey(isHdrPq);
+
+    std::lock_guard<std::mutex> surfLock(surface.mutex);
+    const int w = surface.width;
+    const int h = surface.height;
+    m_texWidth = w;
+    m_texHeight = h;
+    m_u = 1.0f;
+    m_v = 1.0f;
+    m_isHdrPqAuthored = isHdrPq;
+    surface.desiredKey = desired;
+    if (desired.mode != BDJ_COLOR::BakeMode::NONE && surface.bakedKey != desired &&
+        surface.pixelsRaw.size() >= static_cast<size_t>(w) * static_cast<size_t>(h))
     {
-      for (int y = 0; y < o.height; ++y)
+      BDJ_COLOR::BakeFullSurface(surface.pixelsRaw, surface.pixelsPma, desired, &surface.bakePool);
+      surface.bakedKey = desired;
+    }
+    m_bakedRaw = (desired.mode != BDJ_COLOR::BakeMode::NONE && surface.bakedKey == desired);
+    m_uploadedBakeKey = surface.bakedKey;
+    m_uploadedRevision = surface.revision.load(std::memory_order_acquire);
+    surface.dirtyX0 = 0;
+    surface.dirtyY0 = 0;
+    surface.dirtyX1 = -1;
+    surface.dirtyY1 = -1;
+
+    if (w > 0 && h > 0 &&
+        surface.pixelsPma.size() >= static_cast<size_t>(w) * static_cast<size_t>(h))
+    {
+      const uint32_t* uploadPtr = surface.pixelsPma.data();
+      if (!m_bgraSupported)
       {
-        for (int x = 0; x < o.width; ++x)
-        {
-          const uint32_t px = src[y * srcStride + x];
-          const uint32_t a = (px >> 24) & 0xff;
-          if (a == 255)
-            rgbaCopy[y * o.width + x] = px;
-          else if (a == 0)
-            rgbaCopy[y * o.width + x] = 0;
-          else
-          {
-            const uint32_t r = ((px >> 16) & 0xff) * a / 255;
-            const uint32_t g = ((px >> 8) & 0xff) * a / 255;
-            const uint32_t b = ((px >> 0) & 0xff) * a / 255;
-            rgbaCopy[y * o.width + x] =
-                (a << 24) | (r << 16) | (g << 8) | (b << 0);
-          }
-        }
+        const size_t count = static_cast<size_t>(w) * static_cast<size_t>(h);
+        if (m_uploadScratch.size() < count)
+          m_uploadScratch.resize(count);
+        for (size_t i = 0; i < count; ++i)
+          m_uploadScratch[i] = SwapRB(uploadPtr[i]);
+        uploadPtr = m_uploadScratch.data();
       }
+      glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+      glTexImage2D(GL_TEXTURE_2D, 0, m_internalFormat, w, h, 0, m_externalFormat, GL_UNSIGNED_BYTE,
+                   uploadPtr);
     }
-    else
-    {
-      for (int y = 0; y < o.height; ++y)
-        std::memcpy(rgbaCopy.data() + y * o.width, src + y * srcStride, o.width * 4);
-    }
-    rgbaPtr = rgbaCopy.data();
-    LoadTexture(GL_TEXTURE_2D, o.width, o.height, o.width * 4, &m_u, &m_v, false, rgbaPtr);
+    glBindTexture(GL_TEXTURE_2D, 0);
   }
   else
   {
-    rgbaCopy.resize(o.width * o.height);
-    m_pma = !!USE_PREMULTIPLIED_ALPHA;
-    convert_rgba(o, m_pma, rgbaCopy);
-    rgbaPtr = rgbaCopy.data();
-    LoadTexture(GL_TEXTURE_2D, o.width, o.height, o.width * 4, &m_u, &m_v, false, rgbaPtr);
+    std::vector<uint32_t> rgbaCopy;
+    const uint32_t* rgbaPtr = nullptr;
+    if (o.palette.empty())
+    {
+      rgbaCopy.resize(o.width * o.height);
+      m_pma = !!USE_PREMULTIPLIED_ALPHA;
+      const uint32_t* src = reinterpret_cast<const uint32_t*>(o.pixels.data());
+      const int srcStride = o.linesize / 4;
+      if (m_pma)
+      {
+        for (int y = 0; y < o.height; ++y)
+        {
+          for (int x = 0; x < o.width; ++x)
+          {
+            const uint32_t px = src[y * srcStride + x];
+            const uint32_t a = (px >> 24) & 0xff;
+            if (a == 255)
+              rgbaCopy[y * o.width + x] = px;
+            else if (a == 0)
+              rgbaCopy[y * o.width + x] = 0;
+            else
+            {
+              const uint32_t r = ((px >> 16) & 0xff) * a / 255;
+              const uint32_t g = ((px >> 8) & 0xff) * a / 255;
+              const uint32_t b = ((px >> 0) & 0xff) * a / 255;
+              rgbaCopy[y * o.width + x] =
+                  (a << 24) | (r << 16) | (g << 8) | (b << 0);
+            }
+          }
+        }
+      }
+      else
+      {
+        for (int y = 0; y < o.height; ++y)
+          std::memcpy(rgbaCopy.data() + y * o.width, src + y * srcStride, o.width * 4);
+      }
+      rgbaPtr = rgbaCopy.data();
+      LoadTexture(GL_TEXTURE_2D, o.width, o.height, o.width * 4, &m_u, &m_v, false, rgbaPtr);
+    }
+    else
+    {
+      rgbaCopy.resize(o.width * o.height);
+      m_pma = !!USE_PREMULTIPLIED_ALPHA;
+      convert_rgba(o, m_pma, rgbaCopy);
+      rgbaPtr = rgbaCopy.data();
+      LoadTexture(GL_TEXTURE_2D, o.width, o.height, o.width * 4, &m_u, &m_v, false, rgbaPtr);
+    }
+
+    // If the overlay is already authored as HDR PQ code values (e.g. UHD-BD PGS HDR subtitles),
+    // we can bypass the GUI shader's SDR->PQ transfer stage during composition.
+    // The final bypass decision is made at render time based on current output state.
+    m_isHdrPqAuthored = o.m_isHdrPq;
+    m_hasMipmaps = true;
+
+    glGenerateMipmap(GL_TEXTURE_2D);
+    glBindTexture(GL_TEXTURE_2D, 0);
   }
-
-  // If the overlay is already authored as HDR PQ code values (e.g. UHD-BD PGS HDR subtitles),
-  // we can bypass the GUI shader's SDR->PQ transfer stage during composition.
-  // The final bypass decision is made at render time based on current output state.
-  m_isHdrPqAuthored = o.m_isHdrPq;
-
-  glGenerateMipmap(GL_TEXTURE_2D);
-  glBindTexture(GL_TEXTURE_2D, 0);
 
   m_isBitmapOverlay = true;
 
@@ -508,6 +666,165 @@ COverlayTextureGLES::~COverlayTextureGLES()
   glDeleteTextures(1, &m_texture);
 }
 
+void COverlayTextureGLES::UpdateFromImage(const CDVDOverlayImage& o)
+{
+  if (!o.m_persistentSurface || m_texture == 0)
+    return;
+
+  auto& surface = *o.m_persistentSurface;
+  const bool isHdrPq = surface.isHdrPq.load(std::memory_order_relaxed);
+  m_isHdrPqAuthored = isHdrPq;
+  const BDJ_COLOR::BakeKey desired = QueryCurrentOverlayBakeKey(isHdrPq);
+
+  const uint64_t rev = surface.revision.load(std::memory_order_acquire);
+  if (rev == m_uploadedRevision && desired == m_uploadedBakeKey)
+    return;
+
+  std::lock_guard<std::mutex> surfLock(surface.mutex);
+  const int w = surface.width;
+  const int h = surface.height;
+  const uint64_t lockedRev = surface.revision.load(std::memory_order_acquire);
+  if (w <= 0 || h <= 0 ||
+      surface.pixelsPma.size() < static_cast<size_t>(w) * static_cast<size_t>(h))
+  {
+    m_uploadedRevision = lockedRev;
+    return;
+  }
+
+  surface.desiredKey = desired;
+  bool rebakedFull = false;
+  if (desired.mode != BDJ_COLOR::BakeMode::NONE && surface.bakedKey != desired &&
+      surface.pixelsRaw.size() >= static_cast<size_t>(w) * static_cast<size_t>(h))
+  {
+    BDJ_COLOR::BakeFullSurface(surface.pixelsRaw, surface.pixelsPma, desired, &surface.bakePool);
+    surface.bakedKey = desired;
+    rebakedFull = true;
+  }
+  m_bakedRaw = (desired.mode != BDJ_COLOR::BakeMode::NONE && surface.bakedKey == desired);
+  m_uploadedBakeKey = surface.bakedKey;
+
+  if (w != m_texWidth || h != m_texHeight || rebakedFull)
+  {
+    const uint32_t* uploadPtr = surface.pixelsPma.data();
+    if (!m_bgraSupported)
+    {
+      const size_t count = static_cast<size_t>(w) * static_cast<size_t>(h);
+      if (m_uploadScratch.size() < count)
+        m_uploadScratch.resize(count);
+      for (size_t i = 0; i < count; ++i)
+        m_uploadScratch[i] = SwapRB(uploadPtr[i]);
+      uploadPtr = m_uploadScratch.data();
+    }
+    glBindTexture(GL_TEXTURE_2D, m_texture);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    if (w != m_texWidth || h != m_texHeight)
+    {
+      glTexImage2D(GL_TEXTURE_2D, 0, m_internalFormat, w, h, 0, m_externalFormat, GL_UNSIGNED_BYTE,
+                   uploadPtr);
+      m_texWidth = w;
+      m_texHeight = h;
+    }
+    else
+    {
+      glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, m_externalFormat, GL_UNSIGNED_BYTE, uploadPtr);
+    }
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    surface.dirtyX0 = 0;
+    surface.dirtyY0 = 0;
+    surface.dirtyX1 = -1;
+    surface.dirtyY1 = -1;
+    m_uploadedRevision = lockedRev;
+    return;
+  }
+
+  int x0 = surface.dirtyX0;
+  int y0 = surface.dirtyY0;
+  int x1 = surface.dirtyX1;
+  int y1 = surface.dirtyY1;
+  surface.dirtyX0 = 0;
+  surface.dirtyY0 = 0;
+  surface.dirtyX1 = -1;
+  surface.dirtyY1 = -1;
+  m_uploadedRevision = lockedRev;
+
+  if (x1 < x0 || y1 < y0)
+    return;
+
+  x0 = std::max(0, x0);
+  y0 = std::max(0, y0);
+  x1 = std::min(w - 1, x1);
+  y1 = std::min(h - 1, y1);
+  if (x1 < x0 || y1 < y0)
+    return;
+
+  const int subW = x1 - x0 + 1;
+  const int subH = y1 - y0 + 1;
+  const bool fullSpan = m_bgraSupported && subW >= (w / 2);
+
+  glBindTexture(GL_TEXTURE_2D, m_texture);
+  glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+
+  if (fullSpan)
+  {
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, y0, w, subH, m_externalFormat, GL_UNSIGNED_BYTE,
+                    surface.pixelsPma.data() + static_cast<size_t>(y0) * static_cast<size_t>(w));
+  }
+  else
+  {
+    const size_t needed = static_cast<size_t>(subW) * static_cast<size_t>(subH);
+    if (m_uploadScratch.size() < needed)
+      m_uploadScratch.resize(needed);
+    for (int row = 0; row < subH; ++row)
+    {
+      const uint32_t* srcRow = surface.pixelsPma.data() +
+                               static_cast<size_t>(y0 + row) * static_cast<size_t>(w) +
+                               static_cast<size_t>(x0);
+      uint32_t* dstRow =
+          m_uploadScratch.data() + static_cast<size_t>(row) * static_cast<size_t>(subW);
+      if (m_bgraSupported)
+      {
+        std::memcpy(dstRow, srcRow, static_cast<size_t>(subW) * sizeof(uint32_t));
+      }
+      else
+      {
+        for (int col = 0; col < subW; ++col)
+          dstRow[col] = SwapRB(srcRow[col]);
+      }
+    }
+    glTexSubImage2D(GL_TEXTURE_2D, 0, x0, y0, subW, subH, m_externalFormat, GL_UNSIGNED_BYTE,
+                    m_uploadScratch.data());
+  }
+
+  glBindTexture(GL_TEXTURE_2D, 0);
+
+  if (CServiceBroker::GetLogging().IsLogLevelLogged(LOGDEBUG) &&
+      CServiceBroker::GetLogging().CanLogComponent(LOGVIDEO))
+  {
+    static uint32_t s_updates = 0;
+    static uint32_t s_fullSpans = 0;
+    static uint64_t s_pixels = 0;
+    static auto s_window = std::chrono::steady_clock::now();
+    ++s_updates;
+    if (fullSpan)
+      ++s_fullSpans;
+    s_pixels += static_cast<uint64_t>(fullSpan ? w : subW) * static_cast<uint64_t>(subH);
+    const auto now = std::chrono::steady_clock::now();
+    if (now - s_window >= std::chrono::seconds(1))
+    {
+      logComponentM(LOGDEBUG, LOGVIDEO,
+                    "bdjTexSubImage: updates={} fullSpans={} avgKB={} last={}x{} bgra={}",
+                    s_updates, s_fullSpans,
+                    s_updates ? (s_pixels * 4u / 1024u / s_updates) : 0u, subW, subH,
+                    m_bgraSupported);
+      s_updates = 0;
+      s_fullSpans = 0;
+      s_pixels = 0;
+      s_window = now;
+    }
+  }
+}
+
 void COverlayTextureGLES::Render(SRenderState& state)
 {
   glEnable(GL_BLEND);
@@ -522,7 +839,7 @@ void COverlayTextureGLES::Render(SRenderState& state)
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,
-                  m_isBitmapOverlay ? GL_LINEAR_MIPMAP_LINEAR : GL_LINEAR);
+                  (m_isBitmapOverlay && m_hasMipmaps) ? GL_LINEAR_MIPMAP_LINEAR : GL_LINEAR);
 
   CRect rd;
   if (m_pos == POSITION_RELATIVE)
@@ -547,7 +864,20 @@ void COverlayTextureGLES::Render(SRenderState& state)
   auto renderSystem =
       dynamic_cast<CRenderSystemGLES*>(CServiceBroker::GetRenderSystem());
 
-  ShaderMethodGLES texMethod = GetOverlayTextureShaderMethod(m_isHdrPqAuthored, m_pma);
+  ShaderMethodGLES texMethod =
+      m_bakedRaw ? ShaderMethodGLES::SM_TEXTURE_NOBLEND_RAW
+                 : GetOverlayTextureShaderMethod(m_isHdrPqAuthored, m_pma);
+  if (m_bakedRaw)
+  {
+    LOG_THROTTLE_ONCHANGE(LOGDEBUG, LOGVIDEO,
+                          (static_cast<int>(m_uploadedBakeKey.mode) << 2) |
+                              (m_isHdrPqAuthored ? 2 : 0) |
+                              (m_uploadedBakeKey.limitedRange ? 1 : 0),
+                          1000,
+                          "overlay shader -> raw-baked (mode={} isHdrPqAuthored={} limited={})",
+                          static_cast<int>(m_uploadedBakeKey.mode), m_isHdrPqAuthored,
+                          m_uploadedBakeKey.limitedRange);
+  }
   renderSystem->EnableGUIShader(texMethod);
 
   GLint posLoc = renderSystem->GUIShaderGetPos();

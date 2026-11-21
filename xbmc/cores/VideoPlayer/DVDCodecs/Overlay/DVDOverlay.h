@@ -137,6 +137,7 @@ public:
   {
   }
 
-  CDVDOverlayGroup(const CDVDOverlayGroup& src) : CDVDOverlay(src), m_overlays(src.m_overlays) {}
+  CDVDOverlayGroup(const CDVDOverlayGroup& src) = default;
   VecOverlays m_overlays;
+  bool m_waitForStartupVideo{false};
 };

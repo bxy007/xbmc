@@ -99,6 +99,7 @@ public:
     DISPLAYRESET,
     APPFOCUSED,
     KEEPCONFIG,
+    HOLDCONFIG,
     TIMEOUT,
   };
   enum InSignal
@@ -268,6 +269,7 @@ public:
   bool SupportsQualityLevel(enum AEQuality level) override;
   bool IsSettingVisible(const std::string &settingId) override;
   void KeepConfiguration(unsigned int millis) override;
+  void HoldConfiguration(bool hold) override;
   void DeviceChange() override;
   void DeviceCountChange(const std::string& driver) override;
   bool GetCurrentSinkFormat(AEAudioFormat &SinkFormat) override;
@@ -319,6 +321,8 @@ protected:
                              int* mode = nullptr);
   void Configure(AEAudioFormat *desiredFmt = nullptr);
   AEAudioFormat GetInputFormat(AEAudioFormat *desiredFmt = nullptr);
+  bool HoldsFormat() const;
+  void ReleaseHold();
   CActiveAEStream* CreateStream(MsgStreamNew *streamMsg);
   void DiscardStream(CActiveAEStream *stream);
   void SFlushStream(CActiveAEStream *stream);
@@ -350,6 +354,8 @@ protected:
   bool m_extDrain;
   XbmcThreads::EndTime<> m_extDrainTimer;
   std::chrono::milliseconds m_extKeepConfig;
+  bool m_extHoldConfig{false};
+  AEAudioFormat m_extHoldFormat;
   bool m_extDeferData;
   std::queue<time_t> m_extLastDeviceChange;
   bool m_extSuspended = false;

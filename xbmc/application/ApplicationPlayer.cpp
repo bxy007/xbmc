@@ -639,6 +639,12 @@ bool CApplicationPlayer::OnAction(const CAction &action)
   return (player && player->OnAction(action));
 }
 
+bool CApplicationPlayer::OnFullscreenBack()
+{
+  const auto player = GetInternal();
+  return player && player->OnFullscreenBack();
+}
+
 int CApplicationPlayer::GetAudioStreamCount() const
 {
   const std::shared_ptr<const IPlayer> player = GetInternal();

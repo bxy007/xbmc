@@ -452,40 +452,29 @@ void CWinSystemAmlogic::UpdateResolutions()
 
 bool CWinSystemAmlogic::IsHDRDisplay()
 {
-  CSysfsPath hdr_cap{"/sys/class/amhdmitx/amhdmitx0/hdr_cap"};
-  CSysfsPath dv_cap{"/sys/class/amhdmitx/amhdmitx0/dv_cap"};
-  std::string valstr;
-
-  if (hdr_cap.Exists())
-  {
-    valstr = hdr_cap.Get<std::string>().value();
-    if (valstr.find("Traditional HDR: 1") != std::string::npos)
-      m_hdr_caps.SetHDR10();
-
-    if (valstr.find("HDR10Plus Supported: 1") != std::string::npos)
-      m_hdr_caps.SetHDR10Plus();
-
-    if (valstr.find("Hybrid Log-Gamma: 1") != std::string::npos)
-      m_hdr_caps.SetHLG();
-
-    if (valstr.find("CUVA native RX: 1\n") != std::string::npos)
-      m_hdr_caps.SetHDRVivid();
-  }
-
-  if (dv_cap.Exists())
-  {
-    valstr = dv_cap.Get<std::string>().value();
-    if (valstr.find("DolbyVision RX support list") != std::string::npos)
-      m_hdr_caps.SetDolbyVision();
-  }
-
-  return (m_hdr_caps.SupportsHDR10() | m_hdr_caps.SupportsHDR10Plus() |
-          m_hdr_caps.SupportsHLG() | m_hdr_caps.SupportsHDRVivid());
+  const CHDRCapabilities caps = GetDisplayHDRCapabilities();
+  return caps.SupportsHDR10() || caps.SupportsHDR10Plus() || caps.SupportsHLG() ||
+         caps.SupportsHDRVivid();
 }
 
 CHDRCapabilities CWinSystemAmlogic::GetDisplayHDRCapabilities() const
 {
-  return m_hdr_caps;
+  CHDRCapabilities caps;
+  CSysfsPath hdr_cap{"/sys/class/amhdmitx/amhdmitx0/hdr_cap"};
+  CSysfsPath dv_cap{"/sys/class/amhdmitx/amhdmitx0/dv_cap"};
+  const std::string hdr = hdr_cap.GetOrDefault<std::string>();
+  if (hdr.find("SMPTE ST 2084: 1") != std::string::npos)
+    caps.SetHDR10();
+  if (hdr.find("HDR10Plus Supported: 1") != std::string::npos)
+    caps.SetHDR10Plus();
+  if (hdr.find("Hybrid Log-Gamma: 1") != std::string::npos)
+    caps.SetHLG();
+  if (hdr.find("CUVA native RX: 1\n") != std::string::npos)
+    caps.SetHDRVivid();
+  if (dv_cap.GetOrDefault<std::string>().find("DolbyVision RX support list") != std::string::npos)
+    caps.SetDolbyVision();
+
+  return caps;
 }
 
 float CWinSystemAmlogic::GetDisplayLatency()

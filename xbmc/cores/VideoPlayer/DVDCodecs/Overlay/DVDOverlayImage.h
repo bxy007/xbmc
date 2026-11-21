@@ -8,16 +8,43 @@
 
 #pragma once
 
+#include "BdjColorTransform.h"
 #include "DVDOverlay.h"
 
+#include <atomic>
+#include <cstdint>
+#include <memory>
+#include <mutex>
 #include <stdlib.h>
 #include <string.h>
+#include <vector>
 
 #include "PlatformDefs.h"
 
 class CDVDOverlayImage : public CDVDOverlay
 {
 public:
+  struct PersistentSurface
+  {
+    mutable std::mutex mutex;
+    int width{0};
+    int height{0};
+    // Raw straight-alpha ARGB pixels from BD-J of size width * height (for rebaking on mode/slider change).
+    std::vector<uint32_t> pixelsRaw;
+    // Output-ready color-converted & premultiplied ARGB (LE BGRA) pixels of size width * height.
+    std::vector<uint32_t> pixelsPma;
+    BDJ_COLOR::BakeKey desiredKey{};
+    BDJ_COLOR::BakeKey bakedKey{};
+    BDJ_COLOR::BakePool bakePool;
+    std::atomic<uint64_t> revision{0};
+    std::atomic<bool> isHdrPq{false};
+    // Inclusive dirty bounding box in pixel coordinates; dirtyX1 < dirtyX0 means clean.
+    int dirtyX0{0};
+    int dirtyY0{0};
+    int dirtyX1{-1};
+    int dirtyY1{-1};
+  };
+
   CDVDOverlayImage() : CDVDOverlay(DVDOVERLAY_TYPE_IMAGE)
   {
   }
@@ -76,6 +103,7 @@ public:
 
   std::vector<uint8_t> pixels;
   std::vector<uint32_t> palette;
+  std::shared_ptr<PersistentSurface> m_persistentSurface;
 
   // If true, pixel values are already intended for HDR PQ output (e.g. UHD-BD PGS
   // palettes authored as BT.2020 + ST2084 code values) and must NOT be converted

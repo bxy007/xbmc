@@ -8,7 +8,8 @@ set(SOURCES DVDOverlayCodec.cpp
             contrib/cc_decoder.c
             contrib/cc_decoder708.cpp)
 
-set(HEADERS DVDOverlay.h
+set(HEADERS BdjColorTransform.h
+            DVDOverlay.h
             DVDOverlayCodec.h
             DVDOverlayCodecFFmpeg.h
             DVDOverlayCodecSSA.h

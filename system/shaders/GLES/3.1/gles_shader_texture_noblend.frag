@@ -219,10 +219,16 @@ void main()
 {
   vec4 rgb = texture(m_samp0, m_cord0.xy);
 
+#if defined(KODI_RAW_PASSTHROUGH)
+  if (rgb.a <= 0.001)
+    discard;
+  fragColor = rgb;
+#else
 #if defined(KODI_PREMULTIPLIED_ALPHA)
   float pmaAlpha = rgb.a;
-  if (pmaAlpha > 0.001)
-    rgb.rgb /= pmaAlpha;
+  if (pmaAlpha <= 0.001)
+    discard;
+  rgb.rgb /= pmaAlpha;
 #endif
 
 #if defined(KODI_SDR_IMAGE_SUBS) && defined(KODI_TRANSFER_PQ)
@@ -254,4 +260,5 @@ void main()
 #endif
 
   fragColor = rgb;
+#endif
 }

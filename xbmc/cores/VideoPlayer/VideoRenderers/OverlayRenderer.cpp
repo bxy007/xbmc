@@ -19,9 +19,13 @@
 #include "cores/VideoPlayer/DVDCodecs/Overlay/DVDOverlayImage.h"
 #include "cores/VideoPlayer/DVDCodecs/Overlay/DVDOverlayLibass.h"
 #include "cores/VideoPlayer/DVDCodecs/Overlay/DVDOverlaySpu.h"
+#include "cores/VideoPlayer/DVDSubtitles/DVDMenuPlane.h"
+#include "guilib/GUIComponent.h"
+#include "guilib/GUIWindowManager.h"
 #include "settings/DisplaySettings.h"
 #include "settings/Settings.h"
 #include "settings/SettingsComponent.h"
+#include "utils/log.h"
 #include "windowing/GraphicContext.h"
 #include "windowing/WinSystem.h"
 
@@ -137,6 +141,7 @@ void CRenderer::UnInit()
   }
 
   Flush();
+  m_menuStartupDeadline = {};
 }
 
 void CRenderer::Flush()
@@ -148,7 +153,17 @@ void CRenderer::Flush()
     Release(m_buffers[i]);
     m_overlayCount[i].store(0, std::memory_order_relaxed);
   }
+  const bool hadMenu = !m_menu.empty();
+  Release(m_menu);
+  m_menuSequence = 0;
+  m_hasMenu.store(false, std::memory_order_relaxed);
   m_buffersChanged.store(true, std::memory_order_relaxed);
+  if (hadMenu)
+  {
+    MarkOverlayRenderChanged();
+    if (auto* gui = CServiceBroker::GetGUI())
+      gui->GetWindowManager().MarkDirty();
+  }
 
   ReleaseCache();
   Reset();
@@ -186,6 +201,11 @@ void CRenderer::ReleaseUnused()
         usedTextureIds.insert(elem.overlay_dvd->m_textureid);
     }
   }
+  for (const auto& elem : m_menu)
+  {
+    if (elem.overlay_dvd)
+      usedTextureIds.insert(elem.overlay_dvd->m_textureid);
+  }
 
   for (auto it = m_textureCache.begin(); it != m_textureCache.end(); )
   {
@@ -200,6 +220,7 @@ void CRenderer::Render(int idx, float depth)
 {
   std::unique_lock lock(m_section);
 
+  SetMenuAlone(false);
   const bool pruneCache = m_buffersChanged.exchange(false, std::memory_order_relaxed);
 
   std::vector<SElement>& list = m_buffers[idx];
@@ -328,8 +349,120 @@ void CRenderer::Render(int idx, float depth)
   m_lastSubtitleTopPx.store(static_cast<int>(std::floor(subTop)), std::memory_order_relaxed);
   m_lastSubtitleBottomPx.store(static_cast<int>(std::ceil(subBottom)), std::memory_order_relaxed);
 
+  RenderMenu();
+
   if (pruneCache)
     ReleaseUnused();
+}
+
+void CRenderer::SetMenuPlane(std::shared_ptr<CDVDMenuPlane> menuPlane)
+{
+  std::unique_lock lock(m_section);
+
+  m_menuPlane = std::move(menuPlane);
+}
+
+void CRenderer::PrepareMenu(bool firstVideoFrameSubmitted)
+{
+  std::unique_lock lock(m_section);
+  if (!m_menuPlane || m_menuPlane->GetSequence() == m_menuSequence)
+    return;
+
+  uint64_t sequence{0};
+  const std::shared_ptr<CDVDOverlay> page = m_menuPlane->Get(sequence);
+  const auto* group = page && page->IsOverlayType(DVDOVERLAY_TYPE_GROUP)
+                          ? static_cast<const CDVDOverlayGroup*>(page.get())
+                          : nullptr;
+  if (group && group->m_waitForStartupVideo && m_menu.empty())
+  {
+    if (!firstVideoFrameSubmitted)
+    {
+      const auto now = std::chrono::steady_clock::now();
+      if (m_menuStartupDeadline == std::chrono::steady_clock::time_point{})
+      {
+        // Leave the disc controls reachable if the decoder never delivers a picture.
+        m_menuStartupDeadline = now + std::chrono::seconds(4);
+        CLog::Log(LOGDEBUG, "BD-J startup graphics: waiting for the video background");
+      }
+      if (now < m_menuStartupDeadline)
+        return;
+    }
+    if (m_menuStartupDeadline != std::chrono::steady_clock::time_point{})
+      CLog::Log(LOGDEBUG, "BD-J startup graphics: showing menu ({})",
+                firstVideoFrameSubmitted ? "video submitted" : "video wait expired");
+    if (firstVideoFrameSubmitted)
+      m_menuStartupDeadline = {};
+  }
+
+  m_menuSequence = sequence;
+  const bool shown = !m_menu.empty();
+  Release(m_menu);
+  if (group)
+  {
+    for (const std::shared_ptr<CDVDOverlay>& o : group->m_overlays)
+    {
+      SElement e;
+      e.overlay_dvd = o;
+      m_menu.push_back(e);
+    }
+  }
+  else if (page)
+  {
+    SElement e;
+    e.overlay_dvd = page;
+    m_menu.push_back(e);
+  }
+  m_hasMenu.store(!m_menu.empty(), std::memory_order_relaxed);
+  m_buffersChanged.store(true, std::memory_order_relaxed);
+  if (shown || !m_menu.empty())
+  {
+    MarkOverlayRenderChanged();
+    if (auto* gui = CServiceBroker::GetGUI())
+      gui->GetWindowManager().MarkDirty();
+  }
+}
+
+void CRenderer::RenderMenuPlane(const CRect& view)
+{
+  std::unique_lock lock(m_section);
+  if (m_menu.empty())
+    return;
+
+  CRect rect{view};
+  SetVideoRect(rect, rect, rect);
+  SetMenuAlone(true);
+  m_pgsBitmapBlockShift = 0.0f;
+  RenderMenu();
+  ReleaseUnused();
+}
+
+// cached textures keep the placement of the rects they were built for
+void CRenderer::SetMenuAlone(bool alone)
+{
+  if (m_menuAlone == alone)
+    return;
+
+  m_menuAlone = alone;
+  ReleaseCache();
+}
+
+void CRenderer::RenderMenu()
+{
+  if (m_menu.empty())
+    return;
+
+  const float savedShift = m_pgsBitmapBlockShift;
+  m_pgsBitmapBlockShift = 0.0f;
+  for (SElement& e : m_menu)
+  {
+    if (!e.overlay_dvd)
+      continue;
+    std::shared_ptr<COverlay> o = Convert(*(e.overlay_dvd), e.pts);
+    if (!o)
+      continue;
+    Render(o.get());
+  }
+  m_pgsBitmapBlockShift = savedShift;
 }
 
 SRenderState CRenderer::ComputeBaseState(const COverlay* o) const {
@@ -566,35 +699,49 @@ float CRenderer::ComputeBitmapBlockShift(float blockTop, float blockBottom) cons
 
 bool CRenderer::HasOverlay(int idx)
 {
+  if (m_hasMenu.load(std::memory_order_relaxed))
+    return true;
+  if (idx < 0 || idx >= NUM_BUFFERS)
+    return false;
   return m_overlayCount[idx].load(std::memory_order_relaxed) != 0;
 }
 
 int CRenderer::GetOverlayCount(int idx)
 {
-  return m_overlayCount[idx].load(std::memory_order_relaxed);
+  int count = (idx >= 0 && idx < NUM_BUFFERS)
+                  ? static_cast<int>(m_overlayCount[idx].load(std::memory_order_relaxed))
+                  : 0;
+  if (m_hasMenu.load(std::memory_order_relaxed))
+    count++;
+  return count;
 }
 
 uint64_t CRenderer::GetOverlaySetSignature(int idx, bool& animated) const
 {
   std::unique_lock lock(m_section);
   uint64_t signature = m_overlayRenderChangeGen.load(std::memory_order_relaxed);
+  signature = signature * 31 + m_menuSequence;
+  signature = signature * 31 + static_cast<uint64_t>(m_menu.size());
   bool needsContinuousRedraw = false;
-  for (const auto& element : m_buffers[idx])
+  if (idx >= 0 && idx < NUM_BUFFERS)
   {
-    signature = signature * 31 + reinterpret_cast<uintptr_t>(element.overlay_dvd.get());
-    if (element.overlay_dvd)
+    for (const auto& element : m_buffers[idx])
     {
-      signature = signature * 31 +
-                  static_cast<uint64_t>(static_cast<int64_t>(element.overlay_dvd->iPTSStartTime));
-      signature = signature * 31 +
-                  static_cast<uint64_t>(static_cast<int64_t>(element.overlay_dvd->iPTSStopTime));
-      if (element.overlay_dvd->IsOverlayType(DVDOVERLAY_TYPE_TEXT) ||
-          element.overlay_dvd->IsOverlayType(DVDOVERLAY_TYPE_SSA))
+      signature = signature * 31 + reinterpret_cast<uintptr_t>(element.overlay_dvd.get());
+      if (element.overlay_dvd)
       {
-        const auto handler =
-            static_cast<CDVDOverlayLibass*>(element.overlay_dvd.get())->GetLibassHandler();
-        if (handler && handler->NeedsRerender(element.pts))
-          needsContinuousRedraw = true;
+        signature = signature * 31 +
+                    static_cast<uint64_t>(static_cast<int64_t>(element.overlay_dvd->iPTSStartTime));
+        signature = signature * 31 +
+                    static_cast<uint64_t>(static_cast<int64_t>(element.overlay_dvd->iPTSStopTime));
+        if (element.overlay_dvd->IsOverlayType(DVDOVERLAY_TYPE_TEXT) ||
+            element.overlay_dvd->IsOverlayType(DVDOVERLAY_TYPE_SSA))
+        {
+          const auto handler =
+              static_cast<CDVDOverlayLibass*>(element.overlay_dvd.get())->GetLibassHandler();
+          if (handler && handler->NeedsRerender(element.pts))
+            needsContinuousRedraw = true;
+        }
       }
     }
   }
@@ -1040,6 +1187,7 @@ std::shared_ptr<COverlay> CRenderer::Convert(CDVDOverlay& o, double pts)
   {
     if (o.IsOverlayType(DVDOVERLAY_TYPE_IMAGE))
     {
+      r->UpdateFromImage(static_cast<const CDVDOverlayImage&>(o));
       r->m_pgsSubtitle = true;
       r->m_3dSubtitleDepth = o.m_3dSubtitleDepth;
       r->m_isDiscMenuOverlay = o.IsDiscMenuOverlay();

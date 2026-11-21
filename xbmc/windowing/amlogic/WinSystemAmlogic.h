@@ -69,7 +69,6 @@ protected:
   CCriticalSection m_resourceSection;
   std::vector<IDispResource*> m_resources;
   std::unique_ptr<CLibInputHandler> m_libinput;
-  CHDRCapabilities m_hdr_caps;
   bool m_force_mode_switch;
 
 private:

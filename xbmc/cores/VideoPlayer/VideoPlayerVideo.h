@@ -182,6 +182,7 @@ protected:
   VideoPicture m_picture;
 
   EOutputState m_outputSate;
+  bool m_noPicture{false};
 
   bool m_displayReset{false};
   std::chrono::steady_clock::time_point m_lastDisplayReset{std::chrono::steady_clock::time_point::min()};

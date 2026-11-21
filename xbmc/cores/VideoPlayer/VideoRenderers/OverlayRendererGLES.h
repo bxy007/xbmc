@@ -10,8 +10,12 @@
 #pragma once
 
 #include "OverlayRenderer.h"
+#include "cores/VideoPlayer/DVDCodecs/Overlay/BdjColorTransform.h"
 
 #include "system_gl.h"
+
+#include <cstdint>
+#include <vector>
 
 class CDVDOverlay;
 class CDVDOverlayImage;
@@ -33,12 +37,25 @@ public:
   ~COverlayTextureGLES() override;
 
   void Render(SRenderState& state) override;
+  void UpdateFromImage(const CDVDOverlayImage& o) override;
 
   GLuint m_texture = 0;
   float m_u;
   float m_v;
   bool m_pma; /*< is alpha in texture premultiplied in the values */
   bool m_isHdrPqAuthored{false};
+
+private:
+  bool m_hasMipmaps{true};
+  bool m_bgraSupported{false};
+  bool m_bakedRaw{false};
+  GLenum m_internalFormat{GL_RGBA};
+  GLenum m_externalFormat{GL_RGBA};
+  int m_texWidth{0};
+  int m_texHeight{0};
+  uint64_t m_uploadedRevision{0};
+  BDJ_COLOR::BakeKey m_uploadedBakeKey{};
+  std::vector<uint32_t> m_uploadScratch;
 };
 
 class COverlayGlyphGLES : public COverlay

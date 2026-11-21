@@ -1020,6 +1020,23 @@ bool aml_display_connected()
   return false;
 }
 
+bool aml_display_support_4k()
+{
+  if (!aml_display_connected())
+    return false;
+
+  CSysfsPath dispCap{"/sys/class/amhdmitx/amhdmitx0/disp_cap"};
+  for (const std::string& mode : StringUtils::Split(dispCap.GetOrDefault<std::string>(), "\n"))
+  {
+    RESOLUTION_INFO res;
+    if (aml_mode_to_resolution(mode.c_str(), res) && res.iScreenWidth >= 3840 &&
+        res.iScreenHeight >= 2160 && (res.dwFlags & D3DPRESENTFLAG_PROGRESSIVE))
+      return true;
+  }
+
+  return false;
+}
+
 bool aml_display_support_hdr_pq()
 {
   bool support = false;

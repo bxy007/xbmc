@@ -213,6 +213,7 @@ public:
   virtual MenuType GetSupportedMenuType() const { return MenuType::NONE; }
 
   virtual bool OnAction(const CAction& action) { return false; }
+  virtual bool OnFullscreenBack() { return false; }
 
   //returns a state that is needed for resuming from a specific time
   virtual std::string GetPlayerState() { return ""; }

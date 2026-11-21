@@ -1155,6 +1155,16 @@ void CRenderSystemGLES::InitialiseShaders()
               "GUI Shader gles_shader_texture_noblend.frag (SDR-authored image subs) - compile and link failed");
   }
 
+  shaderSlot(ShaderMethodGLES::SM_TEXTURE_NOBLEND_RAW) = std::make_unique<CGLESShader>(
+      "gles_shader_texture_noblend.frag", std::string("#define KODI_RAW_PASSTHROUGH 1\n"));
+  if (!shaderSlot(ShaderMethodGLES::SM_TEXTURE_NOBLEND_RAW)->CompileAndLink())
+  {
+    shaderSlot(ShaderMethodGLES::SM_TEXTURE_NOBLEND_RAW)->Free();
+    shaderSlot(ShaderMethodGLES::SM_TEXTURE_NOBLEND_RAW).reset();
+    CLog::Log(LOGERROR,
+              "GUI Shader gles_shader_texture_noblend.frag (raw passthrough) - compile and link failed");
+  }
+
   shaderSlot(ShaderMethodGLES::SM_MULTI_BLENDCOLOR) =
       std::make_unique<CGLESShader>("gles_shader_multi_blendcolor.frag", defines);
   if (!shaderSlot(ShaderMethodGLES::SM_MULTI_BLENDCOLOR)->CompileAndLink())
@@ -1355,6 +1365,14 @@ void CRenderSystemGLES::ReleaseShaders()
   if (shaderSlot(ShaderMethodGLES::SM_TEXTURE_NOBLEND_HDR_PGS_SDR_OUTPUT))
     shaderSlot(ShaderMethodGLES::SM_TEXTURE_NOBLEND_HDR_PGS_SDR_OUTPUT)->Free();
   shaderSlot(ShaderMethodGLES::SM_TEXTURE_NOBLEND_HDR_PGS_SDR_OUTPUT).reset();
+
+  if (shaderSlot(ShaderMethodGLES::SM_TEXTURE_NOBLEND_PMA_SDR_IMAGE_SUBS))
+    shaderSlot(ShaderMethodGLES::SM_TEXTURE_NOBLEND_PMA_SDR_IMAGE_SUBS)->Free();
+  shaderSlot(ShaderMethodGLES::SM_TEXTURE_NOBLEND_PMA_SDR_IMAGE_SUBS).reset();
+
+  if (shaderSlot(ShaderMethodGLES::SM_TEXTURE_NOBLEND_RAW))
+    shaderSlot(ShaderMethodGLES::SM_TEXTURE_NOBLEND_RAW)->Free();
+  shaderSlot(ShaderMethodGLES::SM_TEXTURE_NOBLEND_RAW).reset();
 
   if (shaderSlot(ShaderMethodGLES::SM_MULTI_BLENDCOLOR))
     shaderSlot(ShaderMethodGLES::SM_MULTI_BLENDCOLOR)->Free();

@@ -118,6 +118,8 @@ public:
     virtual bool OnMenu(MenuCall call = MenuCall::Auto) = 0;
     virtual bool OnColorKey(int key) { return false; }
     virtual void OnBack() = 0;
+    virtual bool CanClosePopup() const { return false; }
+    virtual void ClosePopup() {}
     virtual void OnNext() = 0;
     virtual void OnPrevious() = 0;
     virtual bool OnMouseMove(const CPoint &point) = 0;

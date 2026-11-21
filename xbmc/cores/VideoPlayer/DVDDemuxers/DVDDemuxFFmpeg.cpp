@@ -567,6 +567,26 @@ bool CDVDDemuxFFmpeg::Open(const std::shared_ptr<CDVDInputStream>& pInput, bool 
     if (m_pInput->IsStreamType(DVDSTREAM_TYPE_DVD))
       av_opt_set_int(m_pFormatContext, "analyzeduration", 500000, 0);
 
+#ifdef HAVE_LIBBLURAY
+    // ffmpeg takes a PG size only from a display set and reads on to the probesize for one, and
+    // estimates a video frame rate over 20 frames; the play item states both
+    if (isBluray)
+    {
+      const auto bluray{std::static_pointer_cast<CDVDInputStreamBluray>(m_pInput)};
+      for (unsigned int i = 0; i < m_pFormatContext->nb_streams; i++)
+      {
+        AVStream* st = m_pFormatContext->streams[i];
+        int rate = 0;
+        int scale = 0;
+        if (st->codecpar->codec_id == AV_CODEC_ID_HDMV_PGS_SUBTITLE && st->codecpar->width == 0)
+          bluray->GetDemuxerGraphicsPlane(st->id, st->codecpar->width, st->codecpar->height);
+        else if (st->codecpar->codec_type == AVMEDIA_TYPE_VIDEO && st->r_frame_rate.num == 0 &&
+                 st->avg_frame_rate.num == 0 && bluray->GetDemuxerFrameRate(st->id, rate, scale))
+          st->r_frame_rate = st->avg_frame_rate = AVRational{rate, scale};
+      }
+    }
+#endif
+
     CLog::Log(LOGDEBUG, "{} - avformat_find_stream_info starting", __FUNCTION__);
     int iErr = avformat_find_stream_info(m_pFormatContext, nullptr);
     if (iErr < 0)
@@ -1837,6 +1857,23 @@ CDemuxStream* CDVDDemuxFFmpeg::AddStream(int streamIdx)
       pStream->discard = AVDISCARD_ALL;
       return nullptr;
     }
+
+#ifdef HAVE_LIBBLURAY
+    // UHD BD have a secondary video stream called by Dolby as enhancement layer. A player
+    // decodes it only where the stream table of the play item lists it.
+    if (pStream->id == HDMV_PID_VIDEO_EL && m_pInput->IsStreamType(DVDSTREAM_TYPE_BLURAY))
+    {
+      const bool dvEnabled = aml_dolby_vision_enabled();
+      if (!dvEnabled ||
+          !static_cast<CDVDInputStreamBluray*>(m_pInput.get())->ListsEnhancementLayer(pStream->id))
+      {
+        CLog::Log(LOGDEBUG, "CDVDDemuxFFmpeg::AddStream - discarding Dolby Vision stream ({})",
+                  dvEnabled ? "not in the play item" : "disabled");
+        pStream->discard = AVDISCARD_ALL;
+        return nullptr;
+      }
+    }
+#endif
 
     CDemuxStream* stream = nullptr;
 
@@ -3132,6 +3169,12 @@ bool CDVDDemuxFFmpeg::IsDoViP7DualLayer() const
     if (el->codecpar->codec_type != AVMEDIA_TYPE_VIDEO) continue;
     if (el->codecpar->codec_id != AV_CODEC_ID_HEVC)     continue;
     if (el->id != 0x1015)                               continue;
+    if (el->discard == AVDISCARD_ALL)                   continue;
+#ifdef HAVE_LIBBLURAY
+    if (m_pInput && m_pInput->IsStreamType(DVDSTREAM_TYPE_BLURAY) &&
+        !static_cast<CDVDInputStreamBluray*>(m_pInput.get())->ListsEnhancementLayer(el->id))
+      continue;
+#endif
 
     return true;
   }

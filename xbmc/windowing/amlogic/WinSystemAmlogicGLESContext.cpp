@@ -142,9 +142,13 @@ bool CWinSystemAmlogicGLESContext::CreateNewWindow(const std::string& name,
 
   // Content HDR can change while global DV keeps the same HDMI output. Only
   // a change of output signalling requires the extra DV mode switch.
+  // A deferred DV startup queues its hardware enable until the adjacent mode
+  // write, so aml_get_output_hdr_type() still reports the pre-DV fallback here.
   const StreamHdrType hdrType = GetGfxContext().GetHDRType();
   const StreamHdrType outputHdrType = aml_get_output_hdr_type(hdrType);
+  const bool pendingDvStartup = IsVideoModeSwitchPending() && (aml_dv_mode() != DV_MODE_OFF);
   bool force_mode_switch_by_dv =
+         pendingDvStartup ||
          ((outputHdrType != m_outputHdrType) &&
           ((outputHdrType == StreamHdrType::HDR_TYPE_DOLBYVISION) || (m_outputHdrType == StreamHdrType::HDR_TYPE_DOLBYVISION)) &&
        (aml_dv_mode() != DV_MODE_OFF));
@@ -162,13 +166,13 @@ bool CWinSystemAmlogicGLESContext::CreateNewWindow(const std::string& name,
   CLog::Log(LOGDEBUG, "CWinSystemAmlogicGLESContext::{}: "
     "m_bWindowCreated: {}, "
     "frac rate {:d}({:d}), "
-    "content HDR: {}, output HDR: {}({}), force mode switch: {}",
+    "content HDR: {}, output HDR: {}({}), pending DV startup: {}, force mode switch: {}",
     __FUNCTION__,
     m_bWindowCreated,
     fractional_rate, cur_fractional_rate,
     new_hdrStr.empty() ? "none" : new_hdrStr,
     output_hdrStr.empty() ? "none" : output_hdrStr,
-    old_hdrStr.empty() ? "none" : old_hdrStr, force_mode_switch_by_dv);
+    old_hdrStr.empty() ? "none" : old_hdrStr, pendingDvStartup, force_mode_switch_by_dv);
   CLog::Log(LOGDEBUG, "CWinSystemAmlogicGLESContext::{}: "
     "cur: iWidth: {:04d}, iHeight: {:04d}, iScreenWidth: {:04d}, iScreenHeight: {:04d}, fRefreshRate: {:02.2f}, dwFlags: {:02x}",
     __FUNCTION__,

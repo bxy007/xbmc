@@ -282,6 +282,11 @@ static int PlayerControl(const std::vector<std::string>& params)
       appPlayer->OnAction(CAction(ACTION_SHOW_VIDEOMENU, menuArg));
     }
   }
+  else if (paramlow == "showvideotopmenu")
+  {
+    if (appPlayer->IsPlaying())
+      appPlayer->OnAction(CAction(ACTION_SHOW_VIDEOTOPMENU));
+  }
   else if (StringUtils::StartsWithNoCase(params[0], "partymode"))
   {
     std::string strXspPath;

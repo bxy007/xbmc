@@ -141,6 +141,7 @@ public:
   bool IsPlayingRDS() const;
   void LoadPage(int p, int sp, unsigned char* buffer);
   bool OnAction(const CAction &action);
+  bool OnFullscreenBack();
   void OnNothingToQueueNotify();
   void Pause();
   bool QueueNextFile(const CFileItem &file);

@@ -33,6 +33,7 @@ extern "C"
 {
 #include <libbluray/bluray.h>
 #include <libbluray/bluray-version.h>
+#include <libbluray/filesystem.h>
 #include <libbluray/keys.h>
 #include <libbluray/overlay.h>
 #include <libbluray/player_settings.h>
@@ -74,6 +75,8 @@ public:
   bool Open() override;
   void Close() override;
   int Read(uint8_t* buf, int buf_size) override;
+  BD_DIR_H* OpenDir(const char* relPath);
+  BD_FILE_H* OpenFile(const char* relPath);
   int64_t Seek(int64_t offset, int whence) override;
   void Abort() override;
   bool IsEOF() override;
@@ -101,10 +104,18 @@ public:
   */
   bool OnMenu(MenuCall call) override;
   bool OnColorKey(int key) override;
+  bool CanClosePopup() const override;
+  void ClosePopup() override;
   void OnBack() override
   {
-    if(IsInMenu())
-      OnMenu(MenuCall::Auto);
+    if (!IsInMenu())
+      return;
+    if (m_hasVisibleBdjOverlay && !m_isInMainMenu)
+    {
+      UserInput(BD_VK_POPUP);
+      return;
+    }
+    OnMenu(MenuCall::Auto);
   }
   void OnNext() override {}
   void OnPrevious() override {}
@@ -144,7 +155,39 @@ public:
 
   void UserInput(bd_vk_key_e vk);
   bool MouseMove(const CPoint &point) const;
-  bool MouseClick(const CPoint &point) const;
+  bool MouseClick(const CPoint &point);
+
+  bool IsNavMode() const { return m_navmode; }
+  bool IsTitleEnded() const { return m_endedTitleTime > 0; }
+  bool IsTitleEndWait() const { return m_titleEndWait; }
+  bool IsTitleEndHeld() const;
+  bool IsTailInTitle() const;
+  bool IsReadHeld() const;
+  bool TakeItemAbandoned();
+  bool IsJumpPending() const { return m_itemAbandoned; }
+  void PollEvents();
+  void SetPresentedTime(double pts);
+  void SetPresentationClock(double pts, double speed);
+  void SetReadPresented();
+  void ReportItemPlayedOut();
+  void ResetPresentedLeft() { m_presentedLeft = false; }
+  void SetLastPictureTime(double lastVideoPts, double clockPts);
+  std::optional<double> GetHeldItemEnd() const;
+  bool NextItemContinuesPlaylist() const { return m_nextItemInPlaylist; }
+  std::optional<int> GetNextItemSeekTime() const { return m_nextItemSeekTime; }
+
+  bool ListsEnhancementLayer(int pid) const;
+  bool GetDemuxerGraphicsPlane(int pid, int& width, int& height) const;
+  bool GetDemuxerFrameRate(int pid, int& rate, int& scale) const;
+
+  bool SetActiveAudioStream(int pid);
+  bool SetActiveSubtitleStream(int pid, bool visible);
+  void SetSubtitleVisible(bool visible);
+  bool CanChangeAudioStream() const;
+  bool CanChangeSubtitleStream() const;
+  bool CanToggleSubtitle() const;
+  bool IsPgEnabled() const { return m_pgEnabled; }
+  bool IsAudioStreamPick() const { return m_audioStreamPick; }
 
   int GetChapter() override;
   int GetChapterCount() override;
@@ -220,14 +263,35 @@ public:
 protected:
   struct SPlane;
 
+  bool OpenPopup();
+  void UpdateBdjPopup(bool visible);
   void OverlayFlush(int64_t pts);
   void DeliverParkedOverlayIfDue();
   void OverlayClose(bool deferrable = false);
   static void OverlayClear(SPlane& plane, int x, int y, int w, int h);
   static void OverlayInit (SPlane& plane, int w, int h);
+  void InitBdjSurfaceLocked(int w, int h);
+  void ResetBdjSurfaceLocked();
   bool ProcessItem(int playitem);
   void FreePrevTitleInfo();
   void StashBoundaryClip();
+  void ReleaseTitle();
+  void ResetTitleEnd();
+  void CheckPresentedLeft();
+  void ReportPresented(int64_t titleTime);
+  void UpdatePendingGraphicsRegime(int64_t titleTime);
+  void RecordTitleTimeSpan(const BLURAY_CLIP_INFO* clip, bool reset);
+  int64_t ConvertPtsToTitleTime90k(double ptsDvdTime) const;
+  bool CanSelectStream() const;
+  void SelectPendingStreams();
+  void PollHeldJoin();
+  bool TakeHeldEvent();
+  bool ProcessHeldEvents();
+  bool TakeMenuJump(bool joinsInLine, bool dataRead);
+  bool AbandonsItem(bool menuJump, bool fromStill) const;
+  void MarkMenuInput();
+  bool IsJoinHeld() const;
+  const BLURAY_CLIP_INFO* GetActiveClipLocked() const;
   void UpdateSeamTimeOffset(const BLURAY_CLIP_INFO* prev, const BLURAY_CLIP_INFO* next);
   void ResetSeamTimeOffset(const char* reason);
   static bool AreClipVideoStreamsCompatible(const BLURAY_CLIP_INFO* a, const BLURAY_CLIP_INFO* b);
@@ -259,11 +323,21 @@ protected:
   bool m_prevWasMVC = false;
   bool m_prevFlipEyes = false;
   std::atomic_bool m_menu{false};
-  bool m_isInMainMenu = false;
+  std::atomic_bool m_isBdjTitle{false};
+  std::atomic_bool m_isInMainMenu{false};
   std::atomic_bool m_discontinuityFlush{false};
   std::atomic_bool m_hasOverlay{false};
   std::atomic_bool m_hasMenuOverlay{false};
+  std::atomic_bool m_hasVisibleBdjOverlay{false};
   std::atomic_bool m_popupAvailable{false};
+  enum class BdjPopup
+  {
+    CLOSED,
+    OPENING,
+    OPEN,
+    CLOSING,
+  };
+  std::atomic<BdjPopup> m_bdjPopup{BdjPopup::CLOSED};
   std::atomic_bool m_overlayCloseDeferred{false};
   std::atomic_bool m_repostMenuOverlay{false};
   std::atomic_bool m_navmode{false};
@@ -272,6 +346,41 @@ protected:
   int m_seamGeneration = 0;
   double m_seamTimeOffset = 0.0;
   double m_seamTimeOffsetPrev = 0.0;
+  struct TitleTimeSpan
+  {
+    int64_t ptsThreshold90k{0};
+    int64_t base90k{0};
+  };
+  mutable std::mutex m_titleTimeSpanMutex;
+  std::vector<TitleTimeSpan> m_titleTimeSpans;
+  int m_endedTitleTime{0};
+  bool m_titleEndWait{false};
+  int64_t m_lastPictureTime{-1};
+  int64_t m_presentedTime{-1};
+  int64_t m_clockTime{-1};
+  std::atomic_bool m_menuInput{false};
+  bool m_itemAbandoned{false};
+  std::queue<BD_EVENT> m_heldEvents;
+  bool m_notificationsHeld{false};
+  std::optional<bool> m_pendingPqGraphics;
+  int64_t m_pendingPqGraphicsStart{0};
+  bool m_presentedLeft{false};
+  bool m_readSinceReport{false};
+  int64_t m_heldDue{-2};
+  int64_t m_reportedTime{-1};
+  int64_t m_playedItemEnd{-1};
+  bool m_playlistLeft{false};
+  bool m_nextItemInPlaylist{false};
+  bool m_itemSeeked{false};
+  std::optional<int> m_nextItemSeekTime;
+  uint32_t m_pgStreamNumber{0};
+  uint32_t m_audioStreamNumber{0};
+  bool m_audioStreamPick{false};
+  bool m_pgEnabled{false};
+  std::optional<int> m_audioPidPending;
+  std::optional<int> m_pgPidPending;
+  std::optional<bool> m_pgVisiblePending;
+  std::atomic_bool m_bdjGraphicsActive{false};
   std::atomic<uint32_t> m_uoMask{0};
   bool m_bdStillActive = false;
   bool m_topMenuIsBdj = false;
@@ -283,7 +392,8 @@ protected:
   std::atomic<uint32_t> m_menuRestorePlaylist{MAX_PLAYLIST_ID + 1};
   bool TitleCarriesAlwaysOnMenuComposition() const;
   bool PlaylistWithinMenuDurationBound() const;
-  bool m_lastIsInMenuLogged = false;
+  bool IsInMainOrHdmvMenu() const;
+  mutable std::atomic<int> m_lastIsInMenuLogged{-1};
   mutable std::atomic<int> m_lastMenuDomainLogged{-1};
   int m_dispTimeBeforeRead = 0;
   std::chrono::steady_clock::time_point m_vmDiagWindow{};
@@ -328,8 +438,13 @@ protected:
   };
 
   mutable CCriticalSection m_overlayLock;
+  std::chrono::steady_clock::time_point m_bdjPopupDeadline{};
   SPlane m_planes[2];
+  SOverlay m_bdjOverlay;
+  uint64_t m_bdjVisiblePixels{0};
+  bool m_bdjSurfaceDirty{false};
   std::shared_ptr<CDVDOverlay> m_pendingOverlayGroup;
+  std::thread::id m_playerThread{};
   std::atomic<std::thread::id> m_readingThread{};
   void LoadMenuSounds();
   void FreeMenuSounds();

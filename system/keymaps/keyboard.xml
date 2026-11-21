@@ -615,6 +615,8 @@
       <l>DialogSelectSubtitle</l>
       <a>AudioDelay</a>
       <escape>Fullscreen</escape>
+      <backspace mod="longpress">Stop</backspace>
+      <browser_back mod="longpress">Stop</browser_back>
       <return>Select</return>
       <enter>Select</enter>      <!-- backspace>Fullscreen</backspace -->
       <ok>Select</ok>
