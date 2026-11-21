@@ -266,6 +266,8 @@ bool CFile::Open(const CURL& file, const unsigned int flags)
 
     if (url2.IsProtocol("apk") || url2.IsProtocol("zip") )
       url2.SetOptions("");
+    if (url2.HasProtocolOption("startoffset"))
+      url2.RemoveProtocolOption("startoffset");
 
     if (!g_directoryCache.FileExists(url2.Get(), bPathInCache) )
     {

@@ -966,14 +966,14 @@ bool URIUtils::IsFTP(const std::string& strFile)
 bool URIUtils::IsHTTP(const std::string& strFile, bool bTranslate /* = false */)
 {
   if (IsStack(strFile))
-    return IsHTTP(CStackDirectory::GetFirstStackedFile(strFile));
+    return IsHTTP(CStackDirectory::GetFirstStackedFile(strFile), bTranslate);
 
   if (IsSpecial(strFile))
-    return IsHTTP(CSpecialProtocol::TranslatePath(strFile));
+    return IsHTTP(CSpecialProtocol::TranslatePath(strFile), bTranslate);
 
   CURL url(strFile);
   if (HasParentInHostname(url))
-    return IsHTTP(url.GetHostName());
+    return IsHTTP(url.GetHostName(), bTranslate);
 
   const std::string strProtocol = (bTranslate ? url.GetTranslatedProtocol() : url.GetProtocol());
 

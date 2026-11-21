@@ -12,6 +12,7 @@
 #include "utils/HttpHeader.h"
 #include "utils/RingBuffer.h"
 
+#include <atomic>
 #include <map>
 #include <string>
 
@@ -108,7 +109,9 @@ namespace XFILE
           char* m_overflowBuffer; // in the rare case we would overflow the above buffer
           unsigned int m_overflowSize; // size of the overflow buffer
           int m_stillRunning; // Is background url fetch still in progress
-          bool m_cancelled;
+          std::atomic<bool> m_cancelled{false};
+          std::atomic<bool> m_cancellable{false};
+          const std::atomic<bool>* m_externalCancel{nullptr};
           bool m_cancelOnShutdown = false;
           int64_t m_fileSize;
           int64_t m_filePos;
@@ -136,6 +139,7 @@ namespace XFILE
           bool ReadString(char *szLine, int iLineLength);
           int8_t FillBuffer(unsigned int want);
           bool ShouldCancelOnShutdown() const;
+          bool ShouldCancel() const;
           void SetReadBuffer(const void* lpBuf, int64_t uiBufSize);
 
           void SetResume(void);
@@ -147,15 +151,18 @@ namespace XFILE
       void ParseAndCorrectUrl(CURL &url);
       void SetCommonOptions(CReadState* state, bool failOnError = true);
       void SetRequestHeaders(CReadState* state) const;
+      bool HasCustomRange() const;
       void SetCorrectHeaders(CReadState* state);
       bool Service(const std::string& strURL, std::string& strHTML);
       std::string GetInfoString(int infoType) const;
+      int ReadRange(SReadRange& req);
 
     protected:
       CReadState* m_state;
       CReadState* m_oldState;
       unsigned int m_bufferSize;
       int64_t m_writeOffset = 0;
+      int64_t m_startOffset = 0;
 
       std::string m_url;
       std::string m_origUrl;

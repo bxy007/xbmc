@@ -58,6 +58,8 @@ namespace XFILE
     }
 
   private:
+    int64_t SeekInternal(int64_t iTarget);
+
     std::unique_ptr<CCacheStrategy> m_pCache;
     int m_seekPossible = 0;
     CFile m_source;
@@ -68,6 +70,7 @@ namespace XFILE
     int64_t m_seekPos = 0;
     int64_t m_readPos = 0;
     int64_t m_writePos = 0;
+    std::atomic<int64_t> m_deferredEofPos{-1};
     unsigned m_chunkSize = 0;
     uint32_t m_writeRate = 0;
     uint32_t m_writeRateActual = 0;

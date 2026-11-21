@@ -8,7 +8,10 @@
 
 #pragma once
 
+#include <atomic>
+#include <cstddef>
 #include <stdint.h>
+#include <sys/types.h>
 
 namespace XFILE
 {
@@ -67,6 +70,15 @@ enum CACHE_BUFFER_MODES
   CACHE_BUFFER_MODE_NETWORK = 4,
 };
 
+struct SReadRange
+{
+  int64_t offset{0};
+  void* buffer{nullptr};
+  size_t size{0};
+  ssize_t bytesRead{-1};
+  const std::atomic<bool>* cancel{nullptr};
+};
+
 typedef enum {
   IOCTRL_NATIVE        = 1,  /**< SNativeIoControl structure, containing what should be passed to native ioctrl */
   IOCTRL_SEEK_POSSIBLE = 2,  /**< return 0 if known not to work, 1 if it should work */
@@ -74,6 +86,9 @@ typedef enum {
   IOCTRL_CACHE_SETRATE = 4,  /**< unsigned int with speed limit for caching in bytes per second */
   IOCTRL_SET_CACHE     = 8,  /**< CFileCache */
   IOCTRL_SET_RETRY     = 16, /**< Enable/disable retry within the protocol handler (if supported) */
+  IOCTRL_READ_RANGE    = 32, /**< SReadRange structure: read a bounded byte range keeping connection reusable */
+  IOCTRL_CANCEL        = 64, /**< Signal in-flight I/O to abort promptly (thread-safe if supported) */
+  IOCTRL_CANCEL_POSSIBLE = 65, /**< Return 1 if the open handle can cancel I/O from another thread */
 } EIoControl;
 
 enum CURLOPTIONTYPE

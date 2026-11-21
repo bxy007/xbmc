@@ -24,6 +24,7 @@
 #include <algorithm>
 #include <cassert>
 #include <climits>
+#include <limits>
 #include <vector>
 
 #ifdef TARGET_POSIX
@@ -142,8 +143,94 @@ extern "C" int shutdown_abort_callback(void* clientp,
                                        curl_off_t,
                                        curl_off_t)
 {
-  return static_cast<CCurlFile::CReadState*>(clientp)->ShouldCancelOnShutdown() ? 1 : 0;
+  return static_cast<CCurlFile::CReadState*>(clientp)->ShouldCancel() ? 1 : 0;
 }
+
+namespace
+{
+bool ParseHttpContentRange(const std::string& header,
+                           int64_t& outStart,
+                           int64_t& outEnd,
+                           int64_t& outTotal)
+{
+  outStart = -1;
+  outEnd = -1;
+  outTotal = -1;
+
+  size_t pos = 0;
+  const size_t len = header.size();
+  auto skipSpaces = [&]()
+  {
+    while (pos < len && (header[pos] == ' ' || header[pos] == '\t'))
+      ++pos;
+  };
+
+  skipSpaces();
+  // RFC 9110 Section 14.4: "bytes" SP first-pos "-" last-pos "/" (complete-length / "*")
+  if (len - pos < 6 || !StringUtils::EqualsNoCase(header.substr(pos, 5), "bytes"))
+    return false;
+  pos += 5;
+  if (pos >= len || (header[pos] != ' ' && header[pos] != '\t'))
+    return false;
+  skipSpaces();
+
+  auto parseNonNegInt64 = [&](int64_t& outVal) -> bool
+  {
+    if (pos >= len || header[pos] < '0' || header[pos] > '9')
+      return false;
+    uint64_t acc = 0;
+    constexpr uint64_t maxVal = static_cast<uint64_t>(std::numeric_limits<int64_t>::max());
+    while (pos < len && header[pos] >= '0' && header[pos] <= '9')
+    {
+      const uint64_t digit = static_cast<uint64_t>(header[pos] - '0');
+      if (acc > (maxVal - digit) / 10)
+        return false;
+      acc = acc * 10 + digit;
+      ++pos;
+    }
+    outVal = static_cast<int64_t>(acc);
+    return true;
+  };
+
+  int64_t start = 0;
+  int64_t end = 0;
+  int64_t total = -1;
+  if (!parseNonNegInt64(start))
+    return false;
+  if (pos >= len || header[pos] != '-')
+    return false;
+  ++pos;
+  if (!parseNonNegInt64(end))
+    return false;
+  if (end < start)
+    return false;
+  if (pos >= len || header[pos] != '/')
+    return false;
+  ++pos;
+
+  if (pos < len && header[pos] == '*')
+  {
+    ++pos;
+    total = -1;
+  }
+  else
+  {
+    if (!parseNonNegInt64(total))
+      return false;
+    if (total <= end)
+      return false;
+  }
+
+  skipSpaces();
+  if (pos != len)
+    return false;
+
+  outStart = start;
+  outEnd = end;
+  outTotal = total;
+  return true;
+}
+} // namespace
 
 /* fix for silly behavior of realloc */
 static inline void* realloc_simple(void *ptr, size_t size)
@@ -372,6 +459,8 @@ long CCurlFile::CReadState::Connect(unsigned int size)
   // (Try to) fill buffer
   if (FillBuffer(1) != FILLBUFFER_OK)
   {
+    if (ShouldCancel())
+      return -1;
     // Check response code
     long response;
     if (CURLE_OK == g_curlInterface.easy_getinfo(m_easyHandle, CURLINFO_RESPONSE_CODE, &response))
@@ -439,6 +528,7 @@ CCurlFile::CCurlFile()
   m_opened = false;
   m_forWrite = false;
   m_inError = false;
+  m_startOffset = 0;
   m_multisession  = true;
   m_seekable = true;
   m_connecttimeout = 0;
@@ -479,6 +569,7 @@ void CCurlFile::Close()
   m_opened = false;
   m_forWrite = false;
   m_inError = false;
+  m_startOffset = 0;
 
   if (m_dnsCacheList)
     g_curlInterface.slist_free_all(m_dnsCacheList);
@@ -491,7 +582,7 @@ void CCurlFile::SetCommonOptions(CReadState* state, bool failOnError /* = true *
 
   g_curlInterface.easy_reset(h);
 
-  if (state->m_cancelOnShutdown)
+  if (state->m_cancelOnShutdown || state->m_cancellable.load(std::memory_order_relaxed))
   {
     g_curlInterface.easy_setopt(h, CURLOPT_NOPROGRESS, 0);
     g_curlInterface.easy_setopt(h, CURLOPT_XFERINFOFUNCTION, shutdown_abort_callback);
@@ -736,6 +827,13 @@ void CCurlFile::SetRequestHeaders(CReadState* state) const {
     g_curlInterface.easy_setopt(state->m_easyHandle, CURLOPT_HTTPHEADER, state->m_curlHeaderList);
 }
 
+bool CCurlFile::HasCustomRange() const
+{
+  return std::any_of(m_requestheaders.begin(), m_requestheaders.end(), [](const auto& header) {
+    return StringUtils::EqualsNoCase(header.first, "Range");
+  });
+}
+
 void CCurlFile::SetCorrectHeaders(CReadState* state)
 {
   CHttpHeader& h = state->m_httpheader;
@@ -946,6 +1044,12 @@ void CCurlFile::ParseAndCorrectUrl(CURL &url2)
           if (value == "false")
             m_verifyPeer = false;
         }
+        else if (name == "startoffset")
+        {
+          const int64_t pos = strtoll(value.c_str(), nullptr, 10);
+          if (pos > 0)
+            m_startOffset = pos;
+        }
         else
         {
           if (name.length() > 0 && name[0] == '!')
@@ -1020,7 +1124,7 @@ bool CCurlFile::ReadData(std::string& strHTML)
     buffer[size_read] = 0;
     strHTML.append(buffer, size_read);
   }
-  if (m_state->m_cancelled)
+  if (m_state->m_cancelled.load(std::memory_order_acquire))
     return false;
   return true;
 }
@@ -1069,13 +1173,13 @@ bool CCurlFile::IsInternet()
 }
 
 void CCurlFile::Cancel() const {
-  m_state->m_cancelled = true;
+  m_state->m_cancelled.store(true, std::memory_order_release);
   while (m_opened)
     KODI::TIME::Sleep(1ms);
 }
 
 void CCurlFile::Reset() const {
-  m_state->m_cancelled = false;
+  m_state->m_cancelled.store(false, std::memory_order_release);
 }
 
 void CCurlFile::SetProxy(const std::string &type, const std::string &host,
@@ -1127,6 +1231,8 @@ bool CCurlFile::Open(const CURL& url)
   SetRequestHeaders(m_state);
   m_state->m_sendRange = m_seekable;
   m_state->m_bRetry = m_allowRetry;
+  if (m_startOffset > 0 && m_seekable)
+    m_state->m_filePos = m_startOffset;
 
   m_httpresponse = m_state->Connect(m_bufferSize);
 
@@ -1135,7 +1241,34 @@ bool CCurlFile::Open(const CURL& url)
   // in the URL protocol options.
   const bool isFatalHttpError = (m_httpresponse == 401 || m_httpresponse == 403 ||
                                  m_httpresponse == 404 || m_httpresponse == 410);
-  if (m_httpresponse <= 0 || (m_failOnError && m_httpresponse >= 400) || isFatalHttpError)
+  const bool isHttpProto = url2.IsProtocol("http") || url2.IsProtocol("https");
+  bool validStartRange = true;
+  if (isHttpProto)
+  {
+    if (m_startOffset > 0 && m_httpresponse != 206)
+    {
+      validStartRange = false;
+    }
+    // A caller-supplied Range overrides libcurl's generated Range. Keep the existing
+    // response-body semantics for that caller unless it also requested a start offset.
+    else if (m_httpresponse == 206 && (m_startOffset > 0 || !HasCustomRange()))
+    {
+      int64_t crStart = -1;
+      int64_t crEnd = -1;
+      int64_t crTotal = -1;
+      const std::string contentRange = m_state->m_httpheader.GetValue("Content-Range");
+      const int64_t expectedStart = (m_startOffset > 0 && m_seekable) ? m_startOffset : 0;
+      if (!ParseHttpContentRange(contentRange, crStart, crEnd, crTotal) || crStart != expectedStart)
+      {
+        CLog::Log(LOGERROR,
+                  "CCurlFile::{} - <{}> Invalid/misaligned Content-Range '{}' for offset {}",
+                  __FUNCTION__, redactPath, contentRange, expectedStart);
+        validStartRange = false;
+      }
+    }
+  }
+  if (m_httpresponse <= 0 || (m_failOnError && m_httpresponse >= 400) || isFatalHttpError ||
+      !validStartRange)
   {
     std::string error;
     if (m_httpresponse >= 400)
@@ -1425,7 +1558,7 @@ int64_t CCurlFile::Seek(int64_t iFilePosition, int iWhence)
 {
   int64_t nextPos = m_state->m_filePos;
 
-  if(!m_seekable)
+  if (!m_seekable || m_state->ShouldCancel())
     return -1;
 
   switch(iWhence)
@@ -1497,8 +1630,8 @@ int64_t CCurlFile::Seek(int64_t iFilePosition, int iWhence)
 
   // If seek on effective CDN URL failed with 4xx (e.g. 403 token expired / rejected)
   // and we have the original redirection URL, re-query the original URL to obtain a fresh 302 token.
-  if (response >= 400 && response < 500 && response != 416 && response != 406 &&
-      !m_origUrl.empty() && m_origUrl != m_url)
+  if (!m_state->ShouldCancel() && response >= 400 && response < 500 && response != 416 &&
+      response != 406 && !m_origUrl.empty() && m_origUrl != m_url)
   {
     CLog::Log(LOGWARNING,
               "CCurlFile::{} - HTTP {} on CDN URL <{}>, re-resolving via original URL <{}>",
@@ -1517,6 +1650,12 @@ int64_t CCurlFile::Seek(int64_t iFilePosition, int iWhence)
     std::string newEfurl = GetInfoString(CURLINFO_EFFECTIVE_URL);
     if (!newEfurl.empty())
       m_url = newEfurl;
+  }
+
+  if (m_state->ShouldCancel())
+  {
+    m_state->Disconnect();
+    return -1;
   }
 
   if ((response < 0 || response >= 400) &&
@@ -1541,6 +1680,29 @@ int64_t CCurlFile::Seek(int64_t iFilePosition, int iWhence)
     }
   }
 
+  if (response == 206)
+  {
+    const CURL currentUrl(m_url);
+    if (currentUrl.IsProtocol("http") || currentUrl.IsProtocol("https"))
+    {
+      int64_t crStart = -1;
+      int64_t crEnd = -1;
+      int64_t crTotal = -1;
+      const std::string contentRange = m_state->m_httpheader.GetValue("Content-Range");
+      if (!ParseHttpContentRange(contentRange, crStart, crEnd, crTotal) || crStart != nextPos)
+      {
+        CLog::Log(LOGERROR,
+                  "CCurlFile::{} - <{}> Invalid/misaligned Content-Range '{}' for seek offset {}",
+                  __FUNCTION__, CURL::GetRedacted(m_url), contentRange, nextPos);
+        const int64_t savedFileSize = m_state->m_fileSize;
+        m_state->Disconnect();
+        m_state->m_fileSize = savedFileSize;
+        m_state->m_filePos = -1;
+        return -1;
+      }
+    }
+  }
+
   SetCorrectHeaders(m_state);
 
   return m_state->m_filePos;
@@ -1555,7 +1717,7 @@ int64_t CCurlFile::GetLength()
 int64_t CCurlFile::GetPosition()
 {
   if (!m_opened) return 0;
-  return m_state->m_filePos;
+  return m_state->m_filePos >= 0 ? m_state->m_filePos : 0;
 }
 
 int CCurlFile::Stat(const CURL& url, struct __stat64* buffer)
@@ -1755,8 +1917,20 @@ bool CCurlFile::CReadState::ShouldCancelOnShutdown() const
   return jobManager && !jobManager->IsRunning();
 }
 
+bool CCurlFile::CReadState::ShouldCancel() const
+{
+  if (m_cancelled.load(std::memory_order_acquire))
+    return true;
+  if (m_externalCancel && m_externalCancel->load(std::memory_order_acquire))
+    return true;
+  return ShouldCancelOnShutdown();
+}
+
 int8_t CCurlFile::CReadState::FillBuffer(unsigned int want)
 {
+  if (m_cancelled.load(std::memory_order_acquire) ||
+      (m_externalCancel && m_externalCancel->load(std::memory_order_acquire)))
+    return FILLBUFFER_NO_DATA;
   if (ShouldCancelOnShutdown())
     return FILLBUFFER_FAIL;
   int retry = 0;
@@ -1768,7 +1942,8 @@ int8_t CCurlFile::CReadState::FillBuffer(unsigned int want)
   // doesn't exceed required size already
   while (m_buffer.getMaxReadSize() < want && m_buffer.getMaxWriteSize() > 0 )
   {
-    if (m_cancelled)
+    if (m_cancelled.load(std::memory_order_acquire) ||
+        (m_externalCancel && m_externalCancel->load(std::memory_order_acquire)))
       return FILLBUFFER_NO_DATA;
     if (ShouldCancelOnShutdown())
       return FILLBUFFER_FAIL;
@@ -1789,6 +1964,9 @@ int8_t CCurlFile::CReadState::FillBuffer(unsigned int want)
     }
 
     CURLMcode result = g_curlInterface.multi_perform(m_multiHandle, &m_stillRunning);
+    if (m_cancelled.load(std::memory_order_acquire) ||
+        (m_externalCancel && m_externalCancel->load(std::memory_order_acquire)))
+      return FILLBUFFER_NO_DATA;
     if (ShouldCancelOnShutdown())
       return FILLBUFFER_FAIL;
     if (!m_stillRunning)
@@ -1875,6 +2053,8 @@ int8_t CCurlFile::CReadState::FillBuffer(unsigned int want)
         m_bLastError = true; // Flag error for the next run
 
         // Retry immediately or leave it up to the caller?
+        if (ShouldCancel())
+          return FILLBUFFER_NO_DATA;
         if ((m_bRetry && retry < CServiceBroker::GetSettingsComponent()->GetAdvancedSettings()->m_curlretries) || (bRetryNow && retry == 0))
         {
           retry++;
@@ -1915,11 +2095,16 @@ int8_t CCurlFile::CReadState::FillBuffer(unsigned int want)
         g_curlInterface.multi_fdset(m_multiHandle, &fdread, &fdwrite, &fdexcep, &maxfd);
 
         long timeout = 0;
-        // Opted-in package reads must notice shutdown even when libcurl has
-        // no near-term timer and the peer stops sending data.
-        if (m_cancelOnShutdown ||
-            CURLM_OK != g_curlInterface.multi_timeout(m_multiHandle, &timeout) || timeout == -1 || timeout < 200)
+        if (CURLM_OK != g_curlInterface.multi_timeout(m_multiHandle, &timeout) || timeout == -1 ||
+            timeout < 200)
           timeout = 200;
+        // Cap select() wait so Cancel()/IOCTRL_CANCEL and shutdown are noticed promptly even when
+        // libcurl has no near-term timer and the peer stops sending data.
+        if (timeout > 200)
+          timeout = 200;
+        const bool fastCancel = m_cancellable.load(std::memory_order_relaxed);
+        if (fastCancel && timeout > 50)
+          timeout = 50;
 
         XbmcThreads::EndTime<> endTime{std::chrono::milliseconds(timeout)};
         int rc;
@@ -1939,11 +2124,11 @@ int8_t CCurlFile::CReadState::FillBuffer(unsigned int want)
              * socket. Instead use Windows' Sleep() and sleep for 100ms which is the
              * minimum suggested value in the curl_multi_fdset() doc.
              */
-            KODI::TIME::Sleep(100ms);
+            KODI::TIME::Sleep(fastCancel ? 50ms : 100ms);
             rc = 0;
 #else
             /* Portable sleep for platforms other than Windows. */
-            struct timeval wait = { 0, 100 * 1000 }; /* 100ms */
+            struct timeval wait = { 0, (fastCancel ? 50 : 100) * 1000 };
             rc = select(0, nullptr, nullptr, nullptr, &wait);
 #endif
           }
@@ -2169,6 +2354,358 @@ bool CCurlFile::GetCookies(const CURL &url, std::string &cookies)
   return false;
 }
 
+int CCurlFile::ReadRange(SReadRange& req)
+{
+  req.bytesRead = -1;
+  if (!m_opened || !m_seekable || m_forWrite || !m_state || !m_state->m_easyHandle ||
+      !m_state->m_multiHandle)
+    return -1;
+
+  const CURL currentUrl(m_url);
+  if (!currentUrl.IsProtocol("http") && !currentUrl.IsProtocol("https"))
+    return -1;
+
+  // The absolute-offset API cannot use a caller-supplied Range or its buffered response.
+  if (HasCustomRange())
+    return -1;
+
+  // Capability probe: caller asks whether bounded Range reads are supported
+  if (req.buffer == nullptr && req.size == 0)
+  {
+    req.bytesRead = 0;
+    return 0;
+  }
+
+  if (req.buffer == nullptr || req.size == 0 || req.offset < 0)
+    return -1;
+
+  struct ExternalCancelGuard
+  {
+    CReadState* state;
+    const std::atomic<bool>* prev;
+    explicit ExternalCancelGuard(CReadState* s, const std::atomic<bool>* cancel)
+      : state(s), prev(s->m_externalCancel)
+    {
+      state->m_externalCancel = cancel;
+    }
+    ~ExternalCancelGuard() { state->m_externalCancel = prev; }
+  } cancelGuard(m_state, req.cancel);
+
+  m_state->m_cancellable.store(true, std::memory_order_relaxed);
+  if (m_state->ShouldCancel())
+    return -1;
+
+  const int64_t savedFileSize = m_state->m_fileSize;
+  if (savedFileSize > 0 && req.offset >= savedFileSize)
+  {
+    req.bytesRead = 0;
+    return 0;
+  }
+
+  const size_t want =
+      (savedFileSize > 0)
+          ? static_cast<size_t>(std::min<uint64_t>(
+                req.size, static_cast<uint64_t>(savedFileSize - req.offset)))
+          : req.size;
+  auto* dst = static_cast<uint8_t*>(req.buffer);
+
+  // Fast path: immediately after Open(), the initial offset-0 stream is already open and
+  // receiving data. Consume the requested head chunk directly from it, then close the
+  // open-ended stream so it does not linger or occupy a server concurrency slot.
+  if (req.offset == 0 && m_state->m_filePos == 0 &&
+      (m_state->m_stillRunning || m_state->m_buffer.getMaxReadSize() > 0))
+  {
+    size_t done = 0;
+    bool readErr = false;
+    while (done < want)
+    {
+      if (m_state->ShouldCancel())
+      {
+        readErr = true;
+        break;
+      }
+      const ssize_t r = m_state->Read(dst + done, want - done);
+      if (r < 0)
+      {
+        readErr = true;
+        break;
+      }
+      if (r == 0)
+        break;
+      done += static_cast<size_t>(r);
+    }
+
+    const bool hadError = readErr || m_state->m_bLastError;
+    m_state->Disconnect();
+    m_state->m_fileSize = savedFileSize;
+    m_state->m_filePos = -1;
+
+    if (m_state->ShouldCancel())
+      return -1;
+
+    if (!hadError && done > 0 && (savedFileSize <= 0 || done == want))
+    {
+      CLog::Log(LOGDEBUG,
+                "CCurlFile::ReadRange - ({}) initial-stream offset=0 want={} read={}",
+                fmt::ptr(m_state), want, done);
+      req.bytesRead = static_cast<ssize_t>(done);
+      return 0;
+    }
+  }
+
+  auto executeBounded = [&](ssize_t& outRead, long& outHttpCode, long& outNumConnects,
+                            bool& outRangeError) -> bool
+  {
+    outRead = -1;
+    outHttpCode = 0;
+    outNumConnects = 0;
+    outRangeError = false;
+
+    if (m_state->ShouldCancel())
+      return false;
+
+    m_state->Disconnect();
+
+    SetCommonOptions(m_state);
+    SetRequestHeaders(m_state);
+
+    const int64_t rangeEnd = req.offset + static_cast<int64_t>(want) - 1;
+    const std::string rangeStr = StringUtils::Format("{}-{}", req.offset, rangeEnd);
+    g_curlInterface.easy_setopt(m_state->m_easyHandle, CURLOPT_RESUME_FROM_LARGE,
+                                static_cast<curl_off_t>(0));
+    g_curlInterface.easy_setopt(m_state->m_easyHandle, CURLOPT_RANGE, rangeStr.c_str());
+
+    m_state->m_filePos = req.offset;
+    m_state->m_fileSize = req.offset + static_cast<int64_t>(want);
+    m_state->m_sendRange = false;
+    // Handle retry outside FillBuffer so FillBuffer's SetResume() cannot overwrite CURLOPT_RANGE.
+    m_state->m_bRetry = false;
+    m_state->m_bFirstLoop = true;
+    m_state->m_bLastError = false;
+
+    const unsigned int bufSz = static_cast<unsigned int>(std::min<size_t>(want, 256 * 1024));
+    m_state->m_bufferSize = bufSz;
+    m_state->m_buffer.Destroy();
+    m_state->m_buffer.Create(bufSz * 2);
+    m_state->m_httpheader.Clear();
+    m_state->m_stillRunning = 1;
+
+    g_curlInterface.multi_add_handle(m_state->m_multiHandle, m_state->m_easyHandle);
+
+    const int8_t firstFill = m_state->FillBuffer(1);
+    g_curlInterface.easy_getinfo(m_state->m_easyHandle, CURLINFO_RESPONSE_CODE, &outHttpCode);
+    g_curlInterface.easy_getinfo(m_state->m_easyHandle, CURLINFO_NUM_CONNECTS, &outNumConnects);
+
+    if (firstFill != FILLBUFFER_OK || m_state->ShouldCancel())
+    {
+      g_curlInterface.easy_setopt(m_state->m_easyHandle, CURLOPT_RANGE, NULL);
+      m_state->Disconnect();
+      m_state->m_fileSize = savedFileSize;
+      m_state->m_filePos = -1;
+      return false;
+    }
+
+    // Server must honor Range (206), except offset==0 where 200 for a full small file is valid.
+    if (outHttpCode != 206 && !(outHttpCode == 200 && req.offset == 0))
+    {
+      g_curlInterface.easy_setopt(m_state->m_easyHandle, CURLOPT_RANGE, NULL);
+      m_state->Disconnect();
+      m_state->m_fileSize = savedFileSize;
+      m_state->m_filePos = -1;
+      return false;
+    }
+
+    size_t curWant = want;
+    bool knownResponseLen = false;
+    bool responseBounded = false;
+
+#if LIBCURL_VERSION_NUM >= 0x073700
+    curl_off_t contentLen = -1;
+    const bool hasContentLen =
+        (CURLE_OK == g_curlInterface.easy_getinfo(
+                         m_state->m_easyHandle, CURLINFO_CONTENT_LENGTH_DOWNLOAD_T, &contentLen) &&
+         contentLen >= 0);
+#else
+    double contentLen = -1.0;
+    const bool hasContentLen =
+        (CURLE_OK == g_curlInterface.easy_getinfo(
+                         m_state->m_easyHandle, CURLINFO_CONTENT_LENGTH_DOWNLOAD, &contentLen) &&
+         contentLen >= 0.0);
+#endif
+
+    if (outHttpCode == 206)
+    {
+      // Strictly verify Content-Range start offset on HTTP 206 so a misaligned server/proxy
+      // response can never be cached at the requested sector.
+      const std::string contentRange = m_state->m_httpheader.GetValue("Content-Range");
+      int64_t crStart = -1;
+      int64_t crEnd = -1;
+      int64_t crTotal = -1;
+      if (!ParseHttpContentRange(contentRange, crStart, crEnd, crTotal) || crStart != req.offset)
+      {
+        CLog::Log(LOGWARNING,
+                  "CCurlFile::ReadRange - ({}) rejecting HTTP 206 with invalid/misaligned "
+                  "Content-Range '{}' for requested offset {}",
+                  fmt::ptr(m_state), contentRange, req.offset);
+        outRangeError = true;
+        g_curlInterface.easy_setopt(m_state->m_easyHandle, CURLOPT_RANGE, NULL);
+        m_state->Disconnect();
+        m_state->m_fileSize = savedFileSize;
+        m_state->m_filePos = -1;
+        return false;
+      }
+
+      const uint64_t rangeLen = static_cast<uint64_t>(crEnd - crStart) + 1;
+      if (hasContentLen && static_cast<uint64_t>(contentLen) != rangeLen)
+      {
+        CLog::Log(LOGWARNING,
+                  "CCurlFile::ReadRange - ({}) rejecting HTTP 206 with Content-Length {} != "
+                  "Content-Range length {} ('{}')",
+                  fmt::ptr(m_state), static_cast<uint64_t>(contentLen), rangeLen, contentRange);
+        outRangeError = true;
+        g_curlInterface.easy_setopt(m_state->m_easyHandle, CURLOPT_RANGE, NULL);
+        m_state->Disconnect();
+        m_state->m_fileSize = savedFileSize;
+        m_state->m_filePos = -1;
+        return false;
+      }
+
+      knownResponseLen = true;
+      responseBounded = (rangeLen <= want);
+      if (rangeLen < curWant)
+      {
+        curWant = static_cast<size_t>(rangeLen);
+        m_state->m_fileSize = req.offset + static_cast<int64_t>(curWant);
+      }
+    }
+    else if (hasContentLen)
+    {
+      const uint64_t actualLen = static_cast<uint64_t>(contentLen);
+      knownResponseLen = true;
+      responseBounded = (actualLen <= want);
+      if (actualLen < curWant)
+      {
+        curWant = static_cast<size_t>(actualLen);
+        m_state->m_fileSize = req.offset + static_cast<int64_t>(curWant);
+      }
+    }
+
+    size_t done = 0;
+    bool ok = true;
+    while (done < curWant)
+    {
+      if (m_state->ShouldCancel())
+      {
+        ok = false;
+        break;
+      }
+      const ssize_t r = m_state->Read(dst + done, curWant - done);
+      if (r < 0)
+      {
+        ok = false;
+        break;
+      }
+      if (r == 0)
+        break;
+      done += static_cast<size_t>(r);
+    }
+
+    if (m_state->ShouldCancel() || m_state->m_bLastError || (knownResponseLen && done < curWant))
+      ok = false;
+
+    // Pump libcurl briefly so the completed bounded response transitions to CURLMSG_DONE (CURLE_OK)
+    // and returns the live TLS/TCP socket to m_multiHandle's Keep-Alive connection cache.
+    if (ok && responseBounded && done == curWant && m_state->m_stillRunning)
+    {
+      const auto deadline = std::chrono::steady_clock::now() + 200ms;
+      while (m_state->m_stillRunning && std::chrono::steady_clock::now() < deadline)
+      {
+        if (m_state->ShouldCancel())
+          break;
+        const CURLMcode mrc =
+            g_curlInterface.multi_perform(m_state->m_multiHandle, &m_state->m_stillRunning);
+        if (mrc != CURLM_OK || !m_state->m_stillRunning)
+          break;
+
+        fd_set fdread;
+        fd_set fdwrite;
+        fd_set fdexcep;
+        int maxfd = -1;
+        FD_ZERO(&fdread);
+        FD_ZERO(&fdwrite);
+        FD_ZERO(&fdexcep);
+        g_curlInterface.multi_fdset(m_state->m_multiHandle, &fdread, &fdwrite, &fdexcep, &maxfd);
+        struct timeval tv{0, 20000};
+        if (maxfd >= 0)
+          select(maxfd + 1, &fdread, &fdwrite, &fdexcep, &tv);
+        else
+          select(0, nullptr, nullptr, nullptr, &tv);
+      }
+    }
+    if (!m_state->m_stillRunning)
+    {
+      int msgs = 0;
+      while (g_curlInterface.multi_info_read(m_state->m_multiHandle, &msgs))
+      {
+      }
+    }
+
+    g_curlInterface.easy_getinfo(m_state->m_easyHandle, CURLINFO_NUM_CONNECTS, &outNumConnects);
+    g_curlInterface.easy_setopt(m_state->m_easyHandle, CURLOPT_RANGE, NULL);
+    m_state->Disconnect();
+    m_state->m_fileSize = savedFileSize;
+    m_state->m_filePos = -1;
+
+    if (!ok)
+      return false;
+
+    outRead = static_cast<ssize_t>(done);
+    return true;
+  };
+
+  ssize_t bytesRead = -1;
+  long httpCode = 0;
+  long numConnects = 0;
+  bool rangeError = false;
+  bool ok = executeBounded(bytesRead, httpCode, numConnects, rangeError);
+
+  // Abort immediately on cancel, misaligned/invalid Content-Range, or server ignoring Range.
+  if (!ok && (m_state->ShouldCancel() || rangeError || (httpCode == 200 && req.offset > 0)))
+    return -1;
+
+  // 4xx on redirected effective URL (e.g. expired signed link) -> re-resolve via m_origUrl
+  if (!ok && httpCode >= 400 && httpCode < 500 && httpCode != 416 && httpCode != 406 &&
+      !m_origUrl.empty() && m_origUrl != m_url)
+  {
+    CLog::Log(LOGWARNING,
+              "CCurlFile::{} - HTTP {} on redirected URL <{}>, re-resolving via original URL <{}>",
+              __FUNCTION__, httpCode, CURL::GetRedacted(m_url), CURL::GetRedacted(m_origUrl));
+    m_url = m_origUrl;
+    ok = executeBounded(bytesRead, httpCode, numConnects, rangeError);
+    if (ok)
+    {
+      const std::string newEfurl = GetInfoString(CURLINFO_EFFECTIVE_URL);
+      if (!newEfurl.empty())
+        m_url = newEfurl;
+    }
+  }
+  else if (!ok && m_allowRetry && !m_state->ShouldCancel() &&
+           (httpCode == 0 || httpCode >= 500 || (httpCode == 206 && !rangeError)))
+  {
+    // Transient socket/server hiccup (e.g. idle Keep-Alive closed by peer or partial body drop): retry once
+    ok = executeBounded(bytesRead, httpCode, numConnects, rangeError);
+  }
+
+  if (!ok)
+    return -1;
+
+  CLog::Log(LOGDEBUG,
+            "CCurlFile::ReadRange - ({}) offset={} want={} read={} http={} conn={}",
+            fmt::ptr(m_state), req.offset, want, bytesRead, httpCode, numConnects);
+  req.bytesRead = bytesRead;
+  return 0;
+}
+
 int CCurlFile::IoControl(EIoControl request, void* param)
 {
   if (request == IOCTRL_SEEK_POSSIBLE)
@@ -2177,6 +2714,19 @@ int CCurlFile::IoControl(EIoControl request, void* param)
   if (request == IOCTRL_SET_RETRY)
   {
     m_allowRetry = *(bool*) param;
+    return 0;
+  }
+
+  if (request == IOCTRL_READ_RANGE && param != nullptr)
+    return ReadRange(*static_cast<SReadRange*>(param));
+
+  if (request == IOCTRL_CANCEL_POSSIBLE)
+    return m_opened && !m_forWrite && !m_multisession ? 1 : 0;
+
+  if (request == IOCTRL_CANCEL)
+  {
+    if (m_state)
+      m_state->m_cancelled.store(true, std::memory_order_release);
     return 0;
   }
 

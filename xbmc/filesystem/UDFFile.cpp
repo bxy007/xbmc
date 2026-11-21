@@ -9,6 +9,7 @@
 #include "UDFFile.h"
 
 #include "URL.h"
+#include "utils/URIUtils.h"
 
 #include <udfread/udfread.h>
 
@@ -35,6 +36,14 @@ bool CUDFFile::Open(const CURL& url)
     return false;
   }
 
+  // Route large sequential media streams (> 4 MiB) to the dedicated streaming channel so
+  // multi-GB playback does not contend with or evict the UDF metadata/BD-J page cache.
+  // Small clips (<= 4 MiB, e.g. Blu-ray menu stills/intros/loops) stay on the SLRU cache so
+  // repeated opens and menu background loops hit memory without reconnecting.
+  constexpr int64_t STREAM_CHANNEL_MIN_SIZE = 4 * 1024 * 1024;
+  m_isStreamFile = URIUtils::HasExtension(url.GetFileName(), ".m2ts|.ssif|.vob") &&
+                   GetLength() > STREAM_CHANNEL_MIN_SIZE;
+
   return true;
 }
 
@@ -47,6 +56,7 @@ void CUDFFile::Close()
     m_file = nullptr;
   }
 
+  m_isStreamFile = false;
   m_context.reset();
 }
 
@@ -63,6 +73,11 @@ int CUDFFile::Stat(const CURL& url, struct __stat64* buffer)
 
 ssize_t CUDFFile::Read(void* buffer, size_t size)
 {
+  if (m_isStreamFile)
+  {
+    CUDFBlockInput::ScopedStreamRead streamGuard;
+    return udfread_file_read(m_file, buffer, size);
+  }
   return udfread_file_read(m_file, buffer, size);
 }
 
@@ -84,4 +99,12 @@ int64_t CUDFFile::GetPosition()
 bool CUDFFile::Exists(const CURL& url)
 {
   return Open(url);
+}
+
+int CUDFFile::IoControl(EIoControl request, void* param)
+{
+  if (request == IOCTRL_SEEK_POSSIBLE)
+    return m_file ? 1 : 0;
+
+  return -1;
 }

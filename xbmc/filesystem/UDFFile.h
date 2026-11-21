@@ -38,12 +38,14 @@ public:
   int64_t GetPosition() override;
 
   bool Exists(const CURL& url) override;
+  int IoControl(EIoControl request, void* param) override;
 
 private:
   //! The mounted volume, held for as long as this file is open
   std::shared_ptr<CUDFContext> m_context;
 
   UDFFILE* m_file{nullptr};
+  bool m_isStreamFile{false};
 };
 
 } // namespace XFILE

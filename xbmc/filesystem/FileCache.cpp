@@ -204,6 +204,7 @@ bool CFileCache::Open(const CURL& url)
 
   m_readPos = 0;
   m_writePos = 0;
+  m_deferredEofPos.store(-1, std::memory_order_relaxed);
   m_writeRate = 1024 * 1024;
   m_writeRateActual = 0;
   m_writeRateLowSpeed = 0;
@@ -266,6 +267,7 @@ void CFileCache::Process()
           CLog::Log(LOGERROR, "CFileCache::{} - <{}> error {} seeking. Seek returned {}",
                     __FUNCTION__, m_sourcePath, GetLastError(), m_nSeekResult);
           m_seekPossible = m_source.IoControl(IOCTRL_SEEK_POSSIBLE, nullptr);
+          m_nSeekResult = -1;
           sourceSeekFailed = true;
         }
       }
@@ -479,6 +481,19 @@ ssize_t CFileCache::Read(void* lpBuf, size_t uiBufSize)
   if (uiBufSize > SSIZE_MAX)
     uiBufSize = SSIZE_MAX;
 
+  const int64_t deferredEof = m_deferredEofPos.load(std::memory_order_acquire);
+  if (deferredEof >= 0)
+  {
+    const int64_t curFileSize = m_fileSize.load(std::memory_order_relaxed);
+    if (curFileSize <= deferredEof)
+      return 0;
+
+    // File grew past the deferred EOF position (e.g. active recording): materialize seek now
+    if (SeekInternal(deferredEof) != deferredEof)
+      return -1;
+    m_deferredEofPos.store(-1, std::memory_order_release);
+  }
+
 retry:
   // attempt to read
   iRc = m_pCache->ReadFromCache((char *)lpBuf, uiBufSize);
@@ -512,26 +527,8 @@ retry:
   return -1;
 }
 
-int64_t CFileCache::Seek(int64_t iFilePosition, int iWhence)
+int64_t CFileCache::SeekInternal(int64_t iTarget)
 {
-  std::lock_guard lock(m_sync);
-
-  if (!m_pCache)
-  {
-    CLog::Log(LOGERROR, "CFileCache::{} - <{}> sanity failed. no cache strategy!", __FUNCTION__,
-              m_sourcePath);
-    return -1;
-  }
-
-  int64_t iCurPos = m_readPos;
-  int64_t iTarget = iFilePosition;
-  if (iWhence == SEEK_END)
-    iTarget = m_fileSize + iTarget;
-  else if (iWhence == SEEK_CUR)
-    iTarget = iCurPos + iTarget;
-  else if (iWhence != SEEK_SET)
-    return -1;
-
   if (iTarget == m_readPos)
     return m_readPos;
 
@@ -548,7 +545,16 @@ int64_t CFileCache::Seek(int64_t iFilePosition, int iWhence)
     {
       // SeekEnded will never be set if FileCache thread is not running
       if (!CThread::IsRunning())
+      {
+        m_seekEvent.Reset();
         return -1;
+      }
+    }
+
+    if (m_nSeekResult != m_seekPos)
+    {
+      m_seekEvent.Reset();
+      return -1;
     }
 
     /* wait for any remaining data */
@@ -561,6 +567,7 @@ int64_t CFileCache::Seek(int64_t iFilePosition, int iWhence)
       {
         CLog::Log(LOGWARNING, "CFileCache::{} - <{}> failed to get remaining data", __FUNCTION__,
                   m_sourcePath);
+        m_seekEvent.Reset();
         return -1;
       }
       m_pCache->Seek(iTarget);
@@ -574,11 +581,52 @@ int64_t CFileCache::Seek(int64_t iFilePosition, int iWhence)
   return iTarget;
 }
 
+int64_t CFileCache::Seek(int64_t iFilePosition, int iWhence)
+{
+  std::lock_guard lock(m_sync);
+
+  if (!m_pCache)
+  {
+    CLog::Log(LOGERROR, "CFileCache::{} - <{}> sanity failed. no cache strategy!", __FUNCTION__,
+              m_sourcePath);
+    return -1;
+  }
+
+  const int64_t deferredEof = m_deferredEofPos.load(std::memory_order_acquire);
+  const int64_t iCurPos = (deferredEof >= 0) ? deferredEof : m_readPos;
+  const int64_t fileSize = m_fileSize.load(std::memory_order_relaxed);
+  int64_t iTarget = iFilePosition;
+  if (iWhence == SEEK_END)
+    iTarget = fileSize + iTarget;
+  else if (iWhence == SEEK_CUR)
+    iTarget = iCurPos + iTarget;
+  else if (iWhence != SEEK_SET)
+    return -1;
+
+  if (iTarget < 0)
+    return -1;
+
+  // Defer exact-EOF seeks (commonly issued by libbluray file_size() / FFmpeg avio_size() as
+  // Seek(0, SEEK_END) immediately followed by Seek(pos, SEEK_SET)) so we do not reset the
+  // cache and force redundant source seeks/reconnects when no bytes exist to read at EOF.
+  if (fileSize > 0 && iTarget == fileSize && m_seekPossible != 0)
+  {
+    m_deferredEofPos.store(iTarget, std::memory_order_release);
+    return iTarget;
+  }
+
+  const int64_t ret = SeekInternal(iTarget);
+  if (ret == iTarget)
+    m_deferredEofPos.store(-1, std::memory_order_release);
+  return ret;
+}
+
 void CFileCache::Close()
 {
   StopThread();
 
   std::lock_guard lock(m_sync);
+  m_deferredEofPos.store(-1, std::memory_order_release);
   if (m_pCache)
     m_pCache->Close();
 
@@ -587,7 +635,8 @@ void CFileCache::Close()
 
 int64_t CFileCache::GetPosition()
 {
-  return m_readPos;
+  const int64_t deferredEof = m_deferredEofPos.load(std::memory_order_acquire);
+  return (deferredEof >= 0) ? deferredEof : m_readPos;
 }
 
 int64_t CFileCache::GetLength()
