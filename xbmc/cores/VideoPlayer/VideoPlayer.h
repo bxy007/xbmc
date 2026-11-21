@@ -523,7 +523,14 @@ protected:
   void CheckStreamChanges(CCurrentStream& current, CDemuxStream* stream);
 
   bool OpenInputStream();
-  bool OpenDemuxStream();
+  enum class DemuxOpenResult
+  {
+    OPENED,
+    WAITING,
+    FAILED
+  };
+  DemuxOpenResult OpenDemuxStream();
+  bool SkipExpiredStill();
   void CloseDemuxer();
   void OpenDefaultStreams(bool reset = true);
 

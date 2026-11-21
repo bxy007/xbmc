@@ -2962,6 +2962,19 @@ CDVDInputStream::ENextStream CDVDInputStreamBluray::NextStream()
   bool programStop = false;
   const auto processEvent = [this, &clipKnown, &programJump, &programStop]
   {
+    // Once the disc provides a new stream position, release the previous play item's still.
+    if (m_hold == HOLD_STILL &&
+        (m_event.event == BD_EVENT_PLAYLIST || m_event.event == BD_EVENT_PLAYITEM ||
+         m_event.event == BD_EVENT_SEEK || m_event.event == BD_EVENT_DISCONTINUITY))
+    {
+      m_hold = HOLD_HELD;
+      if (!m_bdStillActive)
+      {
+        int still = 0;
+        m_player->OnDiscNavResult(&still, BD_EVENT_STILL);
+      }
+    }
+
     switch (m_event.event)
     {
       case BD_EVENT_PLAYITEM:
@@ -3033,9 +3046,10 @@ CDVDInputStream::ENextStream CDVDInputStreamBluray::NextStream()
     return NEXTSTREAM_NONE;
 
   // an HDMV program runs only in a read and stops at its first queued event; run it to its next
-  // suspension so the play item of the playlist it starts is known before the old stream closes
-  if (programJump && !clipKnown && m_title && !m_title->bdj && !m_titleEndWait &&
-      m_hold != HOLD_STILL && m_hold != HOLD_ERROR && m_hold != HOLD_EXIT)
+  // suspension so the play item of the playlist it starts is known before the old stream closes.
+  // A still also needs the VM to handle menu actions even when there is no demuxer reading.
+  if (m_title && !m_title->bdj && !m_titleEndWait &&
+      ((programJump && !clipKnown) || m_hold == HOLD_STILL))
   {
     while (m_title && !m_title->bdj)
     {

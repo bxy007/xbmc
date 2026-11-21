@@ -1097,36 +1097,37 @@ bool CVideoPlayer::OpenInputStream()
   return true;
 }
 
-bool CVideoPlayer::OpenDemuxStream()
+CVideoPlayer::DemuxOpenResult CVideoPlayer::OpenDemuxStream()
 {
   CloseDemuxer();
 
   CLog::Log(LOGDEBUG, "Creating Demuxer");
 
+  const bool bluray = m_pInputStream->IsStreamType(DVDSTREAM_TYPE_BLURAY);
   int attempts = 10;
   while (!m_bStop && attempts-- > 0)
   {
     m_pDemuxer.reset(CDVDFactoryDemuxer::CreateDemuxer(m_pInputStream));
-    if(!m_pDemuxer && m_pInputStream->IsStreamType(DVDSTREAM_TYPE_PVRMANAGER))
-    {
+    if (m_pDemuxer)
+      break;
+    if (m_pInputStream->IsStreamType(DVDSTREAM_TYPE_PVRMANAGER))
       continue;
-    }
-    else if(!m_pDemuxer && m_pInputStream->NextStream() != CDVDInputStream::NEXTSTREAM_NONE)
+
+    const auto next = m_pInputStream->NextStream();
+    if (next == CDVDInputStream::NEXTSTREAM_NONE)
+      break;
+    if (bluray && next == CDVDInputStream::NEXTSTREAM_RETRY)
     {
-      // a released BD-J title end has no data until the disc program acts
-      if (IsBlurayTitleEndWait())
-        break;
-      CLog::Log(LOGDEBUG, "{} - New stream available from input, retry open", __FUNCTION__);
-      continue;
+      logComponentM(LOGDEBUG, LOGBLURAY, "Demux open deferred while the disc waits");
+      return DemuxOpenResult::WAITING;
     }
-    break;
+    CLog::Log(LOGDEBUG, "{} - New stream available from input, retry open", __FUNCTION__);
   }
 
   if (!m_pDemuxer)
   {
-    if (!IsBlurayTitleEndWait())
-      CLog::Log(LOGERROR, "{} - Error creating demuxer", __FUNCTION__);
-    return false;
+    CLog::Log(LOGERROR, "{} - Error creating demuxer", __FUNCTION__);
+    return DemuxOpenResult::FAILED;
   }
 
   m_SelectionStreams.Clear(STREAM_NONE, STREAM_SOURCE_DEMUX);
@@ -1156,7 +1157,7 @@ bool CVideoPlayer::OpenDemuxStream()
   m_navStop = false;
   m_navStopped = false;
 
-  return true;
+  return DemuxOpenResult::OPENED;
 }
 
 void CVideoPlayer::CloseDemuxer()
@@ -1792,7 +1793,7 @@ void CVideoPlayer::Prepare()
   }
 
   // a disc program may start with no playlist, which the main loop waits for
-  if (!OpenDemuxStream() && !IsBlurayTitleEndWait())
+  if (OpenDemuxStream() == DemuxOpenResult::FAILED)
   {
     m_bAbortRequest = true;
     m_error = true;
@@ -1888,6 +1889,23 @@ void CVideoPlayer::Prepare()
   SetCaching(CACHESTATE_FLUSH);
 }
 
+bool CVideoPlayer::SkipExpiredStill()
+{
+  if (m_dvd.state != DVDSTATE_STILL || m_dvd.iDVDStillTime <= 0ms ||
+      std::chrono::steady_clock::now() - m_dvd.iDVDStillStartTime < m_dvd.iDVDStillTime)
+    return false;
+
+  const auto menus = std::dynamic_pointer_cast<CDVDInputStream::IMenus>(m_pInputStream);
+  if (!menus)
+    return false;
+
+  m_dvd.iDVDStillTime = 0ms;
+  m_dvd.iDVDStillStartTime = {};
+  m_dvd.state = DVDSTATE_NORMAL;
+  menus->SkipStill();
+  return true;
+}
+
 void CVideoPlayer::Process()
 {
   // Try to resolve the correct mime type. This can take some time, for example if a requested
@@ -1955,9 +1973,12 @@ void CVideoPlayer::Process()
       const CDVDInputStream::ENextStream next = m_pInputStream->NextStream();
       if (next == CDVDInputStream::NEXTSTREAM_NONE)
         break;
-      // no demuxer opens while the disc program has a released title end to act on
-      if (next == CDVDInputStream::NEXTSTREAM_RETRY && IsBlurayTitleEndWait())
+      // Stills and released title ends can wait for a disc event with no demuxer open.
+      if (next == CDVDInputStream::NEXTSTREAM_RETRY &&
+          m_pInputStream->IsStreamType(DVDSTREAM_TYPE_BLURAY))
       {
+        if (m_playSpeed != DVD_PLAYSPEED_PAUSE && SkipExpiredStill())
+          continue;
         // the playback starts with the disc program, as on a disc player
         if (!m_State.streamsReady)
           ReportAVStarted();
@@ -1972,10 +1993,11 @@ void CVideoPlayer::Process()
       if (m_pInputStream->IsEOF())
         break;
 
-      if (OpenDemuxStream() == false)
+      const auto opened = OpenDemuxStream();
+      if (opened == DemuxOpenResult::WAITING)
+        continue;
+      if (opened == DemuxOpenResult::FAILED)
       {
-        if (IsBlurayTitleEndWait())
-          continue;
         m_bAbortRequest = true;
         break;
       }
@@ -2122,28 +2144,8 @@ void CVideoPlayer::Process()
         continue;
       }
 
-      // check for a still frame state
-      if (std::shared_ptr<CDVDInputStream::IMenus> pStream = std::dynamic_pointer_cast<CDVDInputStream::IMenus>(m_pInputStream))
-      {
-        // stills will be skipped
-        if(m_dvd.state == DVDSTATE_STILL)
-        {
-          if (m_dvd.iDVDStillTime > 0ms)
-          {
-            const auto now = std::chrono::steady_clock::now();
-            const auto duration = now - m_dvd.iDVDStillStartTime;
-
-            if (duration >= m_dvd.iDVDStillTime)
-            {
-              m_dvd.iDVDStillTime = 0ms;
-              m_dvd.iDVDStillStartTime = {};
-              m_dvd.state = DVDSTATE_NORMAL;
-              pStream->SkipStill();
-              continue;
-            }
-          }
-        }
-      }
+      if (SkipExpiredStill())
+        continue;
 
       // closing the old streams drops the queue of a player that is not in sync and blocks the
       // player thread until the others play out
