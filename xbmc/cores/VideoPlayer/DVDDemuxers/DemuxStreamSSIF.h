@@ -27,18 +27,43 @@
 #include <chrono>
 #include <cstdint>
 #include <deque>
+#include <memory>
+#include <mutex>
 #include <queue>
+#include <utility>
 #include <vector>
 
 extern "C" {
 #include "libavformat/avformat.h"
 }
 
+class CMVCSubtitleOffsets
+{
+public:
+  int Get(double pts, int planeId) const;
+
+private:
+  friend class CDemuxStreamSSIF;
+
+  struct Entry
+  {
+    double pts;
+    std::vector<int8_t> planeOffsets;
+  };
+
+  mutable std::mutex m_mutex;
+  std::vector<Entry> m_entries;
+};
+
 class CDemuxStreamSSIF
 {
 public:
-  CDemuxStreamSSIF() {};
-  ~CDemuxStreamSSIF() { Flush(); }
+  explicit CDemuxStreamSSIF(std::shared_ptr<CMVCSubtitleOffsets> subtitleOffsets = {})
+    : m_subtitleOffsets(subtitleOffsets ? std::move(subtitleOffsets)
+                                       : std::make_shared<CMVCSubtitleOffsets>())
+  {
+  }
+  ~CDemuxStreamSSIF() { FreeQueuedPackets(); }
 
   DemuxPacket* AddPacket(DemuxPacket* &scrPkt);
   void Flush();
@@ -50,17 +75,11 @@ public:
   void SetBluRay(const std::shared_ptr<CDVDInputStream::IExtentionStream> &bluRay) { m_bluRay = bluRay; };
   bool IsBluRay() const { return m_bluRay != nullptr; };
 
-  int GetSubtitleOffsetAtPts(double pts, int planeId) const;
-
 private:
+  void FreeQueuedPackets();
   void ParseOFMD(const uint8_t* data, int size, double pts);
 
-  struct OFMDEntry
-  {
-    double pts;
-    std::vector<int8_t> planeOffsets;
-  };
-  std::vector<OFMDEntry> m_ofmdTable;
+  std::shared_ptr<CMVCSubtitleOffsets> m_subtitleOffsets;
 
   DemuxPacket* GetMVCPacket();
   DemuxPacket* MergePacket(DemuxPacket* &srcPkt, DemuxPacket* &appendPkt);

@@ -57,7 +57,7 @@ DemuxPacket* CDemuxStreamSSIF::AddPacket(DemuxPacket* &srcPkt)
   return GetMVCPacket();
 }
 
-void CDemuxStreamSSIF::Flush()
+void CDemuxStreamSSIF::FreeQueuedPackets()
 {
   while (!m_H264queue.empty())
   {
@@ -69,7 +69,15 @@ void CDemuxStreamSSIF::Flush()
     CDVDDemuxUtils::FreeDemuxPacket(m_MVCqueue.front());
     m_MVCqueue.pop_front();
   }
-  m_ofmdTable.clear();
+}
+
+void CDemuxStreamSSIF::Flush()
+{
+  FreeQueuedPackets();
+  {
+    std::lock_guard lock(m_subtitleOffsets->m_mutex);
+    m_subtitleOffsets->m_entries.clear();
+  }
   m_baseDiscardsSinceMatch = 0;
   m_wrapResyncPending = false;
   m_frontDtsValid = false;
@@ -335,10 +343,12 @@ void CDemuxStreamSSIF::ParseOFMD(const uint8_t* data, int size, double pts)
     if (offsets + static_cast<size_t>(num_pg_seq) * num_frames > data + size)
       break;
 
-    if (!m_ofmdTable.empty() && m_ofmdTable.back().pts == pts)
+    std::lock_guard lock(m_subtitleOffsets->m_mutex);
+    auto& entries = m_subtitleOffsets->m_entries;
+    if (!entries.empty() && entries.back().pts == pts)
       return;
 
-    OFMDEntry entry;
+    CMVCSubtitleOffsets::Entry entry;
     entry.pts = pts;
     entry.planeOffsets.resize(num_pg_seq);
     for (int seq = 0; seq < num_pg_seq; seq++)
@@ -347,20 +357,21 @@ void CDemuxStreamSSIF::ParseOFMD(const uint8_t* data, int size, double pts)
       entry.planeOffsets[seq] =
           (raw & 0x80) ? -static_cast<int8_t>(raw & 0x7F) : static_cast<int8_t>(raw & 0x7F);
     }
-    m_ofmdTable.push_back(entry);
-    if (m_ofmdTable.size() > OFMD_TABLE_MAX)
-      m_ofmdTable.erase(m_ofmdTable.begin());
+    entries.push_back(std::move(entry));
+    if (entries.size() > OFMD_TABLE_MAX)
+      entries.erase(entries.begin());
     break;
   }
 }
 
-int CDemuxStreamSSIF::GetSubtitleOffsetAtPts(double pts, int planeId) const
+int CMVCSubtitleOffsets::Get(double pts, int planeId) const
 {
-  if (m_ofmdTable.empty() || planeId < 0)
+  if (planeId < 0)
     return 0;
 
-  const OFMDEntry* best = nullptr;
-  for (const auto& entry : m_ofmdTable)
+  std::lock_guard lock(m_mutex);
+  const Entry* best = nullptr;
+  for (const auto& entry : m_entries)
     if (entry.pts <= pts && (!best || entry.pts >= best->pts))
       best = &entry;
 

@@ -98,4 +98,5 @@ private:
   // Stereoscopic parameters
   RENDER_STEREO_MODE m_stereoModeSetByUser;
   RENDER_STEREO_MODE m_lastStereoModeSetByUser;
+  bool m_stereoModeDialogOpen{false};
 };

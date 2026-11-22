@@ -3177,9 +3177,11 @@ void CAMLCodec::SetVideoRect(const CRect &SrcRect, const CRect &DestRect)
   }
 
   RENDER_STEREO_MODE effectiveStereoMode = m_guiStereoMode;
+  const bool framePacking = (video_res_info.dwFlags & D3DPRESENTFLAG_MODE3DFP) != 0;
+  if (effectiveStereoMode == RENDER_STEREO_MODE_HARDWAREBASED && !framePacking)
+    effectiveStereoMode = RENDER_STEREO_MODE_OFF;
   if (effectiveStereoMode == RENDER_STEREO_MODE_OFF &&
-      am_private->video_format == VFORMAT_H264MVC &&
-      (CServiceBroker::GetWinSystem()->GetGfxContext().GetResInfo().dwFlags & D3DPRESENTFLAG_MODE3DFP))
+      am_private->video_format == VFORMAT_H264MVC && framePacking)
     effectiveStereoMode = RENDER_STEREO_MODE_HARDWAREBASED;
 
   if (effectiveStereoMode == RENDER_STEREO_MODE_MONO)

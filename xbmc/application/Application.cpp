@@ -952,17 +952,25 @@ void CApplication::Render()
   // render gui layer
   if (appPower->GetRenderGUI() && !m_skipGuiRender)
   {
-    if (CServiceBroker::GetWinSystem()->GetGfxContext().GetStereoMode())
+    auto& gfxContext = CServiceBroker::GetWinSystem()->GetGfxContext();
+    auto stereoMode = gfxContext.GetStereoMode();
+#ifdef HAS_LIBAMCODEC
+    // The playback preference can change while HDMI is still in the desktop mode.
+    if (stereoMode == RENDER_STEREO_MODE_HARDWAREBASED &&
+        !(gfxContext.GetResInfo().dwFlags & D3DPRESENTFLAG_MODE3DFP))
+      stereoMode = RENDER_STEREO_MODE_OFF;
+#endif
+    if (stereoMode != RENDER_STEREO_MODE_OFF)
     {
-      CServiceBroker::GetWinSystem()->GetGfxContext().SetStereoView(RENDER_STEREO_VIEW_LEFT);
+      gfxContext.SetStereoView(RENDER_STEREO_VIEW_LEFT);
       hasRendered |= CServiceBroker::GetGUI()->GetWindowManager().Render();
 
-      if (CServiceBroker::GetWinSystem()->GetGfxContext().GetStereoMode() != RENDER_STEREO_MODE_MONO)
+      if (stereoMode != RENDER_STEREO_MODE_MONO)
       {
-        CServiceBroker::GetWinSystem()->GetGfxContext().SetStereoView(RENDER_STEREO_VIEW_RIGHT);
+        gfxContext.SetStereoView(RENDER_STEREO_VIEW_RIGHT);
         hasRendered |= CServiceBroker::GetGUI()->GetWindowManager().Render();
       }
-      CServiceBroker::GetWinSystem()->GetGfxContext().SetStereoView(RENDER_STEREO_VIEW_OFF);
+      gfxContext.SetStereoView(RENDER_STEREO_VIEW_OFF);
     }
     else
     {
@@ -3345,6 +3353,8 @@ bool CApplication::OnMessage(CGUIMessage& message)
 
   case GUI_MSG_PLAYBACK_AVCHANGE:
   {
+    // Stereo changes can update the display or open a dialog on the GUI thread.
+    CServiceBroker::GetGUI()->GetStereoscopicsManager().OnStreamChange();
 #ifdef HAS_PYTHON
     // informs python script currently running playback has started
     // (does nothing if python is not loaded)

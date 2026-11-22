@@ -97,7 +97,6 @@ void CVideoPlayerSubtitle::HandleMessage(const std::shared_ptr<CDVDMsg>& pMsg,
   {
     auto pMsgDemuxerPacket = std::static_pointer_cast<CDVDMsgDemuxerPacket>(pMsg);
     DemuxPacket* pPacket = pMsgDemuxerPacket->GetPacket();
-    CDemuxStreamSSIF* pSSIF = m_pSSIF.load(std::memory_order_acquire);
 
     if (m_pOverlayCodec)
     {
@@ -107,27 +106,20 @@ void CVideoPlayerSubtitle::HandleMessage(const std::shared_ptr<CDVDMsg>& pMsg,
       {
         if (std::shared_ptr<CDVDOverlay> overlay{m_pOverlayCodec->GetOverlay()}; overlay != nullptr)
         {
-          if (m_streaminfo.codec == AV_CODEC_ID_HDMV_PGS_SUBTITLE)
+          const bool pgs = m_streaminfo.codec == AV_CODEC_ID_HDMV_PGS_SUBTITLE;
+          int depth = m_streaminfo.m_3dSubtitlePlane;
+          if (pgs && depth != 0xFF)
           {
-            int depth = 0;
-            if (pSSIF && m_streaminfo.m_3dSubtitlePlane != 0xFF)
-              depth = pSSIF->GetSubtitleOffsetAtPts(pPacket->pts, m_streaminfo.m_3dSubtitlePlane);
-            else
-              depth = m_streaminfo.m_3dSubtitlePlane;
-            overlay->m_3dSubtitleDepth = depth;
+            if (const auto offsets = std::atomic_load(&m_mvcSubtitleOffsets))
+              depth = offsets->Get(pPacket->pts, depth);
           }
+          if (pgs)
+            overlay->m_3dSubtitleDepth = depth;
           auto group{InitialiseNewOverlayGroup(overlay)};
           while ((overlay = m_pOverlayCodec->GetOverlay()) != nullptr)
           {
-            if (m_streaminfo.codec == AV_CODEC_ID_HDMV_PGS_SUBTITLE)
-            {
-              int depth = 0;
-              if (pSSIF && m_streaminfo.m_3dSubtitlePlane != 0xFF)
-                depth = pSSIF->GetSubtitleOffsetAtPts(pPacket->pts, m_streaminfo.m_3dSubtitlePlane);
-              else
-                depth = m_streaminfo.m_3dSubtitlePlane;
+            if (pgs)
               overlay->m_3dSubtitleDepth = depth;
-            }
             if (*group->m_overlays.back() == *overlay)
               group->m_overlays.emplace_back(overlay);
             else

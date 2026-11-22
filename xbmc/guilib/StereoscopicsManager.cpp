@@ -16,6 +16,7 @@
 #include "GUIComponent.h"
 #include "GUIUserMessages.h"
 #include "ServiceBroker.h"
+#include "application/Application.h"
 #include "application/ApplicationComponents.h"
 #include "application/ApplicationPlayer.h"
 #include "cores/DataCacheCore.h"
@@ -35,6 +36,7 @@
 #include "settings/lib/SettingsManager.h"
 #include "utils/AMLUtils.h"
 #include "utils/RegExp.h"
+#include "utils/ScopeGuard.h"
 #include "utils/StringUtils.h"
 #include "utils/Variant.h"
 #include "utils/log.h"
@@ -558,6 +560,10 @@ bool CStereoscopicsManager::IsVideoStereoscopic() const
 
 void CStereoscopicsManager::OnStreamChange()
 {
+  // A modal selection dialog dispatches GUI messages while it is open.
+  if (m_stereoModeDialogOpen)
+    return;
+
   auto playbackMode = static_cast<STEREOSCOPIC_PLAYBACK_MODE>(m_settings->GetInt(CSettings::SETTING_VIDEOPLAYER_STEREOSCOPICPLAYBACKMODE));
   RENDER_STEREO_MODE mode = GetStereoMode();
 
@@ -603,9 +609,24 @@ void CStereoscopicsManager::OnStreamChange()
   {
   case STEREOSCOPIC_PLAYBACK_MODE_ASK: // Ask
     {
-      CServiceBroker::GetAppMessenger()->SendMsg(TMSG_MEDIA_PAUSE);
-
       CGUIDialogSelect* pDlgSelect = CServiceBroker::GetGUI()->GetWindowManager().GetWindow<CGUIDialogSelect>(WINDOW_DIALOG_SELECT);
+      if (!pDlgSelect || pDlgSelect->IsDialogRunning())
+        break;
+
+      const KODI::UTILS::CScopeGuard<bool*, nullptr, void(bool*)> resetDialogOpen(
+          [](bool* open) { *open = false; }, &m_stereoModeDialogOpen);
+      m_stereoModeDialogOpen = true;
+
+      const auto appPlayer = CServiceBroker::GetAppComponents().GetComponent<CApplicationPlayer>();
+      const auto item = g_application.CurrentFileItemPtr();
+      const auto samePlayback = [&]() {
+        return appPlayer->IsPlaying() && g_application.CurrentFileItemPtr() == item;
+      };
+      const bool wasPaused = appPlayer->IsPaused();
+      if (!wasPaused)
+        CServiceBroker::GetAppMessenger()->SendMsg(TMSG_MEDIA_PAUSE_IF_PLAYING);
+      const bool pausedByDialog = !wasPaused && appPlayer->IsPaused();
+
       pDlgSelect->Reset();
       pDlgSelect->SetHeading(CVariant{g_localizeStrings.Get(36527)});
 
@@ -628,6 +649,8 @@ void CStereoscopicsManager::OnStreamChange()
       int idx_select = pDlgSelect->Add( g_localizeStrings.Get(36531) ); // other / select
 
       pDlgSelect->Open();
+      if (!samePlayback())
+        break;
 
       if (pDlgSelect->IsConfirmed())
       {
@@ -637,11 +660,15 @@ void CStereoscopicsManager::OnStreamChange()
         else if (iItem == idx_playing)   mode = RENDER_STEREO_MODE_AUTO;
         else if (iItem == idx_select)    mode = GetStereoModeByUserChoice();
 
+        if (!samePlayback())
+          break;
+
         SetStereoModeByUser(mode);
         Notify();
       }
 
-      CServiceBroker::GetAppMessenger()->SendMsg(TMSG_MEDIA_UNPAUSE);
+      if (pausedByDialog && samePlayback())
+        CServiceBroker::GetAppMessenger()->SendMsg(TMSG_MEDIA_UNPAUSE);
     }
     break;
   case STEREOSCOPIC_PLAYBACK_MODE_PREFERRED: // Stereoscopic

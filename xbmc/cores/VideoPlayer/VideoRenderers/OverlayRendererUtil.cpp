@@ -378,13 +378,13 @@ bool convert_quads(ASS_Image* images, std::vector<SQuads>& pages, int maxTexture
 
 int GetStereoscopicDepth(bool isPgs, int subtitleDepth)
 {
-  RENDER_STEREO_MODE stereoMode = CServiceBroker::GetWinSystem()->GetGfxContext().GetStereoMode();
+  const auto& gfxContext = CServiceBroker::GetWinSystem()->GetGfxContext();
+  const auto stereoMode = gfxContext.GetStereoMode();
+  const auto stereoView = gfxContext.GetStereoView();
 
-  if (stereoMode == RENDER_STEREO_MODE_MONO || stereoMode == RENDER_STEREO_MODE_OFF)
-  {
-    // 2D display, so there's no subtitle depth
+  if (stereoMode == RENDER_STEREO_MODE_MONO || stereoMode == RENDER_STEREO_MODE_OFF ||
+      stereoView == RENDER_STEREO_VIEW_OFF)
     return 0;
-  }
 
   // get configured depth
   int depth = CServiceBroker::GetSettingsComponent()->GetSettings()->GetInt(CSettings::SETTING_SUBTITLES_STEREOSCOPICDEPTH);
@@ -396,7 +396,7 @@ int GetStereoscopicDepth(bool isPgs, int subtitleDepth)
   }
 
   // correct depth according to the current left/right eye view
-  return depth * (CServiceBroker::GetWinSystem()->GetGfxContext().GetStereoView() == RENDER_STEREO_VIEW_LEFT ? 1 : -1);
+  return stereoView == RENDER_STEREO_VIEW_LEFT ? depth : -depth;
 }
 
 }

@@ -23,7 +23,7 @@
 #include <thread>
 #include <vector>
 
-class CDemuxStreamSSIF;
+class CMVCSubtitleOffsets;
 class CDVDOverlay;
 struct BlurayFileAccess;
 struct BlurayPipClip;
@@ -213,8 +213,10 @@ public:
   void EnableStream(uint32_t blurayStreamType, int pid, bool enable);
 
   int Get3dSubtitlePlane(uint16_t pid) const;
-  void SetSSIF(CDemuxStreamSSIF* pSSIF) { m_pSSIF = pSSIF; }
-  CDemuxStreamSSIF* GetSSIF() const { return m_pSSIF; }
+  const std::shared_ptr<CMVCSubtitleOffsets>& GetMVCSubtitleOffsets() const
+  {
+    return m_mvcSubtitleOffsets;
+  }
 
   void OverlayCallback(const BD_OVERLAY * const);
 #ifdef HAVE_LIBBLURAY_BDJ
@@ -428,7 +430,7 @@ protected:
   BLURAY_CLIP_INFO*   m_nMVCClip = nullptr;
   bool                m_bFlipEyes = false;
   bool                m_bMVCDisabled = false;
-  CDemuxStreamSSIF*   m_pSSIF = nullptr;
+  const std::shared_ptr<CMVCSubtitleOffsets> m_mvcSubtitleOffsets;
   uint64_t            m_clipStartTime = 0;
   unsigned int        m_endOfTitleSpin = 0;
   std::chrono::steady_clock::time_point m_endOfTitleSpinStart{};

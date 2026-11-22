@@ -1148,7 +1148,8 @@ CVideoPlayer::DemuxOpenResult CVideoPlayer::OpenDemuxStream()
 #if defined(HAVE_LIBBLURAY)
   {
     const auto pBluray = std::dynamic_pointer_cast<CDVDInputStreamBluray>(m_pInputStream);
-    m_VideoPlayerSubtitle->SetSSIF(pBluray ? pBluray->GetSSIF() : nullptr);
+    m_VideoPlayerSubtitle->SetMVCSubtitleOffsets(pBluray ? pBluray->GetMVCSubtitleOffsets()
+                                                       : nullptr);
   }
 #endif
 
@@ -1171,6 +1172,7 @@ void CVideoPlayer::CloseDemuxer()
 {
   m_renderManager.GetBlurayPip().Flush();
   m_subtitleSwitchCache.Clear();
+  m_VideoPlayerSubtitle->SetMVCSubtitleOffsets(nullptr);
   m_pDemuxer.reset();
   m_SelectionStreams.Clear(STREAM_NONE, STREAM_SOURCE_DEMUX);
 

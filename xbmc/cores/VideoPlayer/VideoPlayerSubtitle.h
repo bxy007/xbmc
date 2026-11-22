@@ -18,13 +18,15 @@
 #include "threads/Thread.h"
 
 #include <atomic>
+#include <memory>
+#include <utility>
 
 class CDVDInputStream;
 class CDVDSubtitleStream;
 class CDVDSubtitleParser;
 class CDVDInputStreamNavigator;
 class CDVDOverlayCodec;
-class CDemuxStreamSSIF;
+class CMVCSubtitleOffsets;
 class CRenderManager;
 
 class CVideoPlayerSubtitle : public CThread, public IDVDStreamPlayer
@@ -53,7 +55,10 @@ public:
 
   bool IsInited() const override { return true; }
   bool IsStalled() const override { return m_pOverlayContainer->GetSize() == 0; }
-  void SetSSIF(CDemuxStreamSSIF* pSSIF) { m_pSSIF.store(pSSIF, std::memory_order_release); }
+  void SetMVCSubtitleOffsets(std::shared_ptr<const CMVCSubtitleOffsets> offsets)
+  {
+    std::atomic_store(&m_mvcSubtitleOffsets, std::move(offsets));
+  }
 
 protected:
   void Process() override;
@@ -62,7 +67,7 @@ protected:
                      CDVDOverlayContainer* replayContainer = nullptr);
 
 private:
-  std::atomic<CDemuxStreamSSIF*> m_pSSIF{nullptr};
+  std::shared_ptr<const CMVCSubtitleOffsets> m_mvcSubtitleOffsets;
   CDVDOverlayContainer* m_pOverlayContainer;
   CRenderManager& m_renderManager;
 

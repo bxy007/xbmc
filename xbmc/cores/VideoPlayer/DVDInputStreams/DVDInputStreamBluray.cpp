@@ -421,8 +421,10 @@ void  bluray_overlay_argb_cb(void *this_gen, const struct bd_argb_overlay_s * co
 }
 #endif
 
-CDVDInputStreamBluray::CDVDInputStreamBluray(IVideoPlayer* player, const CFileItem& fileitem) :
-  CDVDInputStream(DVDSTREAM_TYPE_BLURAY, fileitem), m_player(player)
+CDVDInputStreamBluray::CDVDInputStreamBluray(IVideoPlayer* player, const CFileItem& fileitem)
+  : CDVDInputStream(DVDSTREAM_TYPE_BLURAY, fileitem),
+    m_player(player),
+    m_mvcSubtitleOffsets(std::make_shared<CMVCSubtitleOffsets>())
 {
   m_content = "video/x-mpegts";
   memset(&m_event, 0, sizeof(m_event));
@@ -4497,7 +4499,26 @@ void CDVDInputStreamBluray::SeekMVCDemux(int64_t time)
 
   auto pMVCDemux = dynamic_cast<CDemuxMVC*>(m_pMVCDemux);
   if (pMVCDemux)
+  {
+#ifdef BLURAY_HAVE_MVC_SEEK_OFFSET
+    const auto* stream = pMVCDemux->GetAVStream();
+    if (stream && stream->id > 0 && stream->id <= 0x1fff && m_nMVCSubPathIndex >= 0)
+    {
+      const auto name = URIUtils::GetFileName(pMVCDemux->GetFileName());
+      const int64_t offset = bd_get_mvc_seek_offset(
+          m_bd, static_cast<unsigned>(m_nMVCSubPathIndex), name.c_str(),
+          static_cast<uint16_t>(stream->id));
+      if (offset >= 0 && pMVCDemux->SeekByte(offset))
+      {
+        logComponentM(LOGDEBUG, LOGBLURAY, "Blu-ray MVC seek: indexed byte offset {}", offset);
+        return;
+      }
+      logComponentM(LOGDEBUG, LOGBLURAY, "Blu-ray MVC seek: {}. Seeking by time",
+                    offset < 0 ? "no matching index entry" : "index byte seek failed");
+    }
+#endif
     pMVCDemux->SeekTimeRelative(static_cast<double>(time), true);
+  }
   else
     m_pMVCDemux->SeekTime(static_cast<double>(time), time < GetTime());
 }

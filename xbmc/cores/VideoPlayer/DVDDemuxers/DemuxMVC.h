@@ -39,6 +39,7 @@ public:
   virtual DemuxPacket* Read();
   virtual bool SeekTime(double time, bool backwords = false, double* startpts = nullptr);
   bool SeekTimeRelative(double time, bool backwards);
+  bool SeekByte(int64_t offset);
   virtual void SetSpeed(int iSpeed) { };
   virtual int GetStreamLength() { return 0; };
   virtual CDemuxStream* GetStream(int iStreamId) const override { return nullptr; };

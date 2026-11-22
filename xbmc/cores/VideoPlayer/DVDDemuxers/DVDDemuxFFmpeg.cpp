@@ -257,7 +257,6 @@ CDVDDemuxFFmpeg::CDVDDemuxFFmpeg() : CDVDDemux()
   m_bMatroska = false;
   m_bAVI = false;
   m_bSup = false;
-  m_pSSIF = nullptr;
   m_speed = DVD_PLAYSPEED_NORMAL;
   m_program = UINT_MAX;
   m_pkt.result = -1;
@@ -732,15 +731,9 @@ void CDVDDemuxFFmpeg::Dispose()
   m_pkt.result = -1;
   av_packet_unref(&m_pkt.pkt);
 
-#ifdef HAVE_LIBBLURAY
   if (m_pSSIF)
-  {
-    if (const auto pBluray = std::dynamic_pointer_cast<CDVDInputStreamBluray>(m_pInput))
-      pBluray->SetSSIF(nullptr);
-  }
-#endif
-  delete m_pSSIF;
-  m_pSSIF = nullptr;
+    m_pSSIF->Flush();
+  m_pSSIF.reset();
 
   if (m_pFormatContext)
   {
@@ -2338,14 +2331,11 @@ CDemuxStream* CDVDDemuxFFmpeg::AddStream(int streamIdx)
 
             if (pExt && pExt->HasExtention())
             {
-              delete m_pSSIF;
-              m_pSSIF = new CDemuxStreamSSIF();
+              const auto pBluray = std::dynamic_pointer_cast<CDVDInputStreamBluray>(m_pInput);
+              m_pSSIF = std::make_unique<CDemuxStreamSSIF>(
+                  pBluray ? pBluray->GetMVCSubtitleOffsets() : nullptr);
               m_pSSIF->SetH264StreamId(streamIdx);
               m_pSSIF->SetBluRay(pExt);
-
-              const auto pBluray = std::dynamic_pointer_cast<CDVDInputStreamBluray>(m_pInput);
-              if (pBluray)
-                pBluray->SetSSIF(m_pSSIF);
 
               st->stereo_mode = pExt && pExt->AreEyesFlipped() ? "block_rl" : "block_lr";
 
@@ -2357,7 +2347,7 @@ CDemuxStream* CDVDDemuxFFmpeg::AddStream(int streamIdx)
             else if (CDVDCodecUtils::GetH264MvcStreamIndex(m_pFormatContext, &mvcIndex))
             {
               if (!m_pSSIF)
-                m_pSSIF = new CDemuxStreamSSIF();
+                m_pSSIF = std::make_unique<CDemuxStreamSSIF>();
               m_pSSIF->SetH264StreamId(streamIdx);
               m_pSSIF->SetMVCStreamId(mvcIndex);
 

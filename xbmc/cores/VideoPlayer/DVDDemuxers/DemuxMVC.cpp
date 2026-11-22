@@ -254,6 +254,17 @@ bool CDemuxMVC::SeekTimeRelative(double time, bool backwards)
   return SeekTime(time, backwards);
 }
 
+bool CDemuxMVC::SeekByte(int64_t offset)
+{
+  if (!m_pInput || !m_pFormatContext || !m_ioContext || offset < 0 ||
+      offset >= m_pInput->GetLength())
+    return false;
+
+  // FFmpeg can report success for a clamped or unsuccessful byte seek.
+  return av_seek_frame(m_pFormatContext, -1, offset, AVSEEK_FLAG_BYTE) >= 0 &&
+         avio_tell(m_ioContext) == offset;
+}
+
 std::string CDemuxMVC::GetFileName()
 {
   return m_pInput->GetFileName();
