@@ -9,7 +9,6 @@
 #include "GUIBuiltins.h"
 
 #include "ServiceBroker.h"
-#include "Util.h"
 #include "application/ApplicationComponents.h"
 #include "application/ApplicationPowerHandling.h"
 #include "dialogs/GUIDialogKaiToast.h"
@@ -30,7 +29,6 @@
 #include "utils/RssManager.h"
 #include "utils/Screenshot.h"
 #include "utils/StringUtils.h"
-#include "utils/URIUtils.h"
 #include "utils/log.h"
 #include "windows/GUIMediaWindow.h"
 
@@ -320,19 +318,7 @@ static int Screenshot(const std::vector<std::string>& params)
     if (!strSaveToPath.empty())
     {
       if (XFILE::CDirectory::Exists(strSaveToPath))
-      {
-        std::string file = CUtil::GetNextFilename(
-            URIUtils::AddFileToFolder(strSaveToPath, "screenshot{:05}.png"), 65535);
-
-        if (!file.empty())
-        {
-          CScreenShot::TakeScreenshot(file, sync);
-        }
-        else
-        {
-          CLog::Log(LOGWARNING, "Too many screen shots or invalid folder {}", strSaveToPath);
-        }
-      }
+        CScreenShot::TakeScreenshotToDirectory(strSaveToPath, sync);
       else
         CScreenShot::TakeScreenshot(strSaveToPath, sync);
     }

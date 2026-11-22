@@ -20,4 +20,8 @@ public:
   static std::unique_ptr<IScreenshotSurface> CreateSurface();
 
   bool Capture() override;
+  bool CapturePng() override;
+
+private:
+  bool CaptureSurface(ScreenshotPng* png);
 };

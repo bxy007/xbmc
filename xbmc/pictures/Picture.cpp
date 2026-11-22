@@ -81,37 +81,6 @@ bool CPicture::CreateThumbnailFromSurface(const unsigned char *buffer, int width
   return ret;
 }
 
-CThumbnailWriter::CThumbnailWriter(unsigned char* buffer, int width, int height, int stride, const std::string& thumbFile):
-  m_thumbFile(thumbFile)
-{
-  m_buffer    = buffer;
-  m_width     = width;
-  m_height    = height;
-  m_stride    = stride;
-}
-
-CThumbnailWriter::~CThumbnailWriter()
-{
-  delete m_buffer;
-}
-
-bool CThumbnailWriter::DoWork()
-{
-  bool success = true;
-
-  if (!CPicture::CreateThumbnailFromSurface(m_buffer, m_width, m_height, m_stride, m_thumbFile))
-  {
-    CLog::Log(LOGERROR, "CThumbnailWriter::DoWork unable to write {}",
-              CURL::GetRedacted(m_thumbFile));
-    success = false;
-  }
-
-  delete [] m_buffer;
-  m_buffer = nullptr;
-
-  return success;
-}
-
 bool CPicture::ResizeTexture(const std::string& image,
                              CTexture* texture,
                              uint32_t& dest_width,

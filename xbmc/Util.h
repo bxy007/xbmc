@@ -13,6 +13,7 @@
 
 #include <climits>
 #include <cmath>
+#include <functional>
 #include <stdint.h>
 #include <string.h>
 #include <vector>
@@ -107,7 +108,9 @@ public:
   */
   static void ScanForExternalAudio(const std::string& videoPath, std::vector<std::string>& vecAudio);
   static int64_t ToInt64(uint32_t high, uint32_t low);
-  static std::string GetNextFilename(const std::string &fn_template, int max);
+  static std::string GetNextFilename(const std::string& fn_template,
+                                     int max,
+                                     const std::function<bool(const std::string&)>& accept = {});
   static std::string GetNextPathname(const std::string &path_template, int max);
   static void StatToStatI64(struct _stati64 *result, struct stat *stat);
   static void StatToStat64(struct __stat64 *result, const struct stat *stat);

@@ -23,6 +23,7 @@ public:
   static bool Register();
 
   virtual bool RenderCapture(int index, CRenderCapture* capture) override;
+  CRenderCapture* GetRenderCapture() override;
   virtual void AddVideoPicture(const VideoPicture &picture, int index) override;
   virtual void ReleaseBuffer(int idx) override;
   virtual bool Configure(const VideoPicture &picture, float fps, unsigned int orientation) override;

@@ -10,7 +10,7 @@
 
 #include "cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h"
 #include "cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.h"
-#include "cores/VideoPlayer/VideoRenderers/RenderCapture.h"
+#include "cores/VideoPlayer/VideoRenderers/RenderCaptureGLES.h"
 #include "cores/VideoPlayer/VideoRenderers/RenderFactory.h"
 #include "cores/VideoPlayer/VideoRenderers/RenderFlags.h"
 #include "settings/AdvancedSettings.h"
@@ -75,11 +75,19 @@ CRenderInfo CRendererAML::GetRenderInfo()
   return info;
 }
 
+CRenderCapture* CRendererAML::GetRenderCapture()
+{
+  return new CRenderCaptureGLES;
+}
+
 bool CRendererAML::RenderCapture(int index, CRenderCapture* capture)
 {
   capture->BeginRender();
+  if (!CScreenshotAML::CaptureVideoFrame(static_cast<unsigned char*>(capture->GetRenderBuffer()),
+                                         capture->GetWidth(), capture->GetHeight()))
+    return false;
+
   capture->EndRender();
-  CScreenshotAML::CaptureVideoFrame((unsigned char *)capture->GetRenderBuffer(), capture->GetWidth(), capture->GetHeight());
   return true;
 }
 

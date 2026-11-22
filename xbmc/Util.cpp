@@ -804,24 +804,26 @@ int64_t CUtil::ToInt64(uint32_t high, uint32_t low)
   \brief Finds next unused filename that matches padded int format identifier provided
   \param[in]  fn_template    filename template consisting of a padded int format identifier (eg screenshot%03d)
   \param[in]  max            maximum number to search for available name
+  \param[in]  accept         optional predicate to accept an unused candidate
   \return "" on failure, string next available name matching format identifier on success
 */
 
-std::string CUtil::GetNextFilename(const std::string &fn_template, int max)
+std::string CUtil::GetNextFilename(const std::string& fn_template,
+                                   int max,
+                                   const std::function<bool(const std::string&)>& accept)
 {
   std::string searchPath = URIUtils::GetDirectory(fn_template);
   std::string mask = URIUtils::GetExtension(fn_template);
-  std::string name = StringUtils::Format(fn_template, 0);
 
   CFileItemList items;
-  if (!CDirectory::GetDirectory(searchPath, items, mask, DIR_FLAG_NO_FILE_DIRS))
-    return name;
+  const bool listed = CDirectory::GetDirectory(searchPath, items, mask, DIR_FLAG_NO_FILE_DIRS);
+  if (listed)
+    items.SetFastLookup(true);
 
-  items.SetFastLookup(true);
   for (int i = 0; i <= max; i++)
   {
     std::string name = StringUtils::Format(fn_template, i);
-    if (!items.Get(name))
+    if ((!listed || !items.Get(name)) && (!accept || accept(name)))
       return name;
   }
   return "";

@@ -9,7 +9,6 @@
 #pragma once
 
 #include "pictures/PictureScalingAlgorithm.h"
-#include "utils/Job.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -110,22 +109,5 @@ private:
                                unsigned int& width,
                                unsigned int& height,
                                unsigned int& stridePixels);
-};
-
-//this class calls CreateThumbnailFromSurface in a CJob, so a png file can be written without halting the render thread
-class CThumbnailWriter : public CJob
-{
-  public:
-    //WARNING: buffer is deleted from DoWork()
-    CThumbnailWriter(unsigned char* buffer, int width, int height, int stride, const std::string& thumbFile);
-    ~CThumbnailWriter() override;
-    bool DoWork() override;
-
-  private:
-    unsigned char* m_buffer;
-    int            m_width;
-    int            m_height;
-    int            m_stride;
-    std::string    m_thumbFile;
 };
 
