@@ -28,7 +28,6 @@
 #include "settings/Settings.h"
 #include "settings/SettingsComponent.h"
 #include "settings/lib/Setting.h"
-#include "threads/SingleLock.h"
 #include "utils/JobManager.h"
 #include "utils/ProgressJob.h"
 #include "utils/log.h"
@@ -166,47 +165,46 @@ void CRepositoryUpdater::OnEvent(const ADDON::AddonEvent& event)
 
 void CRepositoryUpdater::OnJobComplete(unsigned int jobID, bool success, CJob* job)
 {
-  std::lock_guard lock(m_criticalSection);
-
-  m_jobs.erase(std::find(m_jobs.begin(), m_jobs.end(), job));
-  if (m_jobs.empty())
   {
-    CLog::Log(LOGDEBUG, "CRepositoryUpdater: done.");
+    std::lock_guard lock(m_criticalSection);
+    m_jobs.erase(std::find(m_jobs.begin(), m_jobs.end(), job));
+    if (!m_jobs.empty())
+      return;
+
+    // Signal completion under the same lock with which CheckForUpdates resets the event.
     m_doneEvent.Set();
-
-    VECADDONS updates = m_addonMgr.GetAvailableUpdates();
-
-    if (CAddonSystemSettings::GetInstance().GetAddonAutoUpdateMode() == AUTO_UPDATES_NOTIFY)
-    {
-      if (!updates.empty())
-      {
-        if (updates.size() == 1)
-          CGUIDialogKaiToast::QueueNotification(
-              updates[0]->Icon(), updates[0]->Name(), g_localizeStrings.Get(24068),
-              TOAST_DISPLAY_TIME, false, TOAST_DISPLAY_TIME);
-        else
-          CGUIDialogKaiToast::QueueNotification(
-              "", g_localizeStrings.Get(24001), g_localizeStrings.Get(24061),
-              TOAST_DISPLAY_TIME, false, TOAST_DISPLAY_TIME);
-
-        auto eventLog = CServiceBroker::GetEventLog();
-        for (const auto &addon : updates)
-        {
-          if (eventLog)
-            eventLog->Add(std::make_shared<const CAddonManagementEvent>(addon, 24068));
-        }
-      }
-    }
-
-    if (CAddonSystemSettings::GetInstance().GetAddonAutoUpdateMode() == AUTO_UPDATES_ON)
-    {
-      m_addonMgr.CheckAndInstallAddonUpdates(false);
-    }
-
-    ScheduleUpdate(UpdateScheduleType::Regular);
-
-    m_events.Publish(RepositoryUpdated{});
   }
+
+  CLog::Log(LOGDEBUG, "CRepositoryUpdater: done.");
+  const VECADDONS updates = m_addonMgr.GetAvailableUpdates();
+
+  const int updateMode = CAddonSystemSettings::GetInstance().GetAddonAutoUpdateMode();
+  if (updateMode == AUTO_UPDATES_NOTIFY && !updates.empty())
+  {
+    if (updates.size() == 1)
+      CGUIDialogKaiToast::QueueNotification(updates[0]->Icon(), updates[0]->Name(),
+                                           g_localizeStrings.Get(24068), TOAST_DISPLAY_TIME, false,
+                                           TOAST_DISPLAY_TIME);
+    else
+      CGUIDialogKaiToast::QueueNotification("", g_localizeStrings.Get(24001),
+                                           g_localizeStrings.Get(24061), TOAST_DISPLAY_TIME, false,
+                                           TOAST_DISPLAY_TIME);
+
+    if (auto eventLog = CServiceBroker::GetEventLog())
+    {
+      for (const auto& addon : updates)
+        eventLog->Add(std::make_shared<const CAddonManagementEvent>(addon, 24068));
+    }
+  }
+  else if (updateMode == AUTO_UPDATES_ON)
+  {
+    // Installation downloads are synchronous on this worker. Leave the GUI free to queue checks.
+    m_addonMgr.CheckAndInstallAddonUpdates(false);
+  }
+
+  ScheduleUpdate(UpdateScheduleType::Regular);
+
+  m_events.Publish(RepositoryUpdated{});
 }
 
 bool CRepositoryUpdater::CheckForUpdates(bool showProgress)
@@ -330,14 +328,9 @@ void CRepositoryUpdater::ScheduleUpdate(UpdateScheduleType scheduleType)
 {
   using namespace std::chrono;
 
-  // OnJobComplete can call us with this recursive lock already held. Release
-  // every level before joining the timer: its callback takes the same lock.
-  // Serialize stop/start separately, including callers entering without it.
-  CSingleExit leave(m_criticalSection);
+  // The timer callback can queue repository jobs while Stop waits for it to finish.
   std::lock_guard timerLock(m_timerSection);
   m_timer.Stop(true);
-
-  std::lock_guard lock(m_criticalSection);
 
   if (CAddonSystemSettings::GetInstance().GetAddonAutoUpdateMode() == AUTO_UPDATES_NEVER)
     return;
