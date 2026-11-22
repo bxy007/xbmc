@@ -1092,6 +1092,7 @@ bool CVideoPlayer::OpenInputStream()
   }
 
   m_clock.Reset();
+  m_avClockInitialized = false;
   m_dvd.Clear();
 
   return true;
@@ -3644,7 +3645,10 @@ void CVideoPlayer::HandlePlaySpeed()
                  (m_CurrentAudio.packets == 0 && m_CurrentVideo.packets > threshold) ||
                  (!m_VideoPlayerVideo->AcceptsData() && (m_VideoPlayerAudio->GetLevel() < 10));
 
-    if (m_CurrentAudio.syncState == IDVDStreamPlayer::SYNC_WAITSYNC &&
+    // A disc can open another playlist before the intro establishes an A/V clock.
+    // Packet continuity alone cannot make that playlist's PTS match the reset clock.
+    const bool canReuseClock = !m_blurayMenu || m_avClockInitialized;
+    if (canReuseClock && m_CurrentAudio.syncState == IDVDStreamPlayer::SYNC_WAITSYNC &&
         (m_CurrentAudio.avsync == CCurrentStream::AV_SYNC_CONT ||
          m_CurrentVideo.syncState == IDVDStreamPlayer::SYNC_INSYNC))
     {
@@ -3659,7 +3663,7 @@ void CVideoPlayer::HandlePlaySpeed()
       m_VideoPlayerAudio->SendMessage(
           std::make_shared<CDVDMsgDouble>(CDVDMsg::GENERAL_RESYNC, m_clock.GetClock()), 1);
     }
-    else if (m_CurrentVideo.syncState == IDVDStreamPlayer::SYNC_WAITSYNC &&
+    else if (canReuseClock && m_CurrentVideo.syncState == IDVDStreamPlayer::SYNC_WAITSYNC &&
              (m_CurrentVideo.avsync == CCurrentStream::AV_SYNC_CONT ||
              m_CurrentAudio.syncState == IDVDStreamPlayer::SYNC_INSYNC))
     {
@@ -3676,7 +3680,7 @@ void CVideoPlayer::HandlePlaySpeed()
     }
     else if (video && audio)
     {
-      double clock = 0;
+      double clock = DVD_NOPTS_VALUE;
       const char* branchPicked = "None";
       const bool audioTimingValid = (m_CurrentAudio.id >= 0 && m_VideoPlayerAudio);
       const double freshAudioDelay = audioTimingValid ? m_VideoPlayerAudio->GetCurrentSinkDelay() : -1.0;
@@ -3791,6 +3795,10 @@ void CVideoPlayer::HandlePlaySpeed()
         clock = m_State.dts;
         branchPicked = "FallbackDts";
       }
+
+      m_avClockInitialized = clock != DVD_NOPTS_VALUE;
+      if (!m_avClockInitialized)
+        clock = 0;
 
       AUDIODELAY_LOG("VP.Sync.branch",
                      "branch=FullResync subBranch={} clock={:.3f} audioStart={:.3f} videoStart={:.3f} "

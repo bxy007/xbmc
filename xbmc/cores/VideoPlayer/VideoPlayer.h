@@ -577,6 +577,7 @@ protected:
   static constexpr auto kEofRenderWaitMax = std::chrono::seconds(5);
 
   std::chrono::steady_clock::time_point m_avResyncDeferStart{};
+  bool m_avClockInitialized{false};
   static constexpr auto kAvResyncDeferMax = std::chrono::milliseconds(200);
   static constexpr auto kAvResyncNoSourceDeferMax = std::chrono::milliseconds(3000);
 
