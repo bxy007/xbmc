@@ -9,9 +9,6 @@
 #pragma once
 
 #include "BlurayStateSerializer.h"
-#if defined(HAS_UDFREAD)
-#include "filesystem/UDFContext.h"
-#endif
 #include "DVDInputStream.h"
 #include "cores/AudioEngine/Interfaces/AE.h"
 
@@ -28,6 +25,7 @@
 
 class CDemuxStreamSSIF;
 class CDVDOverlay;
+struct BlurayFileAccess;
 
 extern "C"
 {
@@ -75,8 +73,6 @@ public:
   bool Open() override;
   void Close() override;
   int Read(uint8_t* buf, int buf_size) override;
-  BD_DIR_H* OpenDir(const char* relPath);
-  BD_FILE_H* OpenFile(const char* relPath);
   int64_t Seek(int64_t offset, int whence) override;
   void Abort() override;
   bool IsEOF() override;
@@ -471,14 +467,8 @@ protected:
     void ApplyAudioCapability() const;
     void ReplaceTitleInfo(BLURAY_TITLE_INFO* incoming);
     bool IsClipCodecCompatible(const BLURAY_CLIP_INFO* a, const BLURAY_CLIP_INFO* b) const;
-    std::string m_rootPath;
+    std::unique_ptr<BlurayFileAccess> m_fileAccess;
 
     /*! Bluray state serializer handler */
     CBlurayStateSerializer m_blurayStateSerializer;
-
-
-#if defined(HAS_UDFREAD)
-    //! Keeps a disc image's UDF volume mounted for as long as the disc is open
-    std::optional<XFILE::CUDFMount> m_udfMount;
-#endif
 };

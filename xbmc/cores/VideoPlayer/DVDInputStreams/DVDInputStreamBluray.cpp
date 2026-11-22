@@ -25,6 +25,9 @@
 #include "filesystem/BlurayCallback.h"
 #include "filesystem/Directory.h"
 #include "filesystem/SpecialProtocol.h"
+#if defined(HAS_UDFREAD)
+#include "filesystem/UDFContext.h"
+#endif
 #include "guilib/LocalizeStrings.h"
 #include "guilib/StereoscopicsManager.h"
 #include "settings/AdvancedSettings.h"
@@ -181,6 +184,24 @@ using namespace XFILE;
 
 using namespace std::chrono_literals;
 
+struct BlurayFileAccess
+{
+  explicit BlurayFileAccess(const std::string& root)
+    : rootPath(root)
+#if defined(HAS_UDFREAD)
+    , udfMount(root)
+#endif
+  {
+  }
+
+  std::string rootPath;
+  std::atomic_bool navigation{false};
+#if defined(HAS_UDFREAD)
+  // Share the disc's UDF mount across file opens, including during shutdown.
+  XFILE::CUDFMount udfMount;
+#endif
+};
+
 namespace
 {
 class BdCloseWorker
@@ -192,13 +213,13 @@ public:
     return instance;
   }
 
-  void Submit(BLURAY* bd)
+  void Submit(BLURAY* bd, std::unique_ptr<BlurayFileAccess> fileAccess)
   {
     if (!bd)
       return;
     {
       std::lock_guard<std::mutex> lock(m_mutex);
-      m_queue.push(bd);
+      m_queue.push({bd, std::move(fileAccess)});
     }
     m_cv.notify_one();
   }
@@ -232,31 +253,38 @@ public:
   }
 
 private:
+  struct CloseRequest
+  {
+    BLURAY* disc{nullptr};
+    std::unique_ptr<BlurayFileAccess> fileAccess;
+  };
+
   BdCloseWorker() : m_thread(&BdCloseWorker::Run, this) {}
 
   void Run()
   {
     for (;;)
     {
-      BLURAY* bd = nullptr;
+      CloseRequest request;
       {
         std::unique_lock<std::mutex> lock(m_mutex);
         m_cv.wait(lock, [this] { return m_stopping || !m_queue.empty(); });
         if (m_queue.empty())
           return;
-        bd = m_queue.front();
+        request = std::move(m_queue.front());
         m_queue.pop();
         m_busy = true;
       }
       const auto t_start = std::chrono::steady_clock::now();
       try
       {
-        bd_close(bd);
+        bd_close(request.disc);
       }
       catch (...)
       {
         logM(LOGERROR, "BdCloseWorker::Run - bd_close threw");
       }
+      request.fileAccess.reset();
       const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                           std::chrono::steady_clock::now() - t_start).count();
       logM(LOGDEBUG, "BdCloseWorker::Run - bd_close completed in {}ms", ms);
@@ -272,22 +300,44 @@ private:
   std::mutex m_mutex;
   std::condition_variable m_cv;
   std::condition_variable m_idleCv;
-  std::queue<BLURAY*> m_queue;
+  std::queue<CloseRequest> m_queue;
   bool m_busy{false};
   bool m_stopping{false};
   std::thread m_thread;
 };
+
+#ifdef BD_FILE_OPEN_DIRECT_IO_HINT
+bool IsRemoteUdfImage(const std::string& root)
+{
+  return CURL(root).IsProtocol("udf") && URIUtils::IsRemote(root);
+}
+#endif
+
+BD_DIR_H* dir_open(void* handle, const char* relPath)
+{
+  auto& access = *static_cast<BlurayFileAccess*>(handle);
+  return CBlurayCallback::dir_open(&access.rootPath, relPath);
 }
 
-static BD_DIR_H* dir_open(void* handle, const char* rel_path)
+BD_FILE_H* file_open(void* handle, const char* relPath)
 {
-  return static_cast<CDVDInputStreamBluray*>(handle)->OpenDir(rel_path);
+  auto& access = *static_cast<BlurayFileAccess*>(handle);
+  unsigned int flags = 0;
+  if (access.navigation && URIUtils::HasExtension(relPath, ".m2ts|.ssif"))
+  {
+    flags = XFILE::READ_AUDIO_VIDEO;
+#ifdef BD_FILE_OPEN_DIRECT_IO_HINT
+    // Read MVC packets on demand so two cache workers cannot reposition the same UDF stream.
+    if (bd_file_open_use_direct_io() && IsRemoteUdfImage(access.rootPath))
+    {
+      flags = XFILE::READ_NO_CACHE;
+      CLog::Log(LOGDEBUG, "CDVDInputStreamBluray::OpenFile - reading {} on demand", relPath);
+    }
+#endif
+  }
+  return CBlurayCallback::file_open(&access.rootPath, relPath, flags);
 }
-
-static BD_FILE_H* file_open(void* handle, const char* rel_path)
-{
-  return static_cast<CDVDInputStreamBluray*>(handle)->OpenFile(rel_path);
-}
+} // namespace
 
 #if (BLURAY_VERSION >= BLURAY_VERSION_CODE(1, 1, 0))
 namespace
@@ -671,7 +721,6 @@ bool CDVDInputStreamBluray::Open()
   {
     // This special case is required for opening original AACS protected Blu-ray discs. Otherwise
     // things like Bus Encryption might not be handled properly and playback will fail.
-    m_rootPath = root;
     if (!bd_open_disc(m_bd, root.c_str(), nullptr))
     {
       CLog::Log(LOGERROR, "CDVDInputStreamBluray::Open - failed to open {} in disc mode",
@@ -681,17 +730,8 @@ bool CDVDInputStreamBluray::Open()
   }
   else
   {
-    m_rootPath = root;
-
-#if defined(HAS_UDFREAD)
-    // Only in files mode does libbluray reach the disc through Kodi's filesystem, opening a dozen
-    // or so files and directories on it, and then the clips as they play. On a disc image each of
-    // those opens would otherwise re-mount the image's UDF volume, so keep it mounted for as long
-    // as the disc is open. (Stream mode reads the image itself, disc mode is a physical disc.)
-    m_udfMount.emplace(root);
-#endif
-
-    if (!bd_open_files(m_bd, this, dir_open, file_open))
+    m_fileAccess = std::make_unique<BlurayFileAccess>(root);
+    if (!bd_open_files(m_bd, m_fileAccess.get(), dir_open, file_open))
     {
       CLog::Log(LOGERROR, "CDVDInputStreamBluray::Open - failed to open {} in files mode",
                 CURL::GetRedacted(root));
@@ -806,6 +846,9 @@ bool CDVDInputStreamBluray::Open()
     if(!m_navmode)
       ReplaceTitleInfo(GetMainTitle());
   }
+
+  if (m_fileAccess)
+    m_fileAccess->navigation.store(m_navmode.load());
 
   UpdateGraphicsRegime();
 
@@ -941,13 +984,12 @@ void CDVDInputStreamBluray::Close()
 #ifdef HAVE_LIBBLURAY_BDJ
     bd_register_argb_overlay_proc(m_bd, nullptr, nullptr, nullptr);
 #endif
-    BdCloseWorker::Instance().Submit(m_bd);
+    // BD-J can still open files or directories while bd_close shuts down its Xlets.
+    BdCloseWorker::Instance().Submit(m_bd, std::move(m_fileAccess));
     m_bd = nullptr;
   }
 
   aml_set_bdj_overlay_active(false);
-
-  m_rootPath.clear();
 }
 
 void CDVDInputStreamBluray::ReplaceTitleInfo(BLURAY_TITLE_INFO* incoming)
@@ -986,36 +1028,6 @@ void CDVDInputStreamBluray::ResetTitleEnd()
   m_titleEndWait = false;
   m_playlistLeft = false;
   m_lastPictureTime = -1;
-}
-
-BD_DIR_H* CDVDInputStreamBluray::OpenDir(const char* relPath)
-{
-  return CBlurayCallback::dir_open(&m_rootPath, relPath);
-}
-
-#ifdef BD_FILE_OPEN_DIRECT_IO_HINT
-static bool IsRemoteUdfImage(const std::string& root)
-{
-  return CURL(root).IsProtocol("udf") && URIUtils::IsRemote(root);
-}
-#endif
-
-BD_FILE_H* CDVDInputStreamBluray::OpenFile(const char* relPath)
-{
-  unsigned int flags = 0;
-  if (m_navmode && URIUtils::HasExtension(relPath, ".m2ts|.ssif"))
-  {
-    flags = XFILE::READ_AUDIO_VIDEO;
-#ifdef BD_FILE_OPEN_DIRECT_IO_HINT
-    // Read MVC packets on demand so two cache workers cannot reposition the same UDF stream.
-    if (bd_file_open_use_direct_io() && IsRemoteUdfImage(m_rootPath))
-    {
-      flags = XFILE::READ_NO_CACHE;
-      CLog::Log(LOGDEBUG, "CDVDInputStreamBluray::OpenFile - reading {} on demand", relPath);
-    }
-#endif
-  }
-  return CBlurayCallback::file_open(&m_rootPath, relPath, flags);
 }
 
 void CDVDInputStreamBluray::RecordTitleTimeSpan(const BLURAY_CLIP_INFO* clip, bool reset)
@@ -4266,7 +4278,7 @@ bool CDVDInputStreamBluray::OpenMVCDemux(int playItem)
   {
     unsigned int flags = 0;
 #ifdef BD_FILE_OPEN_DIRECT_IO_HINT
-    if (m_navmode && IsRemoteUdfImage(m_rootPath))
+    if (m_navmode && IsRemoteUdfImage(m_root))
       flags = XFILE::READ_NO_CACHE;
 #endif
     CFileItem fileitem(CURL(strFileName), false);
