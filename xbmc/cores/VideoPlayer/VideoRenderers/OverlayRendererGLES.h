@@ -46,6 +46,9 @@ public:
   bool m_isHdrPqAuthored{false};
 
 private:
+  void UploadPipImage(const CDVDOverlayImage& o);
+
+  bool m_isPipVideo{false};
   bool m_hasMipmaps{true};
   bool m_bgraSupported{false};
   bool m_bakedRaw{false};

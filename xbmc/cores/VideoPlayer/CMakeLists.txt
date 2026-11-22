@@ -1,4 +1,5 @@
 set(SOURCES AudioSinkAE.cpp
+            BlurayPip.cpp
             DVDClock.cpp
             DVDDemuxSPU.cpp
             DVDFileInfo.cpp
@@ -18,6 +19,7 @@ set(SOURCES AudioSinkAE.cpp
             VideoReferenceClock.cpp)
 
 set(HEADERS AudioSinkAE.h
+            BlurayPip.h
             DVDClock.h
             DVDDemuxSPU.h
             DVDFileInfo.h

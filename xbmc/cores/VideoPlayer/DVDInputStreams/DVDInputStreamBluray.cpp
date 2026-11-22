@@ -7,6 +7,8 @@
  */
 
 #include "DVDInputStreamBluray.h"
+
+#include "BlurayPip.h"
 #include "cores/VideoPlayer/BDStageTrace.h"
 #include "DVDDemuxers/DemuxStreamSSIF.h"
 
@@ -947,6 +949,12 @@ void CDVDInputStreamBluray::Close()
   m_crossPlaylistPending = false;
   m_videoCompatBoundary = false;
   m_naturalChainBoundary = false;
+  {
+    std::lock_guard lock(m_clipTableMutex);
+    m_secondaryVideoStream = 0;
+    m_secondaryVideoEnabled = false;
+    m_secondaryVideoFullscreen = false;
+  }
   m_heldEvents = {};
   {
     std::lock_guard<std::mutex> lock(m_titleTimeSpanMutex);
@@ -1000,6 +1008,7 @@ void CDVDInputStreamBluray::ReplaceTitleInfo(BLURAY_TITLE_INFO* incoming)
     outgoing = m_titleInfo;
     m_titleInfo = incoming;
     m_clip = nullptr;
+    m_pipClip.reset();
     m_nMVCClip = nullptr;
     m_endedTitleTime = 0;
   }
@@ -1276,15 +1285,21 @@ void CDVDInputStreamBluray::ProcessEvent() {
     {
       ReplaceTitleInfo(bd_get_playlist_info(m_bd, m_playlist, m_angle));
       const uint64_t seekTime = static_cast<uint64_t>(m_event.param) * 2;
-      std::lock_guard<std::mutex> lock(m_clipTableMutex);
-      for (uint32_t i = 0; m_titleInfo && i < m_titleInfo->clip_count; i++)
+      std::optional<unsigned int> playItem;
       {
-        if (m_titleInfo->clips[i].start_time > seekTime)
-          break;
-        m_clip = &m_titleInfo->clips[i];
+        std::lock_guard<std::mutex> lock(m_clipTableMutex);
+        for (uint32_t i = 0; m_titleInfo && i < m_titleInfo->clip_count; i++)
+        {
+          if (m_titleInfo->clips[i].start_time > seekTime)
+            break;
+          m_clip = &m_titleInfo->clips[i];
+          playItem = i;
+        }
+        if (m_clip)
+          RecordTitleTimeSpan(m_clip, true);
       }
-      if (m_clip)
-        RecordTitleTimeSpan(m_clip, true);
+      if (playItem)
+        LoadPipLayouts(*playItem);
     }
     else
     {
@@ -1338,12 +1353,29 @@ void CDVDInputStreamBluray::ProcessEvent() {
   case BD_EVENT_ANGLE:
   {
     logComponentM(LOGDEBUG, LOGBLURAY, "CDVDInputStreamBluray - BD_EVENT_ANGLE {}", m_event.param);
-    const bool angleReannounce = m_event.param == m_angle && m_titleInfo;
-    m_angle = m_event.param;
+    // PSR3 reports a one-based angle. bd_get_playlist_info() takes a zero-based index.
+    const unsigned int angle = m_event.param > 0 ? m_event.param - 1 : 0;
+    const bool angleReannounce = angle == m_angle && m_titleInfo;
+    m_angle = angle;
 
     if (!angleReannounce && m_playlist <= MAX_PLAYLIST_ID)
     {
+      std::optional<unsigned int> playItem;
+      {
+        std::lock_guard lock(m_clipTableMutex);
+        if (m_titleInfo && m_clip)
+          playItem = m_clip - m_titleInfo->clips;
+      }
       ReplaceTitleInfo(bd_get_playlist_info(m_bd, m_playlist, m_angle));
+      if (playItem)
+      {
+        {
+          std::lock_guard lock(m_clipTableMutex);
+          if (m_titleInfo && *playItem < m_titleInfo->clip_count)
+            m_clip = &m_titleInfo->clips[*playItem];
+        }
+        LoadPipLayouts(*playItem);
+      }
       UpdateGraphicsRegime();
     }
     break;
@@ -1482,6 +1514,7 @@ void CDVDInputStreamBluray::ProcessEvent() {
             resolvedPgPid = m_clip->pg_streams[m_pgStreamNumber - 1].pid;
         }
       }
+      LoadPipLayouts(m_event.param);
       // Re-resolve active PSR audio/PG stream numbers against the new PlayItem's STN table.
       // libbluray only emits BD_EVENT_AUDIO_STREAM / BD_EVENT_PG_TEXTST_STREAM on PlayItem
       // transitions when PSR1/PSR2 is out of range for the new clip; if a playlist transitions
@@ -1580,12 +1613,23 @@ void CDVDInputStreamBluray::ProcessEvent() {
     PlayMenuSound(m_event.param);
     break;
 
-  case BD_EVENT_IG_STREAM:
-  case BD_EVENT_SECONDARY_AUDIO:
-  case BD_EVENT_SECONDARY_AUDIO_STREAM:
   case BD_EVENT_SECONDARY_VIDEO:
   case BD_EVENT_SECONDARY_VIDEO_SIZE:
   case BD_EVENT_SECONDARY_VIDEO_STREAM:
+  {
+    std::lock_guard<std::mutex> lock(m_clipTableMutex);
+    if (m_event.event == BD_EVENT_SECONDARY_VIDEO)
+      m_secondaryVideoEnabled = m_event.param != 0;
+    else if (m_event.event == BD_EVENT_SECONDARY_VIDEO_SIZE)
+      m_secondaryVideoFullscreen = m_event.param == 0xf;
+    else
+      m_secondaryVideoStream = m_event.param;
+    break;
+  }
+
+  case BD_EVENT_IG_STREAM:
+  case BD_EVENT_SECONDARY_AUDIO:
+  case BD_EVENT_SECONDARY_AUDIO_STREAM:
   case BD_EVENT_KEY_INTEREST_TABLE:
   case BD_EVENT_PIP_PG_TEXTST:
   case BD_EVENT_PIP_PG_TEXTST_STREAM:
@@ -1860,7 +1904,7 @@ int CDVDInputStreamBluray::Read(uint8_t* buf, int buf_size)
         }
 
         case BD_EVENT_ANGLE:
-          if (m_atTitleEnd && m_event.param == m_angle)
+          if (m_atTitleEnd && m_event.param == m_angle + 1)
             break;
           if(m_hold != HOLD_DATA)
           {
@@ -3460,6 +3504,112 @@ const BLURAY_CLIP_INFO* CDVDInputStreamBluray::GetActiveClipLocked() const
   return nullptr;
 }
 
+bool CDVDInputStreamBluray::IsSecondaryVideo(int pid) const
+{
+  std::lock_guard<std::mutex> lock(m_clipTableMutex);
+  const BLURAY_CLIP_INFO* clip = GetActiveClipLocked();
+  if (!clip)
+    clip = m_prevClip;
+  return clip && clip->sec_video_stream_count &&
+         std::any_of(clip->sec_video_streams, clip->sec_video_streams + clip->sec_video_stream_count,
+                     [pid](const BLURAY_STREAM_INFO& stream) { return stream.pid == pid; });
+}
+
+void CDVDInputStreamBluray::LoadPipLayouts(unsigned int playItem)
+{
+  std::vector<int> pids;
+  unsigned int playlist;
+  {
+    std::lock_guard lock(m_clipTableMutex);
+    playlist = m_playlist;
+    if (m_clip && m_clip->sec_video_streams)
+    {
+      for (unsigned int i = 0; i < m_clip->sec_video_stream_count; ++i)
+        pids.push_back(m_clip->sec_video_streams[i].pid);
+    }
+    if (pids.empty())
+    {
+      m_pipClip.reset();
+      return;
+    }
+  }
+
+  auto clip = std::make_shared<BlurayPipClip>();
+  clip->pids = std::move(pids);
+#ifdef BLURAY_HAVE_IN_MUX_PIP
+  if (m_navmode && !m_bMVCPlayback)
+    clip->layouts.resize(clip->pids.size());
+  for (unsigned int stream = 1; stream <= clip->layouts.size(); ++stream)
+  {
+    BLURAY_PIP_LAYOUT info{};
+    const unsigned int entries =
+        bd_get_in_mux_pip_layout(m_bd, playlist, playItem, stream, &info, nullptr, 0);
+    if (!entries)
+      continue;
+
+    std::vector<BLURAY_PIP_PLACEMENT> placements(entries);
+    if (bd_get_in_mux_pip_layout(m_bd, playlist, playItem, stream, &info, placements.data(),
+                                 entries) != entries)
+      continue;
+
+    auto layout = std::make_shared<BlurayPipLayout>();
+    layout->pid = info.pid;
+    layout->inPts = DVD_SEC_TO_TIME(info.in_time / 45000.0);
+    layout->outPts = DVD_SEC_TO_TIME(info.out_time / 45000.0);
+    layout->lumaKey = info.luma_key;
+    layout->trickPlay = info.trick_play != 0;
+    for (const auto& placement : placements)
+    {
+      float scale = 1.0f;
+      switch (placement.scale)
+      {
+        case pip_scaling_none:
+        case pip_scaling_fullscreen:
+          break;
+        case pip_scaling_half:
+          scale = 0.5f;
+          break;
+        case pip_scaling_quarter:
+          scale = 0.25f;
+          break;
+        case pip_scaling_one_half:
+          scale = 1.5f;
+          break;
+        default:
+          continue;
+      }
+      layout->placements.push_back({DVD_SEC_TO_TIME(placement.time / 45000.0), placement.x,
+                                    placement.y, scale, placement.scale == pip_scaling_fullscreen});
+    }
+    if (layout->placements.empty())
+      continue;
+
+    std::stable_sort(layout->placements.begin(), layout->placements.end(),
+                     [](const auto& a, const auto& b) { return a.clipPts < b.clipPts; });
+    clip->layouts[stream - 1] = std::move(layout);
+  }
+#endif
+
+  std::lock_guard lock(m_clipTableMutex);
+  m_pipClip = std::move(clip);
+}
+
+std::shared_ptr<const BlurayPipClip> CDVDInputStreamBluray::GetPipClip() const
+{
+  std::lock_guard lock(m_clipTableMutex);
+  return m_pipClip;
+}
+
+BlurayPipSelection CDVDInputStreamBluray::GetPipSelection(int speed) const
+{
+  std::lock_guard lock(m_clipTableMutex);
+  if (!m_navmode || m_bMVCPlayback || !m_secondaryVideoStream)
+    return {};
+
+  return {m_secondaryVideoStream, m_secondaryVideoEnabled && speed >= DVD_PLAYSPEED_PAUSE,
+          m_secondaryVideoFullscreen, speed > DVD_PLAYSPEED_NORMAL};
+}
+
 bool CDVDInputStreamBluray::ListsEnhancementLayer(int pid) const
 {
 #if (BLURAY_VERSION >= BLURAY_VERSION_CODE(1, 5, 0))
@@ -3849,10 +3999,9 @@ void CDVDInputStreamBluray::UpdateBdjPopup(bool visible)
   }
 }
 
-bool CDVDInputStreamBluray::CanClosePopup() const
+bool CDVDInputStreamBluray::IsPopupOpen() const
 {
-  if (!m_bd || !m_navmode || m_isInMainMenu ||
-      (m_uoMask.load() & BLURAY_UO_POPUP_OFF_MASK))
+  if (!m_bd || !m_navmode || m_isInMainMenu)
     return false;
 
   if (!m_isBdjTitle)
@@ -3860,6 +4009,11 @@ bool CDVDInputStreamBluray::CanClosePopup() const
 
   const auto popup = m_bdjPopup.load();
   return m_hasVisibleBdjOverlay && (popup == BdjPopup::OPEN || popup == BdjPopup::CLOSING);
+}
+
+bool CDVDInputStreamBluray::CanClosePopup() const
+{
+  return IsPopupOpen() && !(m_uoMask.load() & BLURAY_UO_POPUP_OFF_MASK);
 }
 
 void CDVDInputStreamBluray::ClosePopup()

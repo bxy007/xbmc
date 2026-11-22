@@ -100,6 +100,7 @@ public:
   {
     m_overlays.SetMenuPlane(std::move(menuPlane));
   }
+  CBlurayPip& GetBlurayPip() { return m_blurayPip; }
 
   unsigned int AllocRenderCapture();
   void ReleaseRenderCapture(unsigned int captureId);
@@ -236,6 +237,7 @@ protected:
 
   CBaseRenderer *m_pRenderer = nullptr;
   OVERLAY::CRenderer m_overlays;
+  CBlurayPip m_blurayPip;
   std::atomic<uint64_t> m_subtitleGeneration{0};
   int m_lastPushedActiveTopPx{-1};
   int m_lastPushedActiveBottomPx{-1};

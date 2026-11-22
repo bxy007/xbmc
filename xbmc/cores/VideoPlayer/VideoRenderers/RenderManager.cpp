@@ -494,6 +494,13 @@ void CRenderManager::FrameMove()
            m_renderedOverlay.load(std::memory_order_relaxed))
     m_playerPort->UpdateGuiRender(true);
 
+  if (m_blurayPip.HasStream() || m_overlays.HasPip())
+  {
+    const bool changed = m_overlays.SetPipPicture(m_blurayPip.Present(GetDisplayedPts()));
+    if (changed || m_overlays.HasPip())
+      m_playerPort->UpdateGuiRender(true);
+  }
+
   ManageCaptures();
 
   bool presenting = false;
@@ -1649,6 +1656,16 @@ void CRenderManager::Render(bool clear, DWORD flags, DWORD alpha, bool gui)
           }
         }
 
+        if (m_overlays.HasPip() && m_picture.iWidth > 0 && m_picture.iHeight > 0)
+        {
+          const float pixelAspect = m_picture.iDisplayWidth > 0 && m_picture.iDisplayHeight > 0
+                                        ? (static_cast<float>(m_picture.iDisplayWidth) /
+                                           m_picture.iWidth) /
+                                              (static_cast<float>(m_picture.iDisplayHeight) /
+                                               m_picture.iHeight)
+                                        : 1.0f;
+          m_overlays.RenderPip(m_picture.iWidth, m_picture.iHeight, pixelAspect);
+        }
         m_overlays.Render(guiSource);
         if (CServiceBroker::GetLogging().IsLogLevelLogged(LOGDEBUG) &&
             CServiceBroker::GetLogging().CanLogComponent(LOGVIDEO))

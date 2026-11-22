@@ -158,13 +158,15 @@ void CRenderer::Flush()
   m_menuSequence = 0;
   m_hasMenu.store(false, std::memory_order_relaxed);
   m_buffersChanged.store(true, std::memory_order_relaxed);
-  if (hadMenu)
+  if (hadMenu || HasPip())
   {
     MarkOverlayRenderChanged();
     if (auto* gui = CServiceBroker::GetGUI())
       gui->GetWindowManager().MarkDirty();
   }
 
+  m_pipPicture = {};
+  m_hasPip.store(false, std::memory_order_relaxed);
   ReleaseCache();
   Reset();
 }
@@ -187,6 +189,8 @@ void CRenderer::Release(int idx)
 void CRenderer::ReleaseCache()
 {
   m_textureCache.clear();
+  m_pipTexture.reset();
+  m_uploadedPipImage.reset();
   m_textureid++;
 }
 
@@ -360,6 +364,74 @@ void CRenderer::SetMenuPlane(std::shared_ptr<CDVDMenuPlane> menuPlane)
   std::unique_lock lock(m_section);
 
   m_menuPlane = std::move(menuPlane);
+}
+
+bool CRenderer::SetPipPicture(BlurayPipPicture picture)
+{
+  std::unique_lock lock(m_section);
+  if (m_pipPicture == picture)
+    return false;
+
+  m_pipPicture = std::move(picture);
+  m_hasPip.store(!!m_pipPicture.image, std::memory_order_relaxed);
+  if (!m_pipPicture.image)
+  {
+    m_pipTexture.reset();
+    m_uploadedPipImage.reset();
+  }
+  MarkOverlayRenderChanged();
+  return true;
+}
+
+void CRenderer::RenderPip(int primaryWidth, int primaryHeight, float primaryPixelAspect)
+{
+  std::unique_lock lock(m_section);
+  const auto& picture = m_pipPicture;
+  if (!picture.image || m_rs.IsEmpty() || m_rd.IsEmpty())
+    return;
+
+  auto& context = CServiceBroker::GetWinSystem()->GetGfxContext();
+  const CRect previousScissors = context.GetScissors();
+  CRect clip = m_rd;
+  clip.Intersect(m_rv);
+  clip.Intersect(previousScissors);
+  if (clip.IsEmpty())
+    return;
+
+  if (m_uploadedPipImage != picture.image)
+  {
+#if HAS_GLES >= 2
+    if (m_pipTexture)
+      m_pipTexture->UpdateFromImage(*picture.image);
+    else
+#endif
+      m_pipTexture = COverlay::Create(*picture.image, m_rs);
+    m_uploadedPipImage = picture.image;
+    if (m_pipTexture)
+      m_pipTexture->m_pos = COverlay::POSITION_ABSOLUTE;
+  }
+  if (!m_pipTexture)
+    return;
+
+  const float scaleX = m_rd.Width() / m_rs.Width();
+  const float scaleY = m_rd.Height() / m_rs.Height();
+  SRenderState state;
+  if (picture.fullscreen)
+  {
+    state = {m_rd.x1 - m_rs.x1 * scaleX, m_rd.y1 - m_rs.y1 * scaleY,
+             primaryWidth * scaleX, primaryHeight * scaleY};
+  }
+  else
+  {
+    state = {m_rd.x1 + (picture.x - m_rs.x1) * scaleX,
+             m_rd.y1 + (picture.y - m_rs.y1) * scaleY,
+             picture.image->width * picture.scale * picture.pixelAspect / primaryPixelAspect *
+                 scaleX,
+             picture.image->height * picture.scale * scaleY};
+  }
+  context.SetScissors(clip);
+  m_pipTexture->Render(state);
+  context.SetScissors(previousScissors);
 }
 
 void CRenderer::PrepareMenu(bool firstVideoFrameSubmitted)
@@ -699,7 +771,7 @@ float CRenderer::ComputeBitmapBlockShift(float blockTop, float blockBottom) cons
 
 bool CRenderer::HasOverlay(int idx)
 {
-  if (m_hasMenu.load(std::memory_order_relaxed))
+  if (m_hasMenu.load(std::memory_order_relaxed) || HasPip())
     return true;
   if (idx < 0 || idx >= NUM_BUFFERS)
     return false;
@@ -712,6 +784,8 @@ int CRenderer::GetOverlayCount(int idx)
                   ? static_cast<int>(m_overlayCount[idx].load(std::memory_order_relaxed))
                   : 0;
   if (m_hasMenu.load(std::memory_order_relaxed))
+    count++;
+  if (HasPip())
     count++;
   return count;
 }

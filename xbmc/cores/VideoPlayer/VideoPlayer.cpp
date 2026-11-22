@@ -645,6 +645,11 @@ void CSelectionStreams::Update(const std::shared_ptr<CDVDInputStream>& input,
         continue;
       /* make sure stream is marked with right source */
       stream->source = source;
+#ifdef HAVE_LIBBLURAY
+      if (stream->type == STREAM_VIDEO && input && input->IsStreamType(DVDSTREAM_TYPE_BLURAY) &&
+          static_cast<const CDVDInputStreamBluray&>(*input).IsSecondaryVideo(stream->dvdNavId))
+        continue;
+#endif
 
       SelectionStream s;
       s.source   = source;
@@ -1134,6 +1139,7 @@ CVideoPlayer::DemuxOpenResult CVideoPlayer::OpenDemuxStream()
   m_SelectionStreams.Clear(STREAM_NONE, STREAM_SOURCE_DEMUX);
   m_SelectionStreams.Clear(STREAM_NONE, STREAM_SOURCE_NAV);
   m_SelectionStreams.Update(m_pInputStream, m_pDemuxer.get());
+  m_discSubtitlePending = m_blurayMenu;
   m_pDemuxer->GetPrograms(m_programs);
   UpdateContent();
   m_demuxerSpeed = DVD_PLAYSPEED_NORMAL;
@@ -1163,6 +1169,7 @@ CVideoPlayer::DemuxOpenResult CVideoPlayer::OpenDemuxStream()
 
 void CVideoPlayer::CloseDemuxer()
 {
+  m_renderManager.GetBlurayPip().Flush();
   m_subtitleSwitchCache.Clear();
   m_pDemuxer.reset();
   m_SelectionStreams.Clear(STREAM_NONE, STREAM_SOURCE_DEMUX);
@@ -1387,6 +1394,7 @@ bool CVideoPlayer::ReadPacket(DemuxPacket*& packet, CDemuxStream*& stream)
       m_subtitleSwitchCache.Clear();
       m_SelectionStreams.Clear(STREAM_NONE, STREAM_SOURCE_DEMUX);
       m_SelectionStreams.Update(m_pInputStream, m_pDemuxer.get());
+      m_discSubtitlePending = m_blurayMenu;
       m_pDemuxer->GetPrograms(m_programs);
       UpdateContent();
       OpenDefaultStreams(false);
@@ -1723,6 +1731,41 @@ bool CVideoPlayer::TakeDiscAudioPick(CDemuxStream* stream)
   return true;
 }
 
+void CVideoPlayer::UpdateBlurayPip()
+{
+#ifdef HAVE_LIBBLURAY
+  if (const auto bluray = GetBlurayInputStream())
+    m_renderManager.GetBlurayPip().Select(bluray->GetPipSelection(m_playSpeed));
+#endif
+}
+
+void CVideoPlayer::UpdateBluraySubtitleStream()
+{
+  if (!m_discSubtitlePending || !m_pDemuxer || m_navStopped)
+    return;
+
+  m_discSubtitlePending = false;
+  if (m_dvd.iSelectedSPUStream < 0)
+    return;
+
+  // A sparsely authored subtitle may have no packets near the point of selection.
+  // Apply the disc's PID to the open demuxer outside the navigation/read callbacks.
+  for (auto* stream : m_pDemuxer->GetStreams())
+  {
+    if (!IsBetterStream(m_CurrentSubtitle, stream))
+      continue;
+
+    if (OpenStream(m_CurrentSubtitle, stream->demuxerId, stream->uniqueId, stream->source))
+    {
+      logComponentM(LOGDEBUG, LOGBLURAY, "Blu-ray selected subtitle PID 0x{:04x} as stream {}",
+                    stream->dvdNavId, stream->uniqueId);
+      if (CanCacheSubtitleForSwitch(stream))
+        ReplaySubtitleForSwitch(stream, m_VideoPlayerVideo->IsSubtitleEnabled());
+    }
+    break;
+  }
+}
+
 void CVideoPlayer::Prepare()
 {
   m_menuDomainSegment = false;
@@ -1756,6 +1799,7 @@ void CVideoPlayer::Prepare()
   m_navStop = false;
   m_navStopped = false;
   m_discAudioPick = false;
+  m_discSubtitlePending = false;
   m_offset_pts = 0;
   m_CurrentAudio.lastdts = DVD_NOPTS_VALUE;
   m_CurrentVideo.lastdts = DVD_NOPTS_VALUE;
@@ -2020,6 +2064,9 @@ void CVideoPlayer::Process()
       UpdatePlayState(0);
     }
 
+    UpdateBluraySubtitleStream();
+    UpdateBlurayPip();
+
     // handle eventual seeks due to playspeed
     HandlePlaySpeed();
 
@@ -2165,8 +2212,6 @@ void CVideoPlayer::Process()
       CDVDInputStream::ENextStream next = m_pInputStream->NextStream();
       if(next == CDVDInputStream::NEXTSTREAM_OPEN)
       {
-        CloseDemuxer();
-
         SetCaching(CACHESTATE_DONE);
         bool flushOldStreams = false;
         if (std::shared_ptr<CDVDInputStream::IMenus> menu =
@@ -2188,6 +2233,7 @@ void CVideoPlayer::Process()
           DrainStreamsAtBoundary();
         if (videoKeepAlive)
         {
+          CloseDemuxer();
           logComponentM(LOGDEBUG, LOGVIDEO,
                         "VideoPlayer: next stream, video-compatible boundary - keeping stream players alive");
           ReportBlurayItemPlayedOut();
@@ -2205,6 +2251,7 @@ void CVideoPlayer::Process()
         m_bdStreamReuse = false;
         CloseStream(m_CurrentAudio, !flushOldStreams);
         CloseStream(m_CurrentVideo, !flushOldStreams);
+        CloseDemuxer();
         ReportBlurayItemPlayedOut();
         m_lastVideoPts = DVD_NOPTS_VALUE;
         m_navStop = false;
@@ -2251,6 +2298,22 @@ void CVideoPlayer::Process()
     }
 
     m_eofRenderWaitStart = {};
+
+    // A subtitle selection may have arrived while the demuxer was reading.
+    UpdateBluraySubtitleStream();
+    UpdateBlurayPip();
+
+#ifdef HAVE_LIBBLURAY
+    if (pStream->type == STREAM_VIDEO && pPacket->m_blurayPipClip &&
+        STREAM_SOURCE_MASK(pStream->source) == STREAM_SOURCE_DEMUX)
+    {
+      const double clipOffset = pPacket->m_seamTimeOffset - pPacket->m_ptsOffsetCorrection;
+      m_renderManager.GetBlurayPip().Queue(std::make_shared<CDVDMsgDemuxerPacket>(pPacket),
+                                          static_cast<const CDemuxStreamVideo&>(*pStream),
+                                          clipOffset);
+      continue;
+    }
+#endif
 
     // see if we can find something better to play
     CheckBetterStream(m_CurrentAudio,    pStream);
@@ -2566,11 +2629,23 @@ constexpr size_t SUBTITLE_SEEK_CACHE_MAX_BYTES = 32 * 1024 * 1024;
 
 bool CVideoPlayer::CanCacheSubtitleForSwitch(const CDemuxStream* stream) const
 {
-  return stream && stream->type == STREAM_SUBTITLE &&
-         STREAM_SOURCE_MASK(stream->source) == STREAM_SOURCE_DEMUX &&
-         (stream->codec == AV_CODEC_ID_HDMV_PGS_SUBTITLE || IsCachableTextSubtitle(stream->codec)) &&
-         pgs_sub_candidate_language(stream->language, "") != 0 &&
-         m_pInputStream && !m_pInputStream->IsStreamType(DVDSTREAM_TYPE_DVD) && !IsInMenuInternal();
+  if (!stream || stream->type != STREAM_SUBTITLE ||
+      STREAM_SOURCE_MASK(stream->source) != STREAM_SOURCE_DEMUX ||
+      (stream->codec != AV_CODEC_ID_HDMV_PGS_SUBTITLE && !IsCachableTextSubtitle(stream->codec)) ||
+      pgs_sub_candidate_language(stream->language, "") == 0 || !m_pInputStream ||
+      m_pInputStream->IsStreamType(DVDSTREAM_TYPE_DVD))
+    return false;
+
+  if (!IsInMenuInternal())
+    return true;
+
+#if defined(HAVE_LIBBLURAY)
+  // A pop-up overlays the same title whose subtitle packets have been read ahead.
+  const auto bluray = GetBlurayInputStream();
+  return m_dvd.state != DVDSTATE_STILL && bluray && bluray->IsPopupOpen();
+#else
+  return false;
+#endif
 }
 
 void CVideoPlayer::CacheSubtitleForSwitch(CDemuxStream* stream, const DemuxPacket* packet)
@@ -2602,7 +2677,7 @@ void CVideoPlayer::CacheSubtitleForSwitch(CDemuxStream* stream, const DemuxPacke
                            stream->codec == AV_CODEC_ID_HDMV_PGS_SUBTITLE, std::move(cached), pts);
 }
 
-bool CVideoPlayer::ReplaySubtitleForSwitch(CDemuxStream* stream)
+bool CVideoPlayer::ReplaySubtitleForSwitch(CDemuxStream* stream, bool visible)
 {
   const double pts = m_clock.GetClock() - m_VideoPlayerVideo->GetSubtitleDelay();
   auto cached = m_subtitleSwitchCache.Get({stream->demuxerId, stream->source, stream->uniqueId},
@@ -2627,8 +2702,7 @@ bool CVideoPlayer::ReplaySubtitleForSwitch(CDemuxStream* stream)
             stream->uniqueId, packets.size(), m_subtitleSwitchCache.Bytes());
   const bool havePackets = !packets.empty();
   m_VideoPlayerSubtitle->SendMessage(std::make_shared<CDVDMsgSubtitleReplay>(
-      std::move(packets), pts, m_VideoPlayerVideo->GetSubtitleDelay(),
-      m_processInfo->GetVideoSettings().m_SubtitleOn));
+      std::move(packets), pts, m_VideoPlayerVideo->GetSubtitleDelay(), visible));
   return havePackets;
 }
 
@@ -4376,6 +4450,7 @@ void CVideoPlayer::SendPlayerMessage(std::shared_ptr<CDVDMsg> pMsg, unsigned int
 void CVideoPlayer::OnExit()
 {
   CLog::Log(LOGDEBUG, "CVideoPlayer::OnExit()");
+  m_renderManager.GetBlurayPip().Select({});
   m_pgsProbe.Reset(false, "");
   m_subtitleSwitchCache.Clear();
 
@@ -4858,7 +4933,7 @@ void CVideoPlayer::HandleMessages()
             auto* subtitle = m_pDemuxer ? m_pDemuxer->GetStream(st.demuxerId, st.id) : nullptr;
             if (STREAM_SOURCE_MASK(st.source) == STREAM_SOURCE_DEMUX &&
                 CanCacheSubtitleForSwitch(subtitle))
-              ReplaySubtitleForSwitch(subtitle);
+              ReplaySubtitleForSwitch(subtitle, m_processInfo->GetVideoSettings().m_SubtitleOn);
             else if (!pMsg2->IsAutomatic())
               QueueSubtitleSwitchSeek(st);
 #if defined(HAVE_LIBBLURAY)
@@ -6187,7 +6262,10 @@ void CVideoPlayer::FlushBuffers(double pts, bool accurate, bool sync, bool nav)
   m_lastVideoPts = DVD_NOPTS_VALUE;
 #if defined(HAVE_LIBBLURAY)
   if (const auto bluray = GetBlurayInputStream())
+  {
     bluray->ResetPresentedLeft();
+    m_renderManager.GetBlurayPip().Flush();
+  }
 #endif
   m_pgsProbe.Flush();
   m_subtitleSwitchCache.Clear();
@@ -6464,8 +6542,13 @@ int CVideoPlayer::OnDiscNavResult(void* pData, int iMessage)
     }
 
     case BD_EVENT_PG_TEXTST_STREAM:
-      m_dvd.iSelectedSPUStream = *static_cast<int*>(pData);
+    {
+      const int pid = *static_cast<int*>(pData);
+      if (m_blurayMenu && m_dvd.iSelectedSPUStream != pid)
+        m_discSubtitlePending = true;
+      m_dvd.iSelectedSPUStream = pid;
       break;
+    }
     case BD_EVENT_PG_TEXTST:
     {
       // the disc's flag is for its own subtitles, not for an external file

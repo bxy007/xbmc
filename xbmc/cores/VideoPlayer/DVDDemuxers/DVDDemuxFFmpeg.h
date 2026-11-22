@@ -27,6 +27,7 @@ extern "C" {
 class CDVDDemuxFFmpeg;
 class CDVDInputStreamFFmpeg;
 class CURL;
+struct BlurayPipClip;
 
 enum class TRANSPORT_STREAM_STATE
 {
@@ -119,6 +120,7 @@ public:
   std::string GetStreamCodecName(int iStreamId) override;
 
   bool Aborted() const;
+  int ReadInput(uint8_t* buffer, int size);
 
   AVFormatContext* m_pFormatContext;
   std::shared_ptr<CDVDInputStream> m_pInput;
@@ -144,7 +146,7 @@ protected:
   void ResetVideoStreams() const;
   AVDictionary* GetFFMpegOptionsFromInput() const;
   double ConvertTimestamp(int64_t pts, int den, int num) const;
-  void ApplySeamTimeOffset(DemuxPacket* pPacket, int streamIndex);
+  void ApplySeamTimeOffset(DemuxPacket* pPacket, const AVPacket& source);
   bool IsProgramChange();
   unsigned int HLSSelectProgram() const;
 
@@ -166,8 +168,16 @@ protected:
   {
     int generation = 0;
     double lastCorrected = DVD_NOPTS_VALUE;
+    int64_t position = -1;
   };
   std::map<int, SeamStreamState> m_seamStreamState;
+  struct PipInputSpan
+  {
+    int64_t position;
+    std::shared_ptr<const BlurayPipClip> clip;
+    double seamOffset;
+  };
+  std::vector<PipInputSpan> m_pipInputSpans;
 
   AVIOContext* m_ioContext;
 

@@ -10,6 +10,7 @@
 #pragma once
 
 #include "BaseRenderer.h"
+#include "cores/VideoPlayer/BlurayPip.h"
 #include "cores/VideoPlayer/DVDCodecs/Overlay/DVDOverlay.h"
 #include "cores/VideoPlayer/DVDSubtitles/SubtitlesStyle.h"
 #include "settings/SubtitlesSettings.h"
@@ -112,6 +113,9 @@ namespace OVERLAY {
     void AddOverlay(std::shared_ptr<CDVDOverlay> o, double pts, int index);
     virtual void Render(int idx, float depth = 0.0f);
     void SetMenuPlane(std::shared_ptr<CDVDMenuPlane> menuPlane);
+    bool SetPipPicture(BlurayPipPicture picture);
+    bool HasPip() const { return m_hasPip.load(std::memory_order_relaxed); }
+    void RenderPip(int primaryWidth, int primaryHeight, float primaryPixelAspect);
     void PrepareMenu(bool firstVideoFrameSubmitted);
     void RenderMenuPlane(const CRect& view);
     bool HasMenu() const { return m_hasMenu.load(std::memory_order_relaxed); }
@@ -196,6 +200,11 @@ namespace OVERLAY {
     void Release(std::vector<SElement>& list);
     void ReleaseCache();
     void ReleaseUnused();
+
+    BlurayPipPicture m_pipPicture;
+    std::shared_ptr<const CDVDOverlayImage> m_uploadedPipImage;
+    std::shared_ptr<COverlay> m_pipTexture;
+    std::atomic_bool m_hasPip{false};
 
     /*!
      * \brief Load and store settings locally

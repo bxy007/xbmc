@@ -289,7 +289,17 @@ COverlayTextureGLES::COverlayTextureGLES(const CDVDOverlayImage& o, CRect& rSour
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
 
-  if (o.m_persistentSurface)
+  if (o.m_isPipVideo)
+  {
+    m_isPipVideo = true;
+    m_pma = true; // The secondary video pixels have either zero or full alpha.
+    m_hasMipmaps = false;
+    m_bgraSupported = QueryBgraTextureFormat(m_internalFormat, m_externalFormat);
+    m_u = 1.0f;
+    m_v = 1.0f;
+    UploadPipImage(o);
+  }
+  else if (o.m_persistentSurface)
   {
     auto& surface = *o.m_persistentSurface;
     m_pma = true;
@@ -666,8 +676,48 @@ COverlayTextureGLES::~COverlayTextureGLES()
   glDeleteTextures(1, &m_texture);
 }
 
+void COverlayTextureGLES::UploadPipImage(const CDVDOverlayImage& o)
+{
+  const size_t count = static_cast<size_t>(o.width) * o.height;
+  const uint8_t* pixels = o.pixels.data();
+  if (!m_bgraSupported)
+  {
+    m_uploadScratch.resize(count);
+    uint8_t* rgba = reinterpret_cast<uint8_t*>(m_uploadScratch.data());
+    for (size_t i = 0; i < count * 4; i += 4)
+    {
+      rgba[i] = pixels[i + 2];
+      rgba[i + 1] = pixels[i + 1];
+      rgba[i + 2] = pixels[i];
+      rgba[i + 3] = pixels[i + 3];
+    }
+    pixels = rgba;
+  }
+
+  glBindTexture(GL_TEXTURE_2D, m_texture);
+  glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+  if (o.width != m_texWidth || o.height != m_texHeight)
+  {
+    glTexImage2D(GL_TEXTURE_2D, 0, m_internalFormat, o.width, o.height, 0, m_externalFormat,
+                 GL_UNSIGNED_BYTE, pixels);
+    m_texWidth = o.width;
+    m_texHeight = o.height;
+  }
+  else
+  {
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, o.width, o.height, m_externalFormat, GL_UNSIGNED_BYTE,
+                    pixels);
+  }
+  glBindTexture(GL_TEXTURE_2D, 0);
+}
+
 void COverlayTextureGLES::UpdateFromImage(const CDVDOverlayImage& o)
 {
+  if (m_isPipVideo)
+  {
+    UploadPipImage(o);
+    return;
+  }
   if (!o.m_persistentSurface || m_texture == 0)
     return;
 
@@ -864,9 +914,13 @@ void COverlayTextureGLES::Render(SRenderState& state)
   auto renderSystem =
       dynamic_cast<CRenderSystemGLES*>(CServiceBroker::GetRenderSystem());
 
-  ShaderMethodGLES texMethod =
-      m_bakedRaw ? ShaderMethodGLES::SM_TEXTURE_NOBLEND_RAW
-                 : GetOverlayTextureShaderMethod(m_isHdrPqAuthored, m_pma);
+  ShaderMethodGLES texMethod;
+  if (m_isPipVideo)
+    texMethod = ShaderMethodGLES::SM_TEXTURE_NOBLEND_PMA;
+  else if (m_bakedRaw)
+    texMethod = ShaderMethodGLES::SM_TEXTURE_NOBLEND_RAW;
+  else
+    texMethod = GetOverlayTextureShaderMethod(m_isHdrPqAuthored, m_pma);
   if (m_bakedRaw)
   {
     LOG_THROTTLE_ONCHANGE(LOGDEBUG, LOGVIDEO,

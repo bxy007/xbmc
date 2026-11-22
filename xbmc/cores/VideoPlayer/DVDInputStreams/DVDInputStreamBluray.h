@@ -26,6 +26,8 @@
 class CDemuxStreamSSIF;
 class CDVDOverlay;
 struct BlurayFileAccess;
+struct BlurayPipClip;
+struct BlurayPipSelection;
 
 extern "C"
 {
@@ -124,6 +126,7 @@ public:
 
 
   bool IsInMenu() override;
+  bool IsPopupOpen() const;
   bool IsMenuDomainSegment() const;
   bool IsReadInDataPhase() const
   {
@@ -173,6 +176,9 @@ public:
   std::optional<int> GetNextItemSeekTime() const { return m_nextItemSeekTime; }
 
   bool ListsEnhancementLayer(int pid) const;
+  bool IsSecondaryVideo(int pid) const;
+  std::shared_ptr<const BlurayPipClip> GetPipClip() const;
+  BlurayPipSelection GetPipSelection(int speed) const;
   bool GetDemuxerGraphicsPlane(int pid, int& width, int& height) const;
   bool GetDemuxerFrameRate(int pid, int& rate, int& scale) const;
 
@@ -288,6 +294,7 @@ protected:
   void MarkMenuInput();
   bool IsJoinHeld() const;
   const BLURAY_CLIP_INFO* GetActiveClipLocked() const;
+  void LoadPipLayouts(unsigned int playItem);
   void UpdateSeamTimeOffset(const BLURAY_CLIP_INFO* prev, const BLURAY_CLIP_INFO* next);
   void ResetSeamTimeOffset(const char* reason);
   static bool AreClipVideoStreamsCompatible(const BLURAY_CLIP_INFO* a, const BLURAY_CLIP_INFO* b);
@@ -305,6 +312,10 @@ protected:
   uint32_t m_playlist = MAX_PLAYLIST_ID + 1;
   uint32_t m_featurePlaylist = MAX_PLAYLIST_ID + 1;
   BLURAY_CLIP_INFO* m_clip = nullptr;
+  std::shared_ptr<const BlurayPipClip> m_pipClip;
+  unsigned int m_secondaryVideoStream{0};
+  bool m_secondaryVideoEnabled{false};
+  bool m_secondaryVideoFullscreen{false};
   uint32_t m_angle = 0;
   std::atomic<uint32_t> m_titleNumber{0xfffffffe};
   std::atomic_bool m_atTitleEnd{false};

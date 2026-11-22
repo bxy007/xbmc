@@ -11,6 +11,10 @@
 #include "TimingConstants.h"
 #include "addons/kodi-dev-kit/include/kodi/c-api/addon-instance/inputstream/demux_packet.h"
 
+#include <memory>
+
+struct BlurayPipClip;
+
 #define DMX_SPECIALID_STREAMINFO DEMUX_SPECIALID_STREAMINFO
 #define DMX_SPECIALID_STREAMCHANGE DEMUX_SPECIALID_STREAMCHANGE
 
@@ -45,6 +49,11 @@ extern "C"
 
     //! @brief PTS offset correction applied to the PTS and DTS.
     double m_ptsOffsetCorrection{0};
+    //! Seam adjustment added to the clip timestamps by the main demuxer.
+    double m_seamTimeOffset{0};
+    //! PlayItem that supplied a Blu-ray secondary video packet.
+    std::shared_ptr<const BlurayPipClip> m_blurayPipClip;
+    bool m_keyFrame{false};
     //! @brief Indicate package is from a Dolby Vision dual stream source.
     bool isDualStream;
     //! @brief Indicate package is from a Dolby Vision enhancement layer.

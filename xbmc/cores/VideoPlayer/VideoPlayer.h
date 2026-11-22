@@ -434,6 +434,8 @@ protected:
   bool DropInNavTail(CDVDMsg& msg);
   bool SelectDiscStream(const SelectionStream& st);
   bool TakeDiscAudioPick(CDemuxStream* stream);
+  void UpdateBluraySubtitleStream();
+  void UpdateBlurayPip();
   bool OpenStream(CCurrentStream& current, int64_t demuxerId, int iStream, int source, bool reset = true);
   bool OpenAudioStream(CDVDStreamInfo& hint, bool reset = true);
   bool OpenVideoStream(CDVDStreamInfo& hint, bool reset = true);
@@ -544,7 +546,7 @@ protected:
   void UpdateContentState();
   void QueueSubtitleSwitchSeek(const SelectionStream& stream);
   void CacheSubtitleForSwitch(CDemuxStream* stream, const DemuxPacket* packet);
-  bool ReplaySubtitleForSwitch(CDemuxStream* stream);
+  bool ReplaySubtitleForSwitch(CDemuxStream* stream, bool visible);
   bool CanCacheSubtitleForSwitch(const CDemuxStream* stream) const;
 
   void UpdateFileItemStreamDetails(CFileItem& item);
@@ -663,6 +665,7 @@ protected:
   bool m_navStop{false};
   bool m_navStopped{false};
   bool m_discAudioPick{false};
+  bool m_discSubtitlePending{false};
   std::unique_ptr<CDVDDemux> m_pDemuxer;
   std::shared_ptr<CDVDDemux> m_pSubtitleDemuxer;
   std::unordered_map<int64_t, std::shared_ptr<CDVDDemux>> m_subtitleDemuxerMap;

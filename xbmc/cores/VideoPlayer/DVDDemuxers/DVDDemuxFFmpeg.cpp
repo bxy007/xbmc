@@ -10,6 +10,7 @@
 #include "DVDDemuxUtils.h"
 #include "DVDInputStreams/DVDInputStream.h"
 #ifdef HAVE_LIBBLURAY
+#include "BlurayPip.h"
 #include "DVDInputStreams/DVDInputStreamBluray.h"
 #endif
 #include "DVDInputStreams/DVDInputStreamFFmpeg.h"
@@ -186,12 +187,40 @@ static int dvd_file_read(void* h, uint8_t* buf, int size)
   if (demuxer->m_brokenFileDetected)
     return AVERROR_EOF;
 
-  std::shared_ptr<CDVDInputStream> pInputStream = demuxer->m_pInput;
-  int len = pInputStream->Read(buf, size);
-  if (len == 0)
-    return AVERROR_EOF;
-  if (len > 0)
-    demuxer->m_sourceReadBytes += len;
+  const int len = demuxer->ReadInput(buf, size);
+  return len == 0 ? AVERROR_EOF : len;
+}
+
+int CDVDDemuxFFmpeg::ReadInput(uint8_t* buffer, int size)
+{
+  const int len = m_pInput->Read(buffer, size);
+  if (len <= 0)
+    return len;
+
+#ifdef HAVE_LIBBLURAY
+  if (m_pInput->IsStreamType(DVDSTREAM_TYPE_BLURAY))
+  {
+    auto& bluray = static_cast<CDVDInputStreamBluray&>(*m_pInput);
+    auto clip = bluray.GetPipClip();
+    double offset = 0;
+    if (clip)
+    {
+      int generation;
+      double previous;
+      bluray.GetSeamTimeOffsets(generation, offset, previous);
+    }
+    if (m_pipInputSpans.empty() ? !!clip
+                               : m_pipInputSpans.back().clip != clip ||
+                                     (clip && m_pipInputSpans.back().seamOffset != offset))
+    {
+      // libbluray splits reads at PlayItem boundaries. Its byte input is unseekable,
+      // so this is the start of this span in FFmpeg's AVIO byte coordinate system.
+      m_pipInputSpans.push_back({m_sourceReadBytes, std::move(clip), offset});
+    }
+  }
+#endif
+
+  m_sourceReadBytes += len;
   return len;
 }
 
@@ -735,6 +764,7 @@ void CDVDDemuxFFmpeg::Dispose()
   m_dv_dual_stream = false;
 
   DisposeStreams();
+  m_pipInputSpans.clear();
 
   m_pInput = nullptr;
 }
@@ -764,6 +794,7 @@ void CDVDDemuxFFmpeg::Flush()
   m_dtsAtDisplayTime = DVD_NOPTS_VALUE;
   m_seekToKeyFrame = false;
   m_seamStreamState.clear();
+  m_pipInputSpans.clear();
 
   if (m_pSSIF)
     m_pSSIF->Flush();
@@ -1036,7 +1067,7 @@ AVDictionary* CDVDDemuxFFmpeg::GetFFMpegOptionsFromInput() const {
   return options;
 }
 
-void CDVDDemuxFFmpeg::ApplySeamTimeOffset(DemuxPacket* pPacket, int streamIndex)
+void CDVDDemuxFFmpeg::ApplySeamTimeOffset(DemuxPacket* pPacket, const AVPacket& source)
 {
   if (m_pSSIF)
     return;
@@ -1047,11 +1078,36 @@ void CDVDDemuxFFmpeg::ApplySeamTimeOffset(DemuxPacket* pPacket, int streamIndex)
   if (!m_menuInterface || !m_menuInterface->GetSeamTimeOffsets(generation, current, previous))
     return;
 
+  const int streamIndex = source.stream_index;
   SeamStreamState& state = m_seamStreamState[streamIndex];
   const double raw = pPacket->dts != DVD_NOPTS_VALUE ? pPacket->dts : pPacket->pts;
   double use = current;
 
-  if (state.generation != generation)
+#ifdef HAVE_LIBBLURAY
+  const AVStream* stream = m_pFormatContext->streams[streamIndex];
+  if (!m_pipInputSpans.empty() && stream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO)
+  {
+    // MPEG-TS records the position after reading the first TS packet of the PES.
+    // A packet ending exactly at the next span's start still belongs to the old clip.
+    if (source.pos >= 0)
+      state.position = std::max<int64_t>(0, source.pos - 1);
+
+    const auto next = std::upper_bound(
+        m_pipInputSpans.begin(), m_pipInputSpans.end(), state.position,
+        [](int64_t pos, const PipInputSpan& span) { return pos < span.position; });
+    // The parser can emit several access units from one PES. Later units can have no position.
+    const auto& span = next == m_pipInputSpans.begin() ? m_pipInputSpans.front()
+                                                     : *std::prev(next);
+    if ((state.position < 0 || state.position >= span.position) && span.clip &&
+        span.clip->HasSecondaryVideo(stream->id))
+    {
+      pPacket->m_blurayPipClip = span.clip;
+      use = span.seamOffset;
+    }
+  }
+#endif
+
+  if (!pPacket->m_blurayPipClip && state.generation != generation)
   {
     if (raw == DVD_NOPTS_VALUE)
       use = previous;
@@ -1075,6 +1131,7 @@ void CDVDDemuxFFmpeg::ApplySeamTimeOffset(DemuxPacket* pPacket, int streamIndex)
   }
 
   const double offset = use * DVD_TIME_BASE;
+  pPacket->m_seamTimeOffset = offset;
   if (pPacket->dts != DVD_NOPTS_VALUE)
     pPacket->dts += offset;
   if (pPacket->pts != DVD_NOPTS_VALUE)
@@ -1248,8 +1305,9 @@ DemuxPacket* CDVDDemuxFFmpeg::ReadInternal(bool keep)
               ConvertTimestamp(m_pkt.pkt.dts, stream->time_base.den, stream->time_base.num);
           pPacket->duration = DVD_SEC_TO_TIME((double)m_pkt.pkt.duration * stream->time_base.num /
                                               stream->time_base.den);
+          pPacket->m_keyFrame = (m_pkt.pkt.flags & AV_PKT_FLAG_KEY) != 0;
 
-          ApplySeamTimeOffset(pPacket, m_pkt.pkt.stream_index);
+          ApplySeamTimeOffset(pPacket, m_pkt.pkt);
 
           CDVDDemuxUtils::StoreSideData(pPacket, &m_pkt.pkt);
 
@@ -1340,8 +1398,8 @@ DemuxPacket* CDVDDemuxFFmpeg::ReadInternal(bool keep)
           m_pFormatContext->streams[pPacket->iStreamId]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO)
       {
         pPacket->isDualStream = m_dv_dual_stream;
-        pPacket->isELPackage =
-            stream && m_dv_dual_stream && stream->uniqueId != m_dv_bl_stream_idx;
+        pPacket->isELPackage = stream && m_dv_dual_stream && !pPacket->m_blurayPipClip &&
+                               stream->uniqueId != m_dv_bl_stream_idx;
       }
     }
     if (stream && m_pSSIF)

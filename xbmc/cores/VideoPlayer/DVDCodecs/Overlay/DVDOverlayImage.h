@@ -72,6 +72,7 @@ public:
     source_width = src.source_width;
     source_height = src.source_height;
     m_isHdrPq = src.m_isHdrPq;
+    m_isPipVideo = src.m_isPipVideo;
 
     pixels.resize(sub_h * linesize);
 
@@ -109,6 +110,7 @@ public:
   // palettes authored as BT.2020 + ST2084 code values) and must NOT be converted
   // again by GUI shaders.
   bool m_isHdrPq{false};
+  bool m_isPipVideo{false};
 
   int linesize{0};
   int x{0};
