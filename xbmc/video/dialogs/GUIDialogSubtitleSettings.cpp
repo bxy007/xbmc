@@ -169,6 +169,12 @@ std::string CGUIDialogSubtitleSettings::BrowseForSubtitle()
     }
   }
 
+  if (URIUtils::IsBlurayPath(strPath))
+  {
+    const CFileItem disc(URIUtils::GetDiscFile(strPath), false);
+    strPath = disc.GetLocalMetadataPath();
+  }
+
   std::string strMask =
       ".utf|.utf8|.utf-8|.sub|.srt|.smi|.rt|.txt|.ssa|.aqt|.jss|.ass|.vtt|.idx|.zip|.sup";
 

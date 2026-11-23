@@ -3208,33 +3208,27 @@ void CAMLCodec::SetVideoRect(const CRect &SrcRect, const CRect &DestRect)
     dst_rect.y2 = info.iHeight * 2 + info.iBlanking;
   }
 
-  if (aml_display_support_3d())
+  if (am_private->video_format != VFORMAT_H264MVC)
   {
-    int mvc_view_mode = 3;
-    switch (am_private->video_format)
+    // The video driver may still be in MVC mode after the HDMI sink changes.
+    aml_set_3d_video_mode(MODE_3D_DISABLE, false, 3);
+  }
+  else if (aml_display_support_3d())
+  {
+    const int mvc_view_mode = m_processInfo.GetVideoStereoMode() == "block_lr" ? 3 : 2;
+    switch (effectiveStereoMode)
     {
-      case VFORMAT_H264MVC:
-        {
-          mvc_view_mode = m_processInfo.GetVideoStereoMode() == "block_lr" ? 3 : 2;
-          switch (effectiveStereoMode)
-          {
-            case RENDER_STEREO_MODE_HARDWAREBASED:
-              aml_set_3d_video_mode(MODE_3D_ENABLE | MODE_3D_FA, true, mvc_view_mode);
-              break;
-            case RENDER_STEREO_MODE_SPLIT_VERTICAL:
-              aml_set_3d_video_mode(MODE_3D_OUT_LR | MODE_3D_FA | MODE_3D_ENABLE, false, mvc_view_mode);
-              break;
-            case RENDER_STEREO_MODE_SPLIT_HORIZONTAL:
-              aml_set_3d_video_mode(MODE_3D_OUT_TB | MODE_3D_FA | MODE_3D_ENABLE, false, mvc_view_mode);
-              break;
-            default:
-              aml_set_3d_video_mode(MODE_3D_TO_2D_R | MODE_3D_FA | MODE_3D_ENABLE, false, mvc_view_mode);
-              break;
-          }
-          break;
-        }
+      case RENDER_STEREO_MODE_HARDWAREBASED:
+        aml_set_3d_video_mode(MODE_3D_ENABLE | MODE_3D_FA, true, mvc_view_mode);
+        break;
+      case RENDER_STEREO_MODE_SPLIT_VERTICAL:
+        aml_set_3d_video_mode(MODE_3D_OUT_LR | MODE_3D_FA | MODE_3D_ENABLE, false, mvc_view_mode);
+        break;
+      case RENDER_STEREO_MODE_SPLIT_HORIZONTAL:
+        aml_set_3d_video_mode(MODE_3D_OUT_TB | MODE_3D_FA | MODE_3D_ENABLE, false, mvc_view_mode);
+        break;
       default:
-        aml_set_3d_video_mode(MODE_3D_DISABLE, false, mvc_view_mode);
+        aml_set_3d_video_mode(MODE_3D_TO_2D_R | MODE_3D_FA | MODE_3D_ENABLE, false, mvc_view_mode);
         break;
     }
   }

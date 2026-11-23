@@ -1198,8 +1198,8 @@ void CVideoPlayerVideo::ProcessOverlays(const VideoPicture& picture, double pts)
       // Only attempt RTTI for overlay types that can be backed by libass.
       if (pOverlay->IsOverlayType(DVDOVERLAY_TYPE_TEXT) || pOverlay->IsOverlayType(DVDOVERLAY_TYPE_SSA))
       {
-        auto libassOverlay = std::static_pointer_cast<CDVDOverlayLibass>(pOverlay);
-        if (libassOverlay && !libassOverlay->GetLibassHandler()->EventActive(pts2))
+        const auto& libassOverlay = static_cast<const CDVDOverlayLibass&>(*pOverlay);
+        if (!libassOverlay.GetLibassHandler()->EventActive(libassOverlay.GetEventPts(pts2)))
           continue;
       }
 

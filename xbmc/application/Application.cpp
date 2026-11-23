@@ -2640,7 +2640,10 @@ bool GetPlaylistIfDisc(CFileItem& item, CPlayerOptions& options)
   {
     case MenuDecision::SHOW_DISC_MENU:
     {
-      item.SetDynPath(URIUtils::GetBlurayMenuPath(item.GetDynPath(), item.IsDiscImage()));
+      const std::string menuPath{URIUtils::GetBlurayMenuPath(item.GetDynPath(), item.IsDiscImage())};
+      if (!menuPath.empty() && menuPath != item.GetDynPath())
+        item.SetProperty("bluray.original_dyn_path", item.GetDynPath());
+      item.SetDynPath(menuPath);
       break;
     }
     case MenuDecision::SHOW_SIMPLE_MENU:

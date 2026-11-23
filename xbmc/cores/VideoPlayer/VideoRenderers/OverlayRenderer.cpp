@@ -811,9 +811,9 @@ uint64_t CRenderer::GetOverlaySetSignature(int idx, bool& animated) const
         if (element.overlay_dvd->IsOverlayType(DVDOVERLAY_TYPE_TEXT) ||
             element.overlay_dvd->IsOverlayType(DVDOVERLAY_TYPE_SSA))
         {
-          const auto handler =
-              static_cast<CDVDOverlayLibass*>(element.overlay_dvd.get())->GetLibassHandler();
-          if (handler && handler->NeedsRerender(element.pts))
+          const auto& overlay = static_cast<const CDVDOverlayLibass&>(*element.overlay_dvd);
+          const auto handler = overlay.GetLibassHandler();
+          if (handler && handler->NeedsRerender(overlay.GetEventPts(element.pts)))
             needsContinuousRedraw = true;
         }
       }
@@ -1177,7 +1177,7 @@ std::shared_ptr<COverlay> CRenderer::ConvertLibass(
   // changes: Detect changes from previously rendered images, if > 0 they are changed
   int changes = 0;
   ASS_Image* images =
-      o.GetLibassHandler()->RenderImage(pts, rOpts, updateStyle, overlayStyle, &changes);
+      o.GetLibassHandler()->RenderImage(o.GetEventPts(pts), rOpts, updateStyle, overlayStyle, &changes);
 
   if (changes != 0)
     m_overlayRenderChangeGen.fetch_add(1, std::memory_order_relaxed);

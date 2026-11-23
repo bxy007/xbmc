@@ -952,6 +952,14 @@ bool CBitstreamConverter::Convert(uint8_t* pData, int iSize, double pts)
           m_inputSize = iSize;
           m_inputBuffer = pData;
           ScanAnnexbHdrStaticMetadata(pData, iSize);
+          if (m_removeHdr10Plus &&
+              (m_initial_hdrType == StreamHdrType::HDR_TYPE_HDR10 ||
+               m_initial_hdrType == StreamHdrType::HDR_TYPE_HDR10PLUS))
+          {
+            StripAnnexbHdr10Plus(pData, iSize);
+            if (m_inputSize == 0)
+              return false;
+          }
           if (!m_start_decode)
           {
             constexpr unsigned int START_DECODE_SCAN_FRAME_LIMIT = 120;
@@ -1231,7 +1239,7 @@ bool CBitstreamConverter::Convert(uint8_t *pData_bl, int iSize_bl, uint8_t *pDat
       switch (nal_type) {
 
         case HEVC_NAL_UNSPEC62: // DoVi RPU
-          if (!m_removeDovi && !convert_hdr10plus_meta)
+          if (!ShouldRemoveDovi() && !convert_hdr10plus_meta)
           {
             ProcessDoViRpuWrap(buf, size, &m_convertBuffer, offset, pts);
             au_has_rpu = true;
@@ -1240,7 +1248,8 @@ bool CBitstreamConverter::Convert(uint8_t *pData_bl, int iSize_bl, uint8_t *pDat
           break;
 
         default: // Package other data into HEVC_NAL_UNSPEC63 DoVi EL
-          if (!m_removeDovi && !convert_hdr10plus_meta && (m_convert_dovi == DOVIMode::MODE_NONE) &&
+          if (!ShouldRemoveDovi() && !convert_hdr10plus_meta &&
+              (m_convert_dovi == DOVIMode::MODE_NONE) &&
               (elReady || m_hints.stills ||
                (nal_type >= HEVC_NAL_VPS && nal_type <= HEVC_NAL_PPS)))
             BitstreamAllocAndCopy(&m_convertBuffer, &offset, buf, size, HEVC_NAL_UNSPEC63);
@@ -1330,6 +1339,11 @@ void CBitstreamConverter::ResetStartDecode()
 bool CBitstreamConverter::CanStartDecode() const
 {
   return m_start_decode;
+}
+
+bool CBitstreamConverter::ShouldRemoveDovi() const
+{
+  return m_removeDovi && m_hints.hdrType == StreamHdrType::HDR_TYPE_HDR10PLUS;
 }
 
 bool CBitstreamConverter::BitstreamConvertInitAVC(void* in_extradata, int in_extrasize)
@@ -1689,6 +1703,51 @@ void CBitstreamConverter::ScanAnnexbHdrStaticMetadata(const uint8_t* pData, int 
     m_annexbHdrStaticDone = true;
 }
 
+void CBitstreamConverter::StripAnnexbHdr10Plus(const uint8_t* data, int size)
+{
+  if (size < 6)
+    return;
+
+  const uint8_t* const end = data + size;
+  const uint8_t* unchanged = data;
+  m_annexbHdr10PlusBuffer.clear();
+  const uint8_t* start = avc_find_startcode(data, end);
+  while (start < end)
+  {
+    const uint8_t* nal = start + (start[2] == 1 ? 3 : 4);
+    const uint8_t* next = avc_find_startcode(nal, end);
+    if (next - nal > 2 && ((nal[0] >> 1) & 0x3f) == HEVC_NAL_SEI_PREFIX)
+    {
+      const size_t nalSize = next - nal;
+      const auto meta = CHevcSei::ExtractMetadata(nal, nalSize, m_seiBuf, m_seiMessages);
+      if (meta.hdr10Plus)
+      {
+        if (m_hints.hdrType == StreamHdrType::HDR_TYPE_HDR10)
+        {
+          m_hints.hdrType = StreamHdrType::HDR_TYPE_HDR10PLUS;
+          m_dataCacheCore.SetVideoSourceHdrType(StreamHdrType::HDR_TYPE_HDR10PLUS);
+        }
+
+        const auto rewritten = CHevcSei::RemoveHdr10PlusFromSeiNalu(nal, nalSize);
+        // Keep the original start code if other SEI messages remain in this NAL.
+        m_annexbHdr10PlusBuffer.insert(m_annexbHdr10PlusBuffer.end(), unchanged,
+                                      rewritten.empty() ? start : nal);
+        m_annexbHdr10PlusBuffer.insert(m_annexbHdr10PlusBuffer.end(), rewritten.begin(),
+                                      rewritten.end());
+        unchanged = next;
+      }
+    }
+    start = next;
+  }
+
+  if (unchanged != data)
+  {
+    m_annexbHdr10PlusBuffer.insert(m_annexbHdr10PlusBuffer.end(), unchanged, end);
+    m_inputBuffer = m_annexbHdr10PlusBuffer.data();
+    m_inputSize = static_cast<int>(m_annexbHdr10PlusBuffer.size());
+  }
+}
+
 void CBitstreamConverter::UpdateHdrStaticMetadata() const {
 
   HDRStaticMetadataInfo hdrStaticMetadataInfo;
@@ -1751,8 +1810,6 @@ void CBitstreamConverter::ProcessSeiPrefix(uint8_t *buf, int32_t nal_size, uint8
 
   if (metadata.hdr10Plus) {
 
-    aml_kodi_set_cd_cs(2);
-
     bool isDual = (m_initial_hdrType == StreamHdrType::HDR_TYPE_DOLBYVISION); // Original is DV and now also found HDR10+ so is dual.
     bool considerAsHdr10Plus = (!isDual || m_dual_priority_Hdr10Plus || m_prefer_Hdr10Plus_conversion);
 
@@ -1778,6 +1835,8 @@ void CBitstreamConverter::ProcessSeiPrefix(uint8_t *buf, int32_t nal_size, uint8
       rewritten = CHevcSei::RemoveHdr10PlusFromSeiNalu(buf, nal_size);
       haveRewrite = true;
     }
+    else if (considerAsHdr10Plus)
+      aml_kodi_set_cd_cs(2);
   }
 
   if (metadata.hdrVivid && m_convert_HdrVivid && !convert_hdr10plus_meta)
@@ -2036,7 +2095,7 @@ bool CBitstreamConverter::BitstreamConvert(uint8_t* pData, int iSize, uint8_t **
           break;
 
         case HEVC_NAL_UNSPEC62: // DoVi RPU
-          if (!m_removeDovi && !convert_hdr10plus_meta)
+          if (!ShouldRemoveDovi() && !convert_hdr10plus_meta)
           {
             ProcessDoViRpu(buf, nal_size, poutbuf, poutbuf_size, pts);
             au_has_rpu = true;
@@ -2045,7 +2104,8 @@ bool CBitstreamConverter::BitstreamConvert(uint8_t* pData, int iSize, uint8_t **
           break;
 
         case HEVC_NAL_UNSPEC63: // DoVi EL
-          if (!m_removeDovi && !convert_hdr10plus_meta && (m_convert_dovi == DOVIMode::MODE_NONE))
+          if (!ShouldRemoveDovi() && !convert_hdr10plus_meta &&
+              (m_convert_dovi == DOVIMode::MODE_NONE))
             BitstreamAllocAndCopy(poutbuf, poutbuf_size, nullptr, 0, buf, nal_size, unit_type);
           break;
 

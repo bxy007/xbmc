@@ -22,8 +22,7 @@
 #include "utils/log.h"
 
 CRendererAML::CRendererAML()
- : m_prevVPts(DVD_NOPTS_VALUE)
- , m_bConfigured(false)
+ : m_bConfigured(false)
 {
   CLog::Log(LOGINFO, "Constructing CRendererAML");
 }
@@ -137,7 +136,6 @@ bool CRendererAML::Supports(ERENDERFEATURE feature) const
 void CRendererAML::Reset()
 {
   std::array<int, 2> reset_arr[m_numRenderBuffers];
-  m_prevVPts = DVD_NOPTS_VALUE;
 
   for (int i = 0 ; i < m_numRenderBuffers ; ++i)
   {
@@ -173,18 +171,14 @@ bool CRendererAML::Flush(bool saveBuffers)
 
 void CRendererAML::CommitVideoLayer(int index, CRect src, CRect dst)
 {
-  CAMLVideoBuffer *amli = static_cast<CAMLVideoBuffer *>(m_buffers[index].videoBuffer);
-  if(amli && amli->m_amlCodec)
-  {
-    uint64_t pts = amli->m_omxPts;
-    if (pts != m_prevVPts)
-    {
-      amli->m_amlCodec->ReleaseFrame(amli->m_bufferIndex);
-      amli->m_amlCodec->SetVideoRect(src, dst);
-      amli->m_amlCodec = nullptr; //Mark frame as processed
-      m_prevVPts = pts;
-    }
-  }
+  auto* buffer = static_cast<CAMLVideoBuffer*>(m_buffers[index].videoBuffer);
+  if (!buffer || !buffer->m_amlCodec)
+    return;
+
+  // Playlists can reuse timestamps. Submit each decoder buffer only once.
+  buffer->m_amlCodec->ReleaseFrame(buffer->m_bufferIndex);
+  buffer->m_amlCodec->SetVideoRect(src, dst);
+  buffer->m_amlCodec.reset();
 }
 
 void CRendererAML::RenderUpdate(int index, int index2, bool clear, unsigned int flags, unsigned int alpha)

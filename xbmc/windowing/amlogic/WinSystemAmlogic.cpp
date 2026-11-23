@@ -123,6 +123,54 @@ bool CWinSystemAmlogic::DestroyWindowSystem()
   return true;
 }
 
+RENDER_STEREO_MODE CWinSystemAmlogic::GetHdmiStereoMode() const
+{
+  const auto mode = GetGfxContext().GetStereoMode();
+  switch (mode)
+  {
+    case RENDER_STEREO_MODE_SPLIT_VERTICAL:
+    case RENDER_STEREO_MODE_SPLIT_HORIZONTAL:
+    case RENDER_STEREO_MODE_HARDWAREBASED:
+      return mode;
+    default:
+      return RENDER_STEREO_MODE_OFF;
+  }
+}
+
+bool CWinSystemAmlogic::IsHdmiStereoModeChanged() const
+{
+  return m_stereo_mode != GetHdmiStereoMode();
+}
+
+RESOLUTION CWinSystemAmlogic::GetStereoResolutionAtCurrentTiming() const
+{
+  auto& gfxContext = GetGfxContext();
+  const RESOLUTION currentRes = gfxContext.GetVideoResolution();
+  const RESOLUTION_INFO current = gfxContext.GetResInfo(currentRes);
+  const bool framePacking = GetHdmiStereoMode() == RENDER_STEREO_MODE_HARDWAREBASED;
+  if (framePacking == ((current.dwFlags & D3DPRESENTFLAG_MODE3DFP) != 0))
+    return currentRes;
+
+  // Frame packing also changes the framebuffer geometry. Use the matching
+  // resolution entry without changing the screen size or refresh rate.
+  std::vector<RESOLUTION> resolutions;
+  gfxContext.GetAllowedResolutions(resolutions);
+  for (const auto resolution : resolutions)
+  {
+    const RESOLUTION_INFO candidate = gfxContext.GetResInfo(resolution);
+    if (resolution >= RES_DESKTOP &&
+        framePacking == ((candidate.dwFlags & D3DPRESENTFLAG_MODE3DFP) != 0) &&
+        candidate.iScreenWidth == current.iScreenWidth &&
+        candidate.iScreenHeight == current.iScreenHeight &&
+        (candidate.dwFlags & D3DPRESENTFLAG_INTERLACED) ==
+            (current.dwFlags & D3DPRESENTFLAG_INTERLACED) &&
+        ResolutionRefreshRateEquals(candidate.fRefreshRate, current.fRefreshRate))
+      return resolution;
+  }
+
+  return framePacking ? RES_INVALID : currentRes;
+}
+
 bool CWinSystemAmlogic::CreateNewWindow(const std::string& name,
                                     bool fullScreen,
                                     RESOLUTION_INFO& res)

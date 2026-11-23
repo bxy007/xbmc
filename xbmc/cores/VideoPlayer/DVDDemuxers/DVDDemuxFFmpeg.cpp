@@ -38,6 +38,7 @@
 #include "utils/FontUtils.h"
 #include "utils/LangCodeExpander.h"
 #include "utils/StereoAspect.h"
+#include "utils/StreamDetails.h"
 #include "utils/StreamUtils.h"
 #include "utils/StringUtils.h"
 #include "utils/URIUtils.h"
@@ -2167,7 +2168,9 @@ CDemuxStream* CDVDDemuxFFmpeg::AddStream(int streamIdx)
             st->colorPrimaries = AVCOL_PRI_BT2020;
           if (st->colorSpace == AVCOL_SPC_UNSPECIFIED)
             st->colorSpace = AVCOL_SPC_BT2020_NCL;
-          if (st->colorTransferCharacteristic == AVCOL_TRC_UNSPECIFIED)
+          if (st->colorTransferCharacteristic == AVCOL_TRC_UNSPECIFIED ||
+              (st->hdr_type == StreamHdrType::HDR_TYPE_HLG &&
+               st->colorTransferCharacteristic == AVCOL_TRC_BT2020_10))
             st->colorTransferCharacteristic =
                 (st->hdr_type == StreamHdrType::HDR_TYPE_HLG) ? AVCOL_TRC_ARIB_STD_B67
                                                              : AVCOL_TRC_SMPTE2084;
@@ -3245,28 +3248,31 @@ StreamHdrType CDVDDemuxFFmpeg::DetermineHdrType(AVStream* pStream)
   else if (pStream->codecpar->color_trc == AVCOL_TRC_ARIB_STD_B67) // HLG
     hdrType = StreamHdrType::HDR_TYPE_HLG;
   else if (pStream->codecpar->codec_id == AV_CODEC_ID_HEVC &&
-           pStream->codecpar->color_trc == AVCOL_TRC_BT2020_10 &&
-           pStream->codecpar->color_primaries == AVCOL_PRI_BT2020 &&
-           !av_packet_side_data_get(pStream->codecpar->coded_side_data,
-                                    pStream->codecpar->nb_coded_side_data,
-                                    AV_PKT_DATA_MASTERING_DISPLAY_METADATA) &&
+           (pStream->codecpar->color_trc == AVCOL_TRC_UNSPECIFIED ||
+            (pStream->codecpar->color_trc == AVCOL_TRC_BT2020_10 &&
+             pStream->codecpar->color_primaries == AVCOL_PRI_BT2020)) &&
            pStream->codecpar->extradata && pStream->codecpar->extradata_size > 0)
   {
+    // Some containers omit the transfer characteristic present in the HEVC SPS.
     const auto vui_transfer = CBitstreamConverter::hevc_extract_sps_vui_transfer(
         pStream->codecpar->extradata, pStream->codecpar->extradata_size);
     if (vui_transfer && *vui_transfer == AVCOL_TRC_ARIB_STD_B67)
-    {
       hdrType = StreamHdrType::HDR_TYPE_HLG;
+    else if (pStream->codecpar->color_trc == AVCOL_TRC_UNSPECIFIED && vui_transfer &&
+             *vui_transfer == AVCOL_TRC_SMPTE2084)
+      hdrType = StreamHdrType::HDR_TYPE_HDR10;
+
+    if (hdrType != StreamHdrType::HDR_TYPE_NONE)
       logM(LOGINFO,
-           "HLG override: MKV container reports BT.2020-10 transfer but HEVC SPS VUI "
-           "reports ARIB STD B.67; classifying stream as HLG");
-    }
+           "HEVC SPS VUI identifies {} (container transfer {})",
+           CStreamDetails::HdrTypeToString(hdrType),
+           static_cast<int>(pStream->codecpar->color_trc));
   }
-  // file could be SMPTE2086 which FFmpeg currently returns as unknown
-  // so use the presence of static metadata to detect it
-  else if (av_packet_side_data_get(pStream->codecpar->coded_side_data,
-                                   pStream->codecpar->nb_coded_side_data,
-                                   AV_PKT_DATA_MASTERING_DISPLAY_METADATA))
+  // Mastering display metadata alone does not identify the transfer function.
+  if (hdrType == StreamHdrType::HDR_TYPE_NONE &&
+      av_packet_side_data_get(pStream->codecpar->coded_side_data,
+                              pStream->codecpar->nb_coded_side_data,
+                              AV_PKT_DATA_MASTERING_DISPLAY_METADATA))
     hdrType = StreamHdrType::HDR_TYPE_HDR10;
 
 #ifdef HAVE_LIBBLURAY

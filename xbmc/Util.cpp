@@ -2058,7 +2058,10 @@ void CUtil::ScanForExternalSubtitles(const std::string& strMovie, std::vector<st
 {
   auto start = std::chrono::steady_clock::now();
 
-  CFileItem item(strMovie, false);
+  // A Blu-ray menu has a virtual path ending in /menu instead of a video extension.
+  const std::string videoPath =
+      URIUtils::IsBlurayPath(strMovie) ? URIUtils::GetDiscFile(strMovie) : strMovie;
+  CFileItem item(videoPath, false);
   if ((item.IsInternetStream() && !URIUtils::IsOnLAN(item.GetDynPath()))
     || item.IsPlayList()
     || item.IsLiveTV()
@@ -2070,7 +2073,7 @@ void CUtil::ScanForExternalSubtitles(const std::string& strMovie, std::vector<st
   std::string strBasePath;
   std::string strSubtitle;
 
-  GetVideoBasePathAndFileName(strMovie, strBasePath, strSubtitle);
+  GetVideoBasePathAndFileName(videoPath, strBasePath, strSubtitle);
 
   CFileItemList items;
   const std::vector<std::string> common_sub_dirs = { "subs", "subtitles", "vobsubs", "sub", "vobsub", "subtitle" };
@@ -2158,6 +2161,11 @@ ExternalStreamInfo CUtil::GetExternalStreamDetailsFromFilename(const std::string
 
   std::string videoBaseName = URIUtils::GetFileName(videoPath);
   URIUtils::RemoveExtension(videoBaseName);
+  if (URIUtils::IsBlurayPath(videoPath))
+  {
+    std::string discDirectory;
+    GetVideoBasePathAndFileName(URIUtils::GetDiscFile(videoPath), discDirectory, videoBaseName);
+  }
 
   std::string toParse = URIUtils::GetFileName(associatedFile);
   URIUtils::RemoveExtension(toParse);

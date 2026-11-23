@@ -20,6 +20,9 @@
 #include "windowing/WinSystem.h"
 
 #include <cstring>
+#include <limits>
+#include <memory>
+#include <new>
 #include <utility>
 
 void CScreenshotSurfaceAML::Register()
@@ -64,22 +67,36 @@ bool CScreenshotSurfaceAML::CaptureSurface(ScreenshotPng* png)
     glReadBuffer(GL_BACK);
 #endif
 
-    // get current viewport
-    GLint viewport[4];
+    // GL_VIEWPORT returns x, y, width and height. In frame packing, y can
+    // be greater than the height of one eye.
+    GLint viewport[4]{};
     glGetIntegerv(GL_VIEWPORT, viewport);
 
-    m_width = viewport[2] - viewport[0];
-    m_height = viewport[3] - viewport[1];
-    m_stride = m_width * 4;
-    auto surface = new unsigned char[m_stride * m_height];
+    const int width = viewport[2];
+    const int height = viewport[3];
+    constexpr int bytesPerPixel = 4;
+    if (width <= 0 || height <= 0 || width > std::numeric_limits<int>::max() / bytesPerPixel ||
+        static_cast<size_t>(width) * bytesPerPixel >
+            std::numeric_limits<size_t>::max() / static_cast<size_t>(height))
+    {
+      CLog::Log(LOGERROR, "CScreenshotSurfaceAML: invalid viewport {}x{}", width, height);
+      return false;
+    }
+
+    const int stride = width * bytesPerPixel;
+    const size_t size = static_cast<size_t>(stride) * height;
+    const std::unique_ptr<unsigned char[]> surface(new (std::nothrow) unsigned char[size]);
+    if (!surface)
+      return false;
+    std::unique_ptr<unsigned char[]> buffer(new (std::nothrow) unsigned char[size]);
+    if (!buffer)
+      return false;
 
     // read pixels from the backbuffer
 #if HAS_GLES >= 2
-    glReadPixels(viewport[0], viewport[1], viewport[2], viewport[3], GL_RGBA, GL_UNSIGNED_BYTE,
-                 (GLvoid*)surface);
+    glReadPixels(viewport[0], viewport[1], width, height, GL_RGBA, GL_UNSIGNED_BYTE, surface.get());
 #else
-    glReadPixels(viewport[0], viewport[1], viewport[2], viewport[3], GL_BGRA, GL_UNSIGNED_BYTE,
-                 (GLvoid*)surface);
+    glReadPixels(viewport[0], viewport[1], width, height, GL_BGRA, GL_UNSIGNED_BYTE, surface.get());
 #endif
 
     guiState.guiHdr = winSystem->GetGfxContext().GetGuiHdr();
@@ -87,22 +104,24 @@ bool CScreenshotSurfaceAML::CaptureSurface(ScreenshotPng* png)
     guiState.sdrSaturation = winSystem->GetGuiSdrSaturation();
     guiState.limitedColor = winSystem->UseLimitedColor();
 
-    // make a new buffer and copy the read image to it with the Y axis inverted
-    m_buffer = new unsigned char[m_stride * m_height];
-    for (int y = 0; y < m_height; y++)
+    // Copy the read image with the Y axis inverted.
+    for (int y = 0; y < height; y++)
     {
+      unsigned char* row = surface.get() + static_cast<size_t>(height - y - 1) * stride;
 #ifdef HAS_GLES
       // we need to save in BGRA order so swap RGBA -> BGRA
-      unsigned char* swap_pixels = surface + (m_height - y - 1) * m_stride;
-      for (int x = 0; x < m_width; x++, swap_pixels += 4)
+      for (unsigned char* pixel = row; pixel < row + stride; pixel += bytesPerPixel)
       {
-        std::swap(swap_pixels[0], swap_pixels[2]);
+        std::swap(pixel[0], pixel[2]);
       }
 #endif
-      std::memcpy(m_buffer + y * m_stride, surface + (m_height - y - 1) * m_stride, m_stride);
+      std::memcpy(buffer.get() + static_cast<size_t>(y) * stride, row, stride);
     }
-
-    delete[] surface;
+    delete[] m_buffer;
+    m_buffer = buffer.release();
+    m_width = width;
+    m_height = height;
+    m_stride = stride;
   }
 
   // Composites the current visible hardware video plane under m_buffer and decodes HDR/DV/PQ GUI.

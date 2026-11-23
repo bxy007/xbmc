@@ -489,7 +489,7 @@ void CRenderManager::FrameMove()
   }
 
   if (!m_asyncVideoWorkerActive.load(std::memory_order_relaxed))
-    VideoBody(firstFrame);
+    VideoBody(firstFrame, false);
   else if (firstFrame || m_overlays.HasMenu() ||
            m_renderedOverlay.load(std::memory_order_relaxed))
     m_playerPort->UpdateGuiRender(true);
@@ -516,7 +516,7 @@ void CRenderManager::FrameMove()
   }
 }
 
-void CRenderManager::VideoBody(bool firstFrame)
+void CRenderManager::VideoBody(bool firstFrame, bool async)
 {
   {
     std::unique_lock lock(m_statelock);
@@ -526,14 +526,25 @@ void CRenderManager::VideoBody(bool firstFrame)
   {
     std::unique_lock lock2(m_presentlock);
 
-    if (m_queued.empty())
+    const bool queueEmpty = m_queued.empty();
+    if (!queueEmpty)
+      m_presentTimer.Set(1000ms);
+
+    // Some GUI windows never call Render(). Retire an unrendered picture on the
+    // next GUI frame, allowing one frame for a BOB picture's second field.
+    if (!async && (m_presentstep == PRESENT_FRAME ||
+                   (m_presentstep == PRESENT_FRAME2 && !m_syncSecondFieldPending)))
+    {
+      m_presentstep = queueEmpty ? PRESENT_IDLE : PRESENT_READY;
+      NotifyPresentWaiters();
+    }
+    else if (queueEmpty && m_presentstep == PRESENT_READY)
     {
       m_presentstep = PRESENT_IDLE;
+      NotifyPresentWaiters();
     }
-    else
-    {
-      m_presentTimer.Set(1000ms);
-    }
+    if (!async)
+      m_syncSecondFieldPending = false;
 
     m_cadenceArmed = CServiceBroker::GetLogging().IsLogLevelLogged(LOGDEBUG) &&
                      CServiceBroker::GetLogging().CanLogComponent(LOGAVTIMING);
@@ -716,6 +727,7 @@ void CRenderManager::SetAsyncVideoWorkerActive(bool active)
     {
       std::unique_lock lock2(m_presentlock);
       m_asyncDiscardPause = false;
+      m_syncSecondFieldPending = false;
       m_asyncMirror.presentsource = m_presentsource;
       m_asyncMirror.pts = m_Queue[m_presentsource].pts;
     }
@@ -839,7 +851,7 @@ bool CRenderManager::AsyncVideoWorkerIteration()
     return !m_asyncWorkerStop.load(std::memory_order_relaxed);
   }
 
-  VideoBody(false);
+  VideoBody(false, true);
 
   bool haveFrame = false;
   bool presentStarted = false;
@@ -1819,7 +1831,10 @@ void CRenderManager::Render(bool clear, DWORD flags, DWORD alpha, bool gui)
     if (m_presentstep == PRESENT_FRAME)
     {
       if (present.presentmethod == PRESENT_METHOD_BOB)
+      {
         m_presentstep = PRESENT_FRAME2;
+        m_syncSecondFieldPending = true;
+      }
       else
         m_presentstep = PRESENT_IDLE;
     }
@@ -1956,9 +1971,14 @@ void CRenderManager::UpdateResolution(bool force)
   if (m_bTriggerUpdateResolution)
   {
     bool earlyDvStartup = false;
+    bool stereoModeChanged = false;
 #if defined(HAS_LIBAMCODEC)
-    if (auto* window = dynamic_cast<CWinSystemAmlogic*>(CServiceBroker::GetWinSystem()))
+    const auto window = dynamic_cast<CWinSystemAmlogic*>(CServiceBroker::GetWinSystem());
+    if (window)
+    {
       earlyDvStartup = window->IsVideoModeSwitchPending();
+      stereoModeChanged = window->IsHdmiStereoModeChanged();
+    }
 #endif
     // Stream hints already supplied dimensions/fps before decoder startup.
     // Once DV is ready, overlap the target modeset with first-frame decoding
@@ -1975,35 +1995,46 @@ void CRenderManager::UpdateResolution(bool force)
           playbackMode == STEREOSCOPIC_PLAYBACK_MODE_ASK &&
           user_stereo_mode == RENDER_STEREO_MODE_UNDEFINED)
         m_bTriggerUpdateResolution = false;
-      if (m_bTriggerUpdateResolution &&
-          CServiceBroker::GetSettingsComponent()->GetSettings()->GetInt(CSettings::SETTING_VIDEOPLAYER_ADJUSTREFRESHRATE) != ADJUST_REFRESHRATE_OFF && m_fps > 0.0f)
+      const bool adjustTiming = m_bTriggerUpdateResolution && m_fps > 0.0f &&
+                                CServiceBroker::GetSettingsComponent()->GetSettings()->GetInt(
+                                    CSettings::SETTING_VIDEOPLAYER_ADJUSTREFRESHRATE) !=
+                                    ADJUST_REFRESHRATE_OFF;
+      if (adjustTiming || stereoModeChanged)
       {
         auto& gfxContext = CServiceBroker::GetWinSystem()->GetGfxContext();
+        const auto currentHdrType = gfxContext.GetHDRType();
+        const auto currentRes = gfxContext.GetVideoResolution();
+        auto desiredHdrType = currentHdrType;
+        auto desiredRes = currentRes;
 
-        // Some platforms send a follow-up "reassert" trigger with no params (fps/width/height = 0)
-        // after a mode switch/reset. In that case, prefer keeping the currently applied HDR type
-        // (if any) to avoid an unnecessary second mode switch (e.g. VS10 HDR10->DV mapping).
-        const StreamHdrType hdrOverride = m_hdrType_override;
-        StreamHdrType desiredHdrType = (hdrOverride != StreamHdrType::HDR_TYPE_NONE)
-                                           ? hdrOverride
-                                           : m_picture.hdrType;
-        if (hdrOverride == StreamHdrType::HDR_TYPE_NONE && m_bTriggerUpdateResolutionNoParams)
+        if (adjustTiming)
         {
-          const auto currentHdrType = gfxContext.GetHDRType();
-          if (currentHdrType != StreamHdrType::HDR_TYPE_NONE)
-            desiredHdrType = currentHdrType;
+          // Some platforms send a follow-up trigger with no stream parameters after a
+          // reset. Keep the applied HDR type to avoid a second mode switch.
+          const StreamHdrType hdrOverride = m_hdrType_override;
+          if (hdrOverride != StreamHdrType::HDR_TYPE_NONE)
+            desiredHdrType = hdrOverride;
+          else if (!m_bTriggerUpdateResolutionNoParams ||
+                   currentHdrType == StreamHdrType::HDR_TYPE_NONE)
+            desiredHdrType = m_picture.hdrType;
+
+          desiredRes = CResolutionUtils::ChooseBestResolution(
+              m_fps, m_picture.iWidth, m_picture.iHeight, m_triggerStereoNonEmpty);
         }
+#if defined(HAS_LIBAMCODEC)
+        else if (window)
+          desiredRes = window->GetStereoResolutionAtCurrentTiming();
+#endif
 
-        const RESOLUTION desiredRes = CResolutionUtils::ChooseBestResolution(
-            m_fps, m_picture.iWidth, m_picture.iHeight, m_triggerStereoNonEmpty);
+        // HDMI 3D can change independently of the resolution and HDR type.
+        const bool needsApply = force || stereoModeChanged ||
+                                currentHdrType != desiredHdrType || currentRes != desiredRes;
 
-        const bool needsApply = force || gfxContext.GetHDRType() != desiredHdrType ||
-                                gfxContext.GetVideoResolution() != desiredRes;
-
-        if (needsApply)
+        if (needsApply && desiredRes != RES_INVALID)
         {
           ParkVideoWorker(2000ms);
-          gfxContext.SetHDRType(desiredHdrType);
+          if (adjustTiming)
+            gfxContext.SetHDRType(desiredHdrType);
           gfxContext.SetVideoResolution(desiredRes, false);
           UpdateVideoLatencyTweak();
 

@@ -22,7 +22,10 @@ public:
   {
   }
 
-  CDVDOverlayLibass(const CDVDOverlayLibass& src) : CDVDOverlay(src), m_libass(src.m_libass) {}
+  CDVDOverlayLibass(const CDVDOverlayLibass& src)
+    : CDVDOverlay(src), m_libass(src.m_libass), m_fileTimeOffset(src.m_fileTimeOffset)
+  {
+  }
 
   ~CDVDOverlayLibass() override = default;
 
@@ -32,6 +35,10 @@ public:
   */
   std::shared_ptr<CDVDSubtitlesLibass> GetLibassHandler() const { return m_libass; }
 
+  void SetFileTimeOffset(double offset) { m_fileTimeOffset = offset; }
+  double GetEventPts(double videoPts) const { return videoPts + m_fileTimeOffset; }
+
 private:
   std::shared_ptr<CDVDSubtitlesLibass> m_libass;
+  double m_fileTimeOffset{0.0};
 };

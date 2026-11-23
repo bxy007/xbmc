@@ -560,6 +560,8 @@ bool CDVDVideoCodecAmlogic::Open(CDVDStreamInfo &hints, CDVDCodecOptions &option
         auto settings = CServiceBroker::GetSettingsComponent()->GetSettings();
 
         const int dualPriority = settings->GetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_DUAL_PRIORITY);
+        const bool convertHdr10Plus =
+            settings->GetBool(CSettings::SETTING_COREELEC_AMLOGIC_DV_HDR10PLUS_CONVERT);
         if (dualPriority == 1)
           m_bitstream->SetDualPriorityHdr10Plus(true);
 
@@ -609,7 +611,7 @@ bool CDVDVideoCodecAmlogic::Open(CDVDStreamInfo &hints, CDVDCodecOptions &option
           CLog::Log(LOGINFO, "{}::{} - HEVC bitstream - if stream also contains HDR10+, native HDR10+ has priority.",
                     __MODULE_NAME__, __FUNCTION__);
         }
-        else if (settings->GetBool(CSettings::SETTING_COREELEC_AMLOGIC_DV_HDR10PLUS_CONVERT))
+        else if (convertHdr10Plus)
         {
           bool preferConvertHdr10Plus = settings->GetBool(CSettings::SETTING_COREELEC_AMLOGIC_DV_HDR10PLUS_PREFER_CONVERT);
           m_bitstream->SetPreferCovertHdr10Plus(preferConvertHdr10Plus);
@@ -620,7 +622,7 @@ bool CDVDVideoCodecAmlogic::Open(CDVDStreamInfo &hints, CDVDCodecOptions &option
         }
 
         // Potential HDR10+ (Cannot tell at this point)
-        if (settings->GetBool(CSettings::SETTING_COREELEC_AMLOGIC_DV_HDR10PLUS_CONVERT))
+        if (convertHdr10Plus)
         {
           PeakBrightnessSource peakBrightnessSource = static_cast<PeakBrightnessSource>(settings->GetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_HDR10PLUS_PEAK_BRIGHTNESS_SOURCE));
           CLog::Log(LOGDEBUG, "{}::{} - HDR10 HEVC bitstream - if HDR10+ then will be converted to Dolby Vision P8.1 with brightness source [{:d}]",
@@ -641,21 +643,18 @@ bool CDVDVideoCodecAmlogic::Open(CDVDStreamInfo &hints, CDVDCodecOptions &option
                     __MODULE_NAME__, __FUNCTION__);
         }
 
-        // If HDR10 or Dual Priority HDR10+ and doing VS10 - remove the HDR10+ and DV if present to avoid conflict with VS10.
-        if (((m_hints.hdrType == StreamHdrType::HDR_TYPE_HDR10 && dualPriority != 0) || dualPriority == 1))
+        // HDR10+ can be signaled by disc metadata or detected later in an HDR10 stream.
+        const bool hdr10BaseLayer = m_hints.hdrType == StreamHdrType::HDR_TYPE_HDR10 ||
+                                    m_hints.hdrType == StreamHdrType::HDR_TYPE_HDR10PLUS;
+        if ((dualPriority == 1 || (!convertHdr10Plus && hdr10BaseLayer)) &&
+            aml_vs10_by_setting(CSettings::SETTING_COREELEC_AMLOGIC_DV_VS10_HDR10PLUS) <
+                DOLBY_VISION_OUTPUT_MODE_BYPASS)
         {
-          unsigned int mode(aml_vs10_by_setting(CSettings::SETTING_COREELEC_AMLOGIC_DV_VS10_HDR10PLUS));
-          if (mode < DOLBY_VISION_OUTPUT_MODE_BYPASS)
-          {
-            // for VS10 conversion need to remove the HDR10plus metadata.
-            CLog::Log(LOGINFO, "{}::{} - HDR10 HEVC bitstream - if HDR10+ then metadata will be removed to allow correct VS10 processing",
-              __MODULE_NAME__, __FUNCTION__);
-            m_bitstream->SetRemoveHdr10Plus(true);
+          logM(LOGINFO, "HEVC bitstream - remove HDR10+ metadata for VS10 processing");
+          m_bitstream->SetRemoveHdr10Plus(true);
+          m_stripHdr10Plus = true;
+          if (dualPriority == 1)
             m_bitstream->SetRemoveDovi(true);
-            m_stripHdr10Plus = true;
-            if (m_hints.dovi.dv_profile > 0)
-              m_streamMeta.flags.push_back("rpu-removed");
-          }
         }
       }
 
@@ -1300,7 +1299,7 @@ bool CDVDVideoCodecAmlogic::AddData(const DemuxPacket &packet)
     if (rawSideData && rawSideData->size >= 6)
     {
       AMLLatchHdr10PlusT35(rawSideData->data, rawSideData->size, sideDataMeta);
-      if (m_Codec->AddHDR10PData(rawSideData->data, rawSideData->size) < 0)
+      if (!m_stripHdr10Plus && m_Codec->AddHDR10PData(rawSideData->data, rawSideData->size) < 0)
         LOG_THROTTLE_PERIODIC(LOGDEBUG, LOGVIDEO, 1000, "CDVDVideoCodecAmlogic::{}: hdr10p raw side data ioctl failed, size {}", __FUNCTION__, rawSideData->size);
     }
     else
@@ -1316,7 +1315,7 @@ bool CDVDVideoCodecAmlogic::AddData(const DemuxPacket &packet)
         if (av_dynamic_hdr_plus_to_t35(reinterpret_cast<const AVDynamicHDRPlus*>(sideData->data), &payload, &payloadSize) >= 0)
         {
           AMLLatchHdr10PlusT35(t35, payloadSize + 6, sideDataMeta);
-          if (m_Codec->AddHDR10PData(t35, payloadSize + 6) < 0)
+          if (!m_stripHdr10Plus && m_Codec->AddHDR10PData(t35, payloadSize + 6) < 0)
             LOG_THROTTLE_PERIODIC(LOGDEBUG, LOGVIDEO, 1000, "CDVDVideoCodecAmlogic::{}: hdr10p side data ioctl failed, size {}", __FUNCTION__, payloadSize + 6);
         }
       }
@@ -1325,11 +1324,14 @@ bool CDVDVideoCodecAmlogic::AddData(const DemuxPacket &packet)
 
   m_last_added = m_Codec->AddData(pData, iSize, effectiveDts, m_hints.ptsinvalid ? DVD_NOPTS_VALUE : effectivePts);
 
-  if (m_stripHdr10Plus && !m_pendingMeta.hdr10pSei.empty() &&
+  if (m_stripHdr10Plus &&
+      (!m_pendingMeta.hdr10pSei.empty() || !sideDataMeta.hdr10pSei.empty()) &&
       std::find(m_streamMeta.flags.begin(), m_streamMeta.flags.end(), "hdr10plus-removed") ==
           m_streamMeta.flags.end())
   {
     m_streamMeta.flags.push_back("hdr10plus-removed");
+    if (m_bitstream->ShouldRemoveDovi() && m_hints.dovi.dv_profile > 0)
+      m_streamMeta.flags.push_back("rpu-removed");
     m_pendingMeta.flags = m_streamMeta.flags;
   }
 
@@ -1443,8 +1445,8 @@ CDVDVideoCodec::VCReturn CDVDVideoCodecAmlogic::GetPicture(VideoPicture* pVideoP
     pVideoPicture->SetParams(m_videobuffer);
 
     pVideoPicture->videoBuffer = m_videoBufferPool->Get();
-    static_cast<CAMLVideoBuffer*>(pVideoPicture->videoBuffer)->Set(this, m_Codec,
-     m_Codec->GetOMXPts(), m_Codec->GetAmlDuration(), m_Codec->GetBufferIndex());;
+    static_cast<CAMLVideoBuffer*>(pVideoPicture->videoBuffer)
+        ->Set(this, m_Codec, m_Codec->GetAmlDuration(), m_Codec->GetBufferIndex());
   }
 
   // check for mpeg2 aspect ratio changes

@@ -11,6 +11,7 @@
 #include "DVDCodecs/DVDFactoryCodec.h"
 #include "DVDCodecs/Overlay/DVDOverlay.h"
 #include "DVDCodecs/Overlay/DVDOverlayCodec.h"
+#include "DVDCodecs/Overlay/DVDOverlayLibass.h"
 #include "DVDCodecs/Overlay/DVDOverlaySpu.h"
 #include "DVDDemuxers/DemuxStreamSSIF.h"
 #include "DVDSubtitles/DVDSubtitleParser.h"
@@ -367,6 +368,11 @@ void CVideoPlayerSubtitle::ProcessParser(double pts, double offset)
     // add all overlays which fit the pts
     while(pOverlay)
     {
+      // File events stay relative to the title. Only the overlay bounds use video PTS.
+      if (pOverlay->IsOverlayType(DVDOVERLAY_TYPE_TEXT) ||
+          pOverlay->IsOverlayType(DVDOVERLAY_TYPE_SSA))
+        static_cast<CDVDOverlayLibass&>(*pOverlay).SetFileTimeOffset(offset);
+
       pOverlay->iPTSStartTime -= offset;
       if(pOverlay->iPTSStopTime != 0.0)
         pOverlay->iPTSStopTime -= offset;

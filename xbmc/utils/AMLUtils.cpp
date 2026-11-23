@@ -1547,8 +1547,7 @@ unsigned int aml_dv_on(unsigned int mode, bool force)
   }
   CSysfsPath("/sys/module/amdolby_vision/parameters/xbmc_dv_vp", dv_vp);
 
-  unsigned int dv_vp_tm(settings()->GetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_VIDEO_PROCESSOR_TM));
-  dv_vp_tm = 4;
+  unsigned int dv_vp_tm = 4;
   CSysfsPath dvprofile{"/sys/module/amdolby_vision/parameters/xbmc_dv_profile"};
   if (dvprofile.Exists())
   {
@@ -1590,10 +1589,8 @@ unsigned int aml_dv_on(unsigned int mode, bool force)
   set_vsvdb_payload_ver(dv_type, max_lum_nits_value, source_max_pq);
 
   std::string dv_dolby_vsvdb_payload(settings()->GetString(CSettings::SETTING_COREELEC_AMLOGIC_DV_VSVDB_PAYLOAD));
-  if ((dv_vp != 0) && (dv_vp_tm > 1))
+  if (dv_vp != 0)
     dv_dolby_vsvdb_payload = "27FE012E5699AA";
-  else if ((dv_vp != 0) && (dv_vp_tm == 1))
-    dv_dolby_vsvdb_payload = "27FE012D5699AA";
   CSysfsPath("/sys/module/amdolby_vision/parameters/xbmc_dv_vsvdb_payload", dv_dolby_vsvdb_payload);
 
   // setup display led or player led
@@ -2281,6 +2278,12 @@ enum DV_TYPE aml_dv_type()
 
 unsigned int aml_vs10_by_setting(const std::string setting)
 {
+  // VS10 Only forces SDR for HDR/DV sources without changing the saved mapping.
+  if (aml_dv_type() == DV_TYPE_VS10_ONLY &&
+      setting != CSettings::SETTING_COREELEC_AMLOGIC_DV_VS10_SDR8 &&
+      setting != CSettings::SETTING_COREELEC_AMLOGIC_DV_VS10_SDR10)
+    return DOLBY_VISION_OUTPUT_MODE_SDR10;
+
   return static_cast<unsigned int>(settings()->GetInt(setting));
 }
 

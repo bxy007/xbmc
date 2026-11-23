@@ -52,7 +52,10 @@ public:
   bool DeferVideoModeSwitch();
   bool IsVideoModeSwitchPending();
   void CancelVideoModeSwitch();
+  bool IsHdmiStereoModeChanged() const;
+  RESOLUTION GetStereoResolutionAtCurrentTiming() const;
 protected:
+  RENDER_STEREO_MODE GetHdmiStereoMode() const;
   void BeginModeSwitch();
   void EndModeSwitch();
   void ProcessPendingVideoModeSwitch();

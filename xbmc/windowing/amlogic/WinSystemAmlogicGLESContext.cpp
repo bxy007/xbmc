@@ -129,7 +129,7 @@ bool CWinSystemAmlogicGLESContext::CreateNewWindow(const std::string& name,
 {
   RESOLUTION_INFO current_resolution;
   current_resolution.iWidth = current_resolution.iHeight = 0;
-  RENDER_STEREO_MODE stereo_mode = CServiceBroker::GetWinSystem()->GetGfxContext().GetStereoMode();
+  const RENDER_STEREO_MODE stereo_mode = GetHdmiStereoMode();
 
   // check for frac_rate_policy change
   int fractional_rate = (res.fRefreshRate == floor(res.fRefreshRate)) ? 0 : 1;

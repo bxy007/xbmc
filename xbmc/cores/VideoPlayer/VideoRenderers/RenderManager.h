@@ -221,7 +221,7 @@ protected:
   void DeleteRenderer();
   void ManageCaptures();
 
-  void VideoBody(bool firstFrame);
+  void VideoBody(bool firstFrame, bool async);
   void GetGuiVideoRect(CRect& source, CRect& dest, CRect& view);
   void PublishAsyncPresentMirror(int source, double pts);
   void PublishAsyncMirrorRects(const CRect& source, const CRect& dest, const CRect& view);
@@ -344,6 +344,7 @@ protected:
   std::atomic<double> m_presentpts{0.0};
   double m_displayedPts{DVD_NOPTS_VALUE};
   EPRESENTSTEP m_presentstep = PRESENT_IDLE;
+  bool m_syncSecondFieldPending = false;
   bool m_cadenceArmed = false;
   int m_cadenceCalls = 0;
   int m_cadenceAdvance = 0;

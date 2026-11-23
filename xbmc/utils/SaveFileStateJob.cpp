@@ -204,6 +204,12 @@ void CSaveFileState::DoWork(CFileItem& item,
             if (URIUtils::IsBlurayPath(item.GetDynPath()))
               msgItem->SetDynPath(original);
           }
+          else if (item.HasProperty("bluray.original_dyn_path"))
+          {
+            // The menu URL is only for the current playback session.
+            msgItem->SetDynPath(item.GetProperty("bluray.original_dyn_path").asString());
+          }
+          msgItem->ClearProperty("bluray.original_dyn_path");
 
           // Could be part of an ISO stack. In this case the bookmark is saved onto the part.
           // In order to properly update the list, we need to refresh the stack's resume point

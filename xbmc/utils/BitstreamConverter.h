@@ -235,6 +235,7 @@ public:
   void SetDualPriorityHdr10Plus(bool value) { m_dual_priority_Hdr10Plus = value; }
   void SetRemoveDovi(bool value) { m_removeDovi = value; }
   void SetRemoveHdr10Plus(bool value) { m_removeHdr10Plus = value; }
+  bool ShouldRemoveDovi() const;
 
   static bool mpeg2_sequence_header(const uint8_t* data,
                                     const uint32_t size,
@@ -291,6 +292,7 @@ protected:
   void ProcessSeiPrefixWrap(uint8_t *buf, int32_t nal_size, uint8_t **poutbuf, uint32_t& poutbuf_size, Hdr10PlusMetadata& meta, bool& convert_hdr10plus_meta, HdrVividStats& vivid, bool& convert_vivid);
   void ProcessSeiPrefix(uint8_t *buf, int32_t nal_size, uint8_t **poutbuf, int *poutbuf_size, Hdr10PlusMetadata& meta, bool& convert_hdr10plus_meta, HdrVividStats& vivid, bool& convert_vivid);
   void ScanAnnexbHdrStaticMetadata(const uint8_t* pData, int iSize);
+  void StripAnnexbHdr10Plus(const uint8_t* data, int size);
 
   void ProcessDoViRpuWrap(uint8_t* buf, int32_t nal_size, uint8_t** poutbuf, uint32_t& poutbuf_size, double pts);
   void ProcessDoViRpu(uint8_t* buf, int32_t nal_size, uint8_t** poutbuf, int* poutbuf_size, double pts);
@@ -307,6 +309,7 @@ protected:
   int m_convertSize;
   uint32_t m_convertBufferCapacity{0};
   std::vector<uint8_t> m_dtdlBuffer;
+  std::vector<uint8_t> m_annexbHdr10PlusBuffer;
   DoviMetaVersionMemo m_doviMetaVerMemo;
   DoviMetaVersionMemo m_doviSrcMetaVerMemo;
   std::vector<uint8_t> m_seiBuf;

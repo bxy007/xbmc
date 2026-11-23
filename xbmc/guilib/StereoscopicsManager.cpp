@@ -44,6 +44,10 @@
 #include "windowing/Resolution.h"
 #include "windowing/WinSystem.h"
 
+#if defined(HAS_LIBAMCODEC)
+#include "windowing/amlogic/WinSystemAmlogic.h"
+#endif
+
 #include <stdlib.h>
 
 struct StereoModeMap
@@ -516,7 +520,7 @@ void CStereoscopicsManager::ApplyStereoMode(const RENDER_STEREO_MODE &mode, bool
     CLog::Log(LOGDEBUG, "StereoscopicsManager: stereo mode changed to {}",
               ConvertGuiStereoModeToString(mode));
 
-    const auto& components = CServiceBroker::GetAppComponents();
+    auto& components = CServiceBroker::GetAppComponents();
     const auto appPlayer = components.GetComponent<CApplicationPlayer>();
     if (!appPlayer->IsPlaying())
     {
@@ -532,6 +536,14 @@ void CStereoscopicsManager::ApplyStereoMode(const RENDER_STEREO_MODE &mode, bool
       if (is3D ? targetHas3D : currentHas3D)
         CServiceBroker::GetWinSystem()->GetGfxContext().SetVideoResolution(res, true);
     }
+#if defined(HAS_LIBAMCODEC)
+    else if (const auto* window = dynamic_cast<const CWinSystemAmlogic*>(
+                 CServiceBroker::GetWinSystem());
+             window && window->IsHdmiStereoModeChanged())
+    {
+      appPlayer->TriggerUpdateResolution();
+    }
+#endif
 
     if (notify)
     {

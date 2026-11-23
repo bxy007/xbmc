@@ -2233,6 +2233,14 @@ void CVideoPlayer::Process()
                                 ->GetAdvancedSettings()
                                 ->m_videoBdBoundaryDrain)
           DrainStreamsAtBoundary();
+        if (m_blurayMenu)
+        {
+          // A new playlist can start at a different PTS even when the decoder is reusable.
+          m_avClockInitialized = false;
+          m_avResyncDeferStart = {};
+          std::unique_lock lock(m_StateSection);
+          m_State.dts = DVD_NOPTS_VALUE;
+        }
         if (videoKeepAlive)
         {
           CloseDemuxer();

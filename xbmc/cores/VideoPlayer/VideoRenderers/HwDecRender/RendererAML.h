@@ -67,7 +67,6 @@ private:
     int duration;
   } m_buffers[m_numRenderBuffers];
 
-  uint64_t m_prevVPts;
   bool m_bConfigured;
   std::atomic_int m_asyncRenderIndex{-1};
   CVideoBuffer* m_asyncPinnedBuffer = nullptr;
