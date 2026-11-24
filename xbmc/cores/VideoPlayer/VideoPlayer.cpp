@@ -54,6 +54,7 @@
 #include "input/actions/ActionIDs.h"
 #include "messaging/ApplicationMessenger.h"
 #include "settings/AdvancedSettings.h"
+#include "settings/MediaSettings.h"
 #include "settings/SettingUtils.h"
 #include "settings/Settings.h"
 #include "settings/SettingsComponent.h"
@@ -91,6 +92,32 @@ using namespace std::chrono_literals;
 
 namespace
 {
+thread_local const CVideoPlayer* g_loadingVideoSettingsPlayer = nullptr;
+thread_local uint64_t g_loadingVideoSettingsGen = 0;
+thread_local bool* g_loadingVideoSettingsApplied = nullptr;
+
+struct ScopedVideoSettingsLoad
+{
+  const CVideoPlayer* prevPlayer;
+  uint64_t prevGen;
+  bool* prevApplied;
+  ScopedVideoSettingsLoad(const CVideoPlayer* player, uint64_t gen, bool* applied)
+    : prevPlayer(g_loadingVideoSettingsPlayer),
+      prevGen(g_loadingVideoSettingsGen),
+      prevApplied(g_loadingVideoSettingsApplied)
+  {
+    g_loadingVideoSettingsPlayer = player;
+    g_loadingVideoSettingsGen = gen;
+    g_loadingVideoSettingsApplied = applied;
+  }
+  ~ScopedVideoSettingsLoad()
+  {
+    g_loadingVideoSettingsPlayer = prevPlayer;
+    g_loadingVideoSettingsGen = prevGen;
+    g_loadingVideoSettingsApplied = prevApplied;
+  }
+};
+
 int64_t NormalizeTarget(int64_t seekTarget, int64_t currentTime, int64_t maxTime)
 {
   if (seekTarget < 0) return 0;
@@ -961,6 +988,7 @@ bool CVideoPlayer::CloseFile(bool reopen)
   // set the abort request so that other threads can finish up
   m_bAbortRequest = true;
   m_bCloseRequest = true;
+  m_videoSettingsEvent.Set();
 
   // tell demuxer to abort
   if(m_pDemuxer)
@@ -1016,8 +1044,8 @@ void CVideoPlayer::OnStartup()
 
 bool CVideoPlayer::OpenInputStream()
 {
-  m_pgsManualSelection = false;
   m_pgsAutoSwitchDone = false;
+  m_pgsAutoSwitchRejectedGen.reset();
   m_subtitleSwitchCache.Clear();
   m_pgsProbe.Reset(CServiceBroker::GetSettingsComponent()->GetSettings()->GetBool(CSettings::SETTING_SUBTITLES_IDENTIFYPGS),
                    CSpecialProtocol::TranslatePath("special://xbmc/system/ocr"));
@@ -1140,6 +1168,11 @@ CVideoPlayer::DemuxOpenResult CVideoPlayer::OpenDemuxStream()
   m_SelectionStreams.Clear(STREAM_NONE, STREAM_SOURCE_NAV);
   m_SelectionStreams.Update(m_pInputStream, m_pDemuxer.get());
   m_discSubtitlePending = m_blurayMenu;
+  if (m_pgsAutoSwitchRejectedGen)
+  {
+    m_pgsAutoSwitchRejectedGen.reset();
+    m_pgsAutoSwitchDone = false;
+  }
   m_pDemuxer->GetPrograms(m_programs);
   UpdateContent();
   m_demuxerSpeed = DVD_PLAYSPEED_NORMAL;
@@ -1248,11 +1281,12 @@ void CVideoPlayer::OpenDefaultStreams(bool reset)
   }
 
   // enable  or disable subtitles
-  bool visible = m_processInfo->GetVideoSettings().m_SubtitleOn;
+  const CVideoSettings initialSubSettings = m_processInfo->GetVideoSettings();
+  bool visible = initialSubSettings.m_SubtitleOn;
 
   // open subtitle stream
   SelectionStream as = m_SelectionStreams.Get(STREAM_AUDIO, GetAudioStream());
-  PredicateSubtitlePriority psp(as.language, m_processInfo->GetVideoSettings().m_SubtitleStream);
+  PredicateSubtitlePriority psp(as.language, initialSubSettings.m_SubtitleStream);
   valid = false;
   // We need to close CC subtitles to avoid conflicts with external sub stream
   if (m_CurrentSubtitle.source == STREAM_SOURCE_VIDEOMUX)
@@ -1270,6 +1304,30 @@ void CVideoPlayer::OpenDefaultStreams(bool reset)
   }
   if(!valid)
     CloseStream(m_CurrentSubtitle, false);
+
+  if (initialSubSettings.m_SubtitleSelectionSaved && initialSubSettings.m_SubtitleStream >= 0)
+  {
+    const int openedIdx = m_SelectionStreams.TypeIndexOf(
+        STREAM_SUBTITLE, m_CurrentSubtitle.source, m_CurrentSubtitle.demuxerId,
+        m_CurrentSubtitle.id);
+    if (openedIdx != initialSubSettings.m_SubtitleStream)
+    {
+      // Saved subtitle index no longer matches an available stream (e.g. external subtitle
+      // added/removed); allow PGS OCR auto-selection to recover without clobbering a newer
+      // async DB load or manual user selection that arrived during OpenDefaultStreams().
+      std::lock_guard<std::mutex> lock(m_videoSettingsMutex);
+      if (!m_pgsManualSelection.load(std::memory_order_acquire))
+      {
+        CVideoSettings vs = m_processInfo->GetVideoSettings();
+        if (vs.m_SubtitleSelectionSaved &&
+            vs.m_SubtitleStream == initialSubSettings.m_SubtitleStream)
+        {
+          vs.m_SubtitleSelectionSaved = false;
+          m_processInfo->SetVideoSettings(vs);
+        }
+      }
+    }
+  }
 
   // only set subtitle visibility if state not stored by dvd navigator, because navigator will restore it (if visible)
   if (!std::dynamic_pointer_cast<CDVDInputStreamNavigator>(m_pInputStream) ||
@@ -1809,9 +1867,53 @@ void CVideoPlayer::Prepare()
 
   IPlayerCallback *cb = &m_callback;
   CFileItem fileItem = m_item;
-  m_pgsVideoSettingsReady = false;
-  m_outboundEvents->Submit([=]() {
-    cb->RequestVideoSettings(fileItem);
+  // Reset per-file video settings and manual selection state under m_videoSettingsMutex before
+  // submitting RequestVideoSettings() so a reused player (PLAYER_OPENFILE) cannot leak the
+  // previous file's streams or manual flag, and a superseded callback cannot publish stale state.
+  CVideoSettings defaultVs = CMediaSettings::GetInstance().GetDefaultVideoSettings();
+  uint64_t settingsGen = 0;
+  {
+    std::lock_guard<std::mutex> lock(m_videoSettingsMutex);
+    settingsGen = ++m_videoSettingsGeneration;
+    m_pgsManualSelection.store(false, std::memory_order_release);
+    m_pgsAutoSwitchDone = false;
+    m_pgsAutoSwitchRejectedGen.reset();
+    m_subtitleDemuxDisabled = false;
+    m_pgsVideoSettingsReady.store(false, std::memory_order_release);
+    m_videoSettingsPersistable.store(false, std::memory_order_release);
+    m_blurayMenuFeaturePersistReady.store(false, std::memory_order_release);
+    m_blurayOnFeaturePlaylist.store(false, std::memory_order_release);
+    m_pendingInitialSubtitleApply.store(false, std::memory_order_release);
+    m_discStateRestored.store(false, std::memory_order_release);
+    m_discStateKnown.store(false, std::memory_order_release);
+    m_videoSettingsEvent.Reset();
+
+    m_initialSubtitleStream.store(-1, std::memory_order_relaxed);
+    m_initialSubtitleOn.store(defaultVs.m_SubtitleOn, std::memory_order_relaxed);
+    m_initialSubtitleSaved.store(false, std::memory_order_relaxed);
+    m_processInfo->SetVideoSettings(defaultVs);
+  }
+
+  m_outboundEvents->Submit([this, cb, fileItem, settingsGen]() {
+    if (m_videoSettingsGeneration.load(std::memory_order_acquire) != settingsGen)
+      return;
+    bool applied = false;
+    {
+      ScopedVideoSettingsLoad loadScope(this, settingsGen, &applied);
+      cb->RequestVideoSettings(fileItem);
+    }
+    std::lock_guard<std::mutex> lock(m_videoSettingsMutex);
+    if (m_videoSettingsGeneration.load(std::memory_order_acquire) == settingsGen)
+    {
+      m_videoSettingsLoadedGen.store(settingsGen, std::memory_order_release);
+      m_pgsVideoSettingsReady.store(true, std::memory_order_release);
+      if (applied)
+      {
+        m_videoSettingsPersistable.store(true, std::memory_order_release);
+        m_pendingInitialSubtitleApply.store(true, std::memory_order_release);
+      }
+      m_videoSettingsEvent.Set();
+    }
   });
 
   if (!OpenInputStream())
@@ -1838,6 +1940,11 @@ void CVideoPlayer::Prepare()
       nav->EnableSubtitleStream(m_processInfo->GetVideoSettings().m_SubtitleOn);
     }
   }
+  {
+    std::lock_guard<std::mutex> lock(m_videoSettingsMutex);
+    m_discStateRestored.store(discStateRestored, std::memory_order_release);
+    m_discStateKnown.store(true, std::memory_order_release);
+  }
 
   // a disc program may start with no playlist, which the main loop waits for
   if (OpenDemuxStream() == DemuxOpenResult::FAILED)
@@ -1849,8 +1956,44 @@ void CVideoPlayer::Prepare()
   // give players a chance to reconsider now codecs are known
   CreatePlayers();
 
+  // Wait briefly for the async RequestVideoSettings() DB read (which normally finishes in parallel
+  // with OpenInputStream/OpenDemuxStream) so OpenDefaultStreams() sees saved subtitle/audio tracks.
+  if (!m_bAbortRequest &&
+      m_videoSettingsLoadedGen.load(std::memory_order_acquire) != settingsGen)
+  {
+    m_videoSettingsEvent.Wait(500ms);
+  }
+
+  const bool settingsReadyBeforeDefaultStreams =
+      m_videoSettingsLoadedGen.load(std::memory_order_acquire) == settingsGen;
   if (!discStateRestored)
+  {
     OpenDefaultStreams();
+    if (m_blurayMenu.load(std::memory_order_acquire))
+    {
+      // Fresh Blu-ray main-menu launch: keep the disc's subtitle state, never stale DB rows.
+      std::lock_guard<std::mutex> lock(m_videoSettingsMutex);
+      if (!m_pgsManualSelection.load(std::memory_order_acquire))
+      {
+        CVideoSettings vs = m_processInfo->GetVideoSettings();
+        vs.m_SubtitleStream = -1;
+        vs.m_SubtitleSelectionSaved = false;
+#if defined(HAVE_LIBBLURAY)
+        if (const auto bluray = GetBlurayInputStream())
+          vs.m_SubtitleOn = bluray->IsPgEnabled();
+#endif
+        m_processInfo->SetVideoSettings(vs);
+      }
+    }
+    if (settingsReadyBeforeDefaultStreams)
+      m_pendingInitialSubtitleApply.store(false, std::memory_order_release);
+  }
+  else if (!m_blurayMenu.load(std::memory_order_acquire))
+  {
+    // DVD navigator restored its own state via SetState().
+    if (settingsReadyBeforeDefaultStreams)
+      m_pendingInitialSubtitleApply.store(false, std::memory_order_release);
+  }
 
   /*
    * Check to see if the demuxer should start at something other than time 0. This will be the case
@@ -2066,6 +2209,7 @@ void CVideoPlayer::Process()
       UpdatePlayState(0);
     }
 
+    ApplyPendingSavedSubtitle();
     UpdateBluraySubtitleStream();
     UpdateBlurayPip();
 
@@ -2310,6 +2454,7 @@ void CVideoPlayer::Process()
     m_eofRenderWaitStart = {};
 
     // A subtitle selection may have arrived while the demuxer was reading.
+    ApplyPendingSavedSubtitle();
     UpdateBluraySubtitleStream();
     UpdateBlurayPip();
 
@@ -3411,14 +3556,30 @@ bool CVideoPlayer::DropInNavTail(CDVDMsg& msg)
   }
   if (msg.IsType(CDVDMsg::PLAYER_SET_SUBTITLESTREAM))
   {
-    const SelectionStream& st{m_SelectionStreams.Get(
-        STREAM_SUBTITLE, static_cast<CDVDMsgPlayerSetSubtitleStream&>(msg).GetStreamId())};
+    const auto& subMsg = static_cast<CDVDMsgPlayerSetSubtitleStream&>(msg);
+    const SelectionStream& st{m_SelectionStreams.Get(STREAM_SUBTITLE, subMsg.GetStreamId())};
     // an external subtitle does not depend on the disc's streams, and a disc pick replaces a
     // current external one at once
     if (STREAM_SOURCE_MASK(st.source) != STREAM_SOURCE_DEMUX ||
         STREAM_SOURCE_MASK(m_CurrentSubtitle.source) != STREAM_SOURCE_DEMUX)
       return false;
-    SelectDiscStream(st);
+    if (subMsg.IsAutomatic() && m_blurayMenu)
+    {
+#if defined(HAVE_LIBBLURAY)
+      if (const auto bluray = GetBlurayInputStream(); bluray && !bluray->CanSelectStream())
+      {
+        m_pgsAutoSwitchDone = false;
+        return true;
+      }
+#endif
+    }
+    if (!SelectDiscStream(st) && subMsg.IsAutomatic())
+    {
+#if defined(HAVE_LIBBLURAY)
+      if (const auto bluray = GetBlurayInputStream())
+        m_pgsAutoSwitchRejectedGen = bluray->GetSubtitleSelectGeneration();
+#endif
+    }
     return true;
   }
   return (msg.IsType(CDVDMsg::PLAYER_SEEK_CHAPTER) && !seekable) ||
@@ -3427,7 +3588,8 @@ bool CVideoPlayer::DropInNavTail(CDVDMsg& msg)
 
 // passes a pick of a disc stream to the disc, false when the disc does not allow the change; in a
 // nav tail the demuxer of the old item still holds the streams a pick names
-bool CVideoPlayer::SelectDiscStream(const SelectionStream& st)
+bool CVideoPlayer::SelectDiscStream(const SelectionStream& st,
+                                    std::optional<bool> subtitleVisible)
 {
 #if defined(HAVE_LIBBLURAY)
   const auto bluray = GetBlurayInputStream();
@@ -3455,8 +3617,17 @@ bool CVideoPlayer::SelectDiscStream(const SelectionStream& st)
       CLog::Log(LOGDEBUG, "CVideoPlayer - the disc does not allow a subtitle stream change");
       return false;
     }
-    if (bluray->SetActiveSubtitleStream(stream->dvdNavId, m_VideoPlayerVideo->IsSubtitleEnabled()))
+    const bool targetVisible = subtitleVisible.value_or(m_VideoPlayerVideo->IsSubtitleEnabled());
+    if (bluray->SetActiveSubtitleStream(stream->dvdNavId, targetVisible))
+    {
       m_dvd.iSelectedSPUStream = stream->dvdNavId;
+    }
+    else if (m_blurayMenu.load(std::memory_order_acquire))
+    {
+      CLog::Log(LOGDEBUG, "CVideoPlayer - the disc rejected subtitle stream pid={}",
+                stream->dvdNavId);
+      return false;
+    }
   }
 #endif
   return true;
@@ -4489,10 +4660,16 @@ void CVideoPlayer::OnExit()
   CServiceBroker::GetWinSystem()->UnregisterRenderLoop(this);
 
   IPlayerCallback *cb = &m_callback;
-  CVideoSettings vs = m_processInfo->GetVideoSettings();
-  m_outboundEvents->Submit([=]() {
-    cb->StoreVideoSettings(fileItem, vs);
-  });
+  if (!m_error && m_videoSettingsPersistable.load(std::memory_order_acquire) &&
+      (!m_blurayMenu.load(std::memory_order_acquire) ||
+       m_discStateRestored.load(std::memory_order_acquire) ||
+       m_blurayMenuFeaturePersistReady.load(std::memory_order_acquire)))
+  {
+    CVideoSettings vs = m_processInfo->GetVideoSettings();
+    m_outboundEvents->Submit([=]() {
+      cb->StoreVideoSettings(fileItem, vs);
+    });
+  }
 
   CBookmark bookmark;
   bookmark.totalTimeInSeconds = 0;
@@ -4559,10 +4736,16 @@ void CVideoPlayer::HandleMessages()
       IPlayerCallback *cb = &m_callback;
       CFileItem fileItem(m_item);
       UpdateFileItemStreamDetails(fileItem);
-      CVideoSettings vs = m_processInfo->GetVideoSettings();
-      m_outboundEvents->Submit([=]() {
-        cb->StoreVideoSettings(fileItem, vs);
-      });
+      if (!m_error && m_videoSettingsPersistable.load(std::memory_order_acquire) &&
+          (!m_blurayMenu.load(std::memory_order_acquire) ||
+           m_discStateRestored.load(std::memory_order_acquire) ||
+           m_blurayMenuFeaturePersistReady.load(std::memory_order_acquire)))
+      {
+        CVideoSettings vs = m_processInfo->GetVideoSettings();
+        m_outboundEvents->Submit([=]() {
+          cb->StoreVideoSettings(fileItem, vs);
+        });
+      }
 
       CBookmark bookmark;
       bookmark.totalTimeInSeconds = 0;
@@ -4901,7 +5084,9 @@ void CVideoPlayer::HandleMessages()
           (m_pgsManualSelection || !m_pgsVideoSettingsReady ||
            m_processInfo->GetVideoSettings().m_SubtitleSelectionSaved ||
            !settings->GetBool(CSettings::SETTING_SUBTITLES_IDENTIFYPGS) ||
-           !settings->GetBool(CSettings::SETTING_SUBTITLES_PGSAUTOSWITCH)))
+           !settings->GetBool(CSettings::SETTING_SUBTITLES_PGSAUTOSWITCH) ||
+           (m_blurayMenu &&
+            !settings->GetBool(CSettings::SETTING_SUBTITLES_PGSAUTOSWITCH_BLURAYMENU))))
         continue;
 
       SelectionStream& st = m_SelectionStreams.Get(STREAM_SUBTITLE, pMsg2->GetStreamId());
@@ -4928,15 +5113,44 @@ void CVideoPlayer::HandleMessages()
           const bool fromExternal{
               STREAM_SOURCE_MASK(m_CurrentSubtitle.source) == STREAM_SOURCE_DEMUX_SUB ||
               STREAM_SOURCE_MASK(m_CurrentSubtitle.source) == STREAM_SOURCE_TEXT};
+          if (pMsg2->IsAutomatic() && m_blurayMenu)
+          {
+            if (const auto bluray = GetBlurayInputStream(); bluray && !bluray->CanSelectStream())
+            {
+              m_pgsAutoSwitchDone = false;
+              continue;
+            }
+          }
           if (!SelectDiscStream(st))
+          {
+            if (pMsg2->IsAutomatic())
+            {
+              if (const auto bluray = GetBlurayInputStream())
+                m_pgsAutoSwitchRejectedGen = bluray->GetSubtitleSelectGeneration();
+            }
             continue;
+          }
 #endif
           CloseStream(m_CurrentSubtitle, false);
           if (OpenStream(m_CurrentSubtitle, st.demuxerId, st.id, st.source))
           {
             if (pMsg2->IsAutomatic())
             {
-              m_processInfo->GetVideoSettingsLocked().SetSubtitleStream(pMsg2->GetStreamId());
+              m_pgsAutoSwitchRejectedGen.reset();
+              {
+                std::lock_guard<std::mutex> lock(m_videoSettingsMutex);
+                m_processInfo->GetVideoSettingsLocked().SetSubtitleStream(pMsg2->GetStreamId());
+                const bool blurayMenu = m_blurayMenu.load(std::memory_order_acquire);
+#if defined(HAVE_LIBBLURAY)
+                const auto bluray = GetBlurayInputStream();
+                const bool allowPersist =
+                    !blurayMenu || (bluray && bluray->IsFeaturePlaylistLoaded());
+#else
+                const bool allowPersist = !blurayMenu;
+#endif
+                if (allowPersist)
+                  m_blurayMenuFeaturePersistReady.store(true, std::memory_order_release);
+              }
               CLog::Log(LOGDEBUG, "PGS identification: automatically selected subtitle index={}",
                         pMsg2->GetStreamId());
             }
@@ -5512,17 +5726,27 @@ bool CVideoPlayer::GetSubtitleVisible() const
 
 void CVideoPlayer::SetSubtitleVisible(bool bVisible)
 {
-  m_pgsManualSelection = true;
+  {
+    std::lock_guard<std::mutex> lock(m_videoSettingsMutex);
+    m_pgsManualSelection.store(true, std::memory_order_release);
+    if (!m_blurayMenu.load(std::memory_order_acquire) ||
+        m_blurayOnFeaturePlaylist.load(std::memory_order_acquire))
+      m_blurayMenuFeaturePersistReady.store(true, std::memory_order_release);
+    m_processInfo->GetVideoSettingsLocked().SetSubtitleVisible(bVisible);
+  }
   m_messenger.Put(
       std::make_shared<CDVDMsgBool>(CDVDMsg::PLAYER_SET_SUBTITLESTREAM_VISIBLE, bVisible));
-  m_processInfo->GetVideoSettingsLocked().SetSubtitleVisible(bVisible);
   if (!bVisible)
     aml_dv_set_subtitles(false);
 }
 
 void CVideoPlayer::SetEnableStream(CCurrentStream& current, bool isEnabled) const {
   if (m_pDemuxer && STREAM_SOURCE_MASK(current.source) == STREAM_SOURCE_DEMUX)
+  {
+    if (&current == &m_CurrentSubtitle && !isEnabled)
+      m_subtitleDemuxDisabled = true;
     m_pDemuxer->EnableStream(current.demuxerId, current.id, isEnabled);
+  }
 }
 
 void CVideoPlayer::SetSubtitleVisibleInternal(bool bVisible) const {
@@ -5851,6 +6075,8 @@ bool CVideoPlayer::OpenStream(CCurrentStream& current, int64_t demuxerId, int iS
 
   if (res)
   {
+    if (current.type == STREAM_SUBTITLE)
+      m_subtitleDemuxDisabled = false;
     int oldId = current.id;
     current.id = iStream;
     current.demuxerId = demuxerId;
@@ -6245,6 +6471,8 @@ bool CVideoPlayer::CloseStream(CCurrentStream& current, bool bWaitForBuffers)
   }
 
   current.Clear();
+  if (current.type == STREAM_SUBTITLE)
+    m_subtitleDemuxDisabled = false;
   return true;
 }
 
@@ -6555,18 +6783,50 @@ int CVideoPlayer::OnDiscNavResult(void* pData, int iMessage)
     {
       const int pid = *static_cast<int*>(pData);
       if (m_blurayMenu && m_dvd.iSelectedSPUStream != pid)
+      {
+        const auto bluray = GetBlurayInputStream();
+        if (m_CurrentSubtitle.id >= 0 && bluray && bluray->IsPgStreamPick())
+          m_pgsManualSelection = true;
         m_discSubtitlePending = true;
+      }
       m_dvd.iSelectedSPUStream = pid;
       break;
     }
     case BD_EVENT_PG_TEXTST:
     {
+      // Only menu-mode Blu-ray sessions delegate subtitle visibility to libbluray; in non-menu
+      // playback (main title / ISO resume), Kodi owns subtitle visibility via CVideoSettings and
+      // libbluray's startup PSR heuristic ("audio == subtitle language") must not hide subtitles.
+      if (!m_blurayMenu.load(std::memory_order_acquire))
+        break;
       // the disc's flag is for its own subtitles, not for an external file
       if (STREAM_SOURCE_MASK(m_CurrentSubtitle.source) == STREAM_SOURCE_DEMUX_SUB ||
           STREAM_SOURCE_MASK(m_CurrentSubtitle.source) == STREAM_SOURCE_TEXT)
         break;
       bool enable = (*static_cast<int*>(pData) != 0);
+      const bool markManual =
+          m_CurrentSubtitle.id >= 0 && !enable && m_VideoPlayerVideo->IsSubtitleEnabled();
       m_VideoPlayerVideo->EnableSubtitle(enable);
+      {
+        std::lock_guard<std::mutex> lock(m_videoSettingsMutex);
+        if (markManual)
+          m_pgsManualSelection.store(true, std::memory_order_release);
+        const bool discStateRestored = m_discStateRestored.load(std::memory_order_acquire);
+#if defined(HAVE_LIBBLURAY)
+        const auto bluray = GetBlurayInputStream();
+        const bool onFeature =
+            (bluray && bluray->IsFeaturePlaylistLoaded()) ||
+            (discStateRestored && (!bluray || !bluray->IsInMainMenu()));
+#else
+        const bool onFeature = discStateRestored;
+#endif
+        if (onFeature &&
+            !(discStateRestored && m_pendingInitialSubtitleApply.load(std::memory_order_acquire)))
+        {
+          m_processInfo->GetVideoSettingsLocked().SetSubtitleVisible(enable);
+        }
+      }
+      CServiceBroker::GetDataCacheCore().SignalSubtitleInfoChange();
     }
     break;
     case BD_EVENT_STILL_TIME:
@@ -7667,6 +7927,22 @@ void CVideoPlayer::UpdatePlayState(double timeout)
                            m_playSpeed > DVD_PLAYSPEED_PAUSE &&
                                m_caching == CACHESTATE_DONE && !state.isInMenu);
 
+#if defined(HAVE_LIBBLURAY)
+  if (m_blurayMenu.load(std::memory_order_acquire))
+  {
+    const auto bluray = GetBlurayInputStream();
+    const bool featureLoaded = bluray && bluray->IsFeaturePlaylistLoaded();
+    m_blurayOnFeaturePlaylist.store(featureLoaded, std::memory_order_release);
+    if (!m_discStateRestored.load(std::memory_order_acquire) &&
+        !m_blurayMenuFeaturePersistReady.load(std::memory_order_acquire) &&
+        m_pDemuxer && !state.isInMenu && state.startTime == 0 && state.time > 0 &&
+        bluray && bluray->IsFeaturePlaylistActive())
+    {
+      m_blurayMenuFeaturePersistReady.store(true, std::memory_order_release);
+    }
+  }
+#endif
+
   if (m_caching > CACHESTATE_DONE && m_caching < CACHESTATE_PLAY)
     state.caching = true;
   else
@@ -7746,8 +8022,44 @@ CVideoSettings CVideoPlayer::GetVideoSettings() const
 
 void CVideoPlayer::SetVideoSettings(CVideoSettings& settings)
 {
+  const bool fromRequestSettings = (g_loadingVideoSettingsPlayer == this);
+  std::lock_guard<std::mutex> lock(m_videoSettingsMutex);
+  if (fromRequestSettings)
+  {
+    if (g_loadingVideoSettingsGen != m_videoSettingsGeneration.load(std::memory_order_acquire))
+      return; // Stale RequestVideoSettings() from a superseded item (PLAYER_OPENFILE).
+
+    if (g_loadingVideoSettingsApplied)
+      *g_loadingVideoSettingsApplied = true;
+
+    m_initialSubtitleStream.store(settings.m_SubtitleStream, std::memory_order_relaxed);
+    m_initialSubtitleOn.store(settings.m_SubtitleOn, std::memory_order_relaxed);
+    m_initialSubtitleSaved.store(settings.m_SubtitleSelectionSaved, std::memory_order_relaxed);
+
+    if (m_pgsManualSelection.load(std::memory_order_acquire))
+    {
+      const CVideoSettings current = m_processInfo->GetVideoSettings();
+      settings.m_SubtitleStream = current.m_SubtitleStream;
+      settings.m_SubtitleOn = current.m_SubtitleOn;
+      settings.m_SubtitleSelectionSaved = true;
+    }
+    else if (m_discStateKnown.load(std::memory_order_acquire) &&
+             m_blurayMenu.load(std::memory_order_acquire) &&
+             !m_discStateRestored.load(std::memory_order_acquire))
+    {
+      // Fresh Blu-ray main-menu playback: never override the disc menu's choice with stale DB data.
+      const CVideoSettings current = m_processInfo->GetVideoSettings();
+      settings.m_SubtitleStream = current.m_SubtitleStream;
+      settings.m_SubtitleOn = current.m_SubtitleOn;
+      settings.m_SubtitleSelectionSaved = false;
+    }
+  }
+  else if (!m_blurayMenu.load(std::memory_order_acquire) ||
+           m_blurayOnFeaturePlaylist.load(std::memory_order_acquire))
+  {
+    m_blurayMenuFeaturePersistReady.store(true, std::memory_order_release);
+  }
   m_processInfo->SetVideoSettings(settings);
-  m_pgsVideoSettingsReady = true;
   m_renderManager.SetVideoSettings(settings);
   const int settingsDelayMs = static_cast<int>(settings.m_AudioDelay * 1000.0f);
   m_renderManager.SetDelay(settingsDelayMs);
@@ -8052,42 +8364,73 @@ void CVideoPlayer::UpdateContent()
 
 void CVideoPlayer::UpdateContentState()
 {
-  std::unique_lock<CCriticalSection> lock(m_content.m_section);
-
-  m_content.m_videoIndex = m_SelectionStreams.TypeIndexOf(STREAM_VIDEO, m_CurrentVideo.source,
-                                                      m_CurrentVideo.demuxerId, m_CurrentVideo.id);
-  m_content.m_audioIndex = m_SelectionStreams.TypeIndexOf(STREAM_AUDIO, m_CurrentAudio.source,
-                                                      m_CurrentAudio.demuxerId, m_CurrentAudio.id);
-  m_content.m_subtitleIndex = m_SelectionStreams.TypeIndexOf(STREAM_SUBTITLE, m_CurrentSubtitle.source,
-                                                         m_CurrentSubtitle.demuxerId, m_CurrentSubtitle.id);
-
-  if (m_pInputStream->IsStreamType(DVDSTREAM_TYPE_DVD) && m_content.m_videoIndex == -1 &&
-      m_content.m_audioIndex == -1)
+  int audioIndex = -1;
+  int subtitleIndex = -1;
   {
-    std::shared_ptr<CDVDInputStreamNavigator> nav =
-          std::static_pointer_cast<CDVDInputStreamNavigator>(m_pInputStream);
+    std::unique_lock<CCriticalSection> lock(m_content.m_section);
 
-    m_content.m_videoIndex = m_SelectionStreams.TypeIndexOf(STREAM_VIDEO, STREAM_SOURCE_NAV, -1,
-                                                            nav->GetActiveAngle());
-    m_content.m_audioIndex = m_SelectionStreams.TypeIndexOf(STREAM_AUDIO, STREAM_SOURCE_NAV, -1,
-                                                            nav->GetActiveAudioStream());
+    m_content.m_videoIndex = m_SelectionStreams.TypeIndexOf(STREAM_VIDEO, m_CurrentVideo.source,
+                                                        m_CurrentVideo.demuxerId, m_CurrentVideo.id);
+    m_content.m_audioIndex = m_SelectionStreams.TypeIndexOf(STREAM_AUDIO, m_CurrentAudio.source,
+                                                        m_CurrentAudio.demuxerId, m_CurrentAudio.id);
+    m_content.m_subtitleIndex = m_SelectionStreams.TypeIndexOf(STREAM_SUBTITLE, m_CurrentSubtitle.source,
+                                                           m_CurrentSubtitle.demuxerId, m_CurrentSubtitle.id);
 
-    // only update the subtitle index in libdvdnav if the subtitle is provided by the dvd itself,
-    // i.e. for external subtitles the index is always greater than the subtitlecount in dvdnav
-    if (m_content.m_subtitleIndex < nav->GetSubTitleStreamCount())
+    if (m_pInputStream->IsStreamType(DVDSTREAM_TYPE_DVD) && m_content.m_videoIndex == -1 &&
+        m_content.m_audioIndex == -1)
     {
-      m_content.m_subtitleIndex = m_SelectionStreams.TypeIndexOf(
-          STREAM_SUBTITLE, STREAM_SOURCE_NAV, -1, nav->GetActiveSubtitleStream());
+      std::shared_ptr<CDVDInputStreamNavigator> nav =
+            std::static_pointer_cast<CDVDInputStreamNavigator>(m_pInputStream);
+
+      m_content.m_videoIndex = m_SelectionStreams.TypeIndexOf(STREAM_VIDEO, STREAM_SOURCE_NAV, -1,
+                                                              nav->GetActiveAngle());
+      m_content.m_audioIndex = m_SelectionStreams.TypeIndexOf(STREAM_AUDIO, STREAM_SOURCE_NAV, -1,
+                                                              nav->GetActiveAudioStream());
+
+      // only update the subtitle index in libdvdnav if the subtitle is provided by the dvd itself,
+      // i.e. for external subtitles the index is always greater than the subtitlecount in dvdnav
+      if (m_content.m_subtitleIndex < nav->GetSubTitleStreamCount())
+      {
+        m_content.m_subtitleIndex = m_SelectionStreams.TypeIndexOf(
+            STREAM_SUBTITLE, STREAM_SOURCE_NAV, -1, nav->GetActiveSubtitleStream());
+      }
     }
+
+    audioIndex = m_content.m_audioIndex;
+    subtitleIndex = m_content.m_subtitleIndex;
   }
 
-  if (m_pInputStream->IsStreamType(DVDSTREAM_TYPE_BLURAY) && m_State.menuType == MenuType::NATIVE)
+  if (m_pInputStream && m_pInputStream->IsStreamType(DVDSTREAM_TYPE_BLURAY) &&
+      m_State.menuType == MenuType::NATIVE)
   {
-    // Update settings with changes made in bluray menu
-    CVideoSettings settings{m_processInfo->GetVideoSettings()};
-    settings.m_AudioStream = m_content.m_audioIndex;
-    settings.m_SubtitleStream = m_content.m_subtitleIndex;
-    m_processInfo->SetVideoSettings(settings);
+    const bool inMenu = IsInMenuInternal();
+    const bool discStateRestored = m_discStateRestored.load(std::memory_order_acquire);
+#if defined(HAVE_LIBBLURAY)
+    const auto bluray = GetBlurayInputStream();
+    const bool allowMenuSettingsSync =
+        (bluray && bluray->IsFeaturePlaylistLoaded()) ||
+        (discStateRestored && (!bluray || !bluray->IsInMainMenu()));
+#else
+    const bool allowMenuSettingsSync = discStateRestored;
+#endif
+    if (allowMenuSettingsSync &&
+        !(discStateRestored && m_pendingInitialSubtitleApply.load(std::memory_order_acquire)))
+    {
+      // Update only synced stream fields under m_videoSettingsMutex so concurrent
+      // RequestVideoSettings() updates to audio delay, zoom, etc. are never clobbered.
+      std::lock_guard<std::mutex> vsLock(m_videoSettingsMutex);
+      const auto& locked = m_processInfo->GetVideoSettingsLocked();
+      if (!inMenu || audioIndex >= 0)
+        locked.SetAudioStream(audioIndex);
+      if (!inMenu || subtitleIndex >= 0)
+      {
+        locked.SetSubtitleStream(subtitleIndex);
+#if defined(HAVE_LIBBLURAY)
+        if (STREAM_SOURCE_MASK(m_CurrentSubtitle.source) == STREAM_SOURCE_DEMUX && bluray)
+          locked.SetSubtitleVisible(bluray->IsPgEnabled());
+#endif
+      }
+    }
   }
 }
 
@@ -8264,17 +8607,366 @@ void CVideoPlayer::GetSubtitleStreamInfo(int index, SubtitleStreamInfo& info) co
   STREAM_SOURCE_MASK(s.source) == STREAM_SOURCE_TEXT;
 }
 
+void CVideoPlayer::ApplyPendingSavedSubtitle()
+{
+  if (!m_pendingInitialSubtitleApply.load(std::memory_order_acquire))
+    return;
+  if (m_videoSettingsLoadedGen.load(std::memory_order_acquire) !=
+      m_videoSettingsGeneration.load(std::memory_order_acquire))
+    return;
+  if (!m_pDemuxer)
+    return;
+
+  const bool isBlurayMenu = m_blurayMenu.load(std::memory_order_acquire);
+  const bool discStateRestored = m_discStateRestored.load(std::memory_order_acquire);
+  if (isBlurayMenu)
+  {
+    if (!discStateRestored)
+    {
+      // Fresh main-menu launch: respect the disc menu's choice and do not let stale DB rows lock OCR.
+      m_pendingInitialSubtitleApply.store(false, std::memory_order_release);
+      std::lock_guard<std::mutex> lock(m_videoSettingsMutex);
+      if (!m_pgsManualSelection.load(std::memory_order_acquire))
+      {
+        CVideoSettings vs = m_processInfo->GetVideoSettings();
+        if (vs.m_SubtitleSelectionSaved)
+        {
+          vs.m_SubtitleSelectionSaved = false;
+          m_processInfo->SetVideoSettings(vs);
+        }
+      }
+      return;
+    }
+    if (IsInMenuInternal())
+      return;
+#if defined(HAVE_LIBBLURAY)
+    if (const auto bluray = GetBlurayInputStream())
+    {
+      if (!bluray->CanSelectStream())
+        return; // Wait until held read/events complete so disc selection runs synchronously.
+    }
+#endif
+  }
+  else if (discStateRestored)
+  {
+    // DVD navigator restored its own subtitle state via SetState().
+    m_pendingInitialSubtitleApply.store(false, std::memory_order_release);
+    return;
+  }
+
+  m_pendingInitialSubtitleApply.store(false, std::memory_order_release);
+  if (m_pgsManualSelection.load(std::memory_order_acquire))
+    return;
+
+  const int savedStream = m_initialSubtitleStream.load(std::memory_order_acquire);
+  const bool savedVisible = m_initialSubtitleOn.load(std::memory_order_acquire);
+  if (!m_initialSubtitleSaved.load(std::memory_order_acquire))
+  {
+    // A late DB load with SubtitleStream=-1, SubtitlesOn=1 (when default was subtitles OFF)
+    // still needs to reopen a disabled demux stream (e.g. InputStream Adaptive where
+    // EnableStream(true) is a no-op) without marking m_SubtitleSelectionSaved.
+    if (!isBlurayMenu && savedVisible && m_subtitleDemuxDisabled && m_CurrentSubtitle.id >= 0 &&
+        STREAM_SOURCE_MASK(m_CurrentSubtitle.source) == STREAM_SOURCE_DEMUX)
+    {
+      const int prevSource = m_CurrentSubtitle.source;
+      const int64_t prevDemuxerId = m_CurrentSubtitle.demuxerId;
+      const int prevId = m_CurrentSubtitle.id;
+      CloseStream(m_CurrentSubtitle, false);
+      if (OpenStream(m_CurrentSubtitle, prevDemuxerId, prevId, prevSource))
+      {
+        SetEnableStream(m_CurrentSubtitle, true);
+        SetSubtitleVisibleInternal(true);
+      }
+    }
+    return;
+  }
+  const int subCount = m_SelectionStreams.CountType(STREAM_SUBTITLE);
+  const int current = m_SelectionStreams.TypeIndexOf(
+      STREAM_SUBTITLE, m_CurrentSubtitle.source, m_CurrentSubtitle.demuxerId, m_CurrentSubtitle.id);
+
+  if (isBlurayMenu)
+  {
+#if defined(HAVE_LIBBLURAY)
+    const auto bluray = GetBlurayInputStream();
+    auto syncActualBlurayState = [&](bool clearSaved) {
+      const int actualCurrent = m_SelectionStreams.TypeIndexOf(
+          STREAM_SUBTITLE, m_CurrentSubtitle.source, m_CurrentSubtitle.demuxerId,
+          m_CurrentSubtitle.id);
+      const bool actualVisible =
+          (bluray && STREAM_SOURCE_MASK(m_CurrentSubtitle.source) == STREAM_SOURCE_DEMUX)
+              ? bluray->IsPgEnabled()
+              : m_VideoPlayerVideo->IsSubtitleEnabled();
+      std::lock_guard<std::mutex> lock(m_videoSettingsMutex);
+      if (!m_pgsManualSelection.load(std::memory_order_acquire))
+      {
+        CVideoSettings vs = m_processInfo->GetVideoSettings();
+        vs.m_SubtitleStream = actualCurrent;
+        vs.m_SubtitleOn = actualVisible;
+        if (clearSaved)
+          vs.m_SubtitleSelectionSaved = false;
+        m_processInfo->SetVideoSettings(vs);
+      }
+    };
+
+    if (savedStream >= 0 && savedStream < subCount)
+    {
+      const SelectionStream& st = m_SelectionStreams.Get(STREAM_SUBTITLE, savedStream);
+      const bool isDiscSub = STREAM_SOURCE_MASK(st.source) == STREAM_SOURCE_DEMUX;
+      if (st.source != STREAM_SOURCE_NONE)
+      {
+        const bool canControlVisibility = !isDiscSub || !bluray || bluray->CanToggleSubtitle();
+        bool applied = (savedStream == current);
+        bool visibilityApplied = true;
+        if (!applied && SelectDiscStream(st, savedVisible))
+        {
+          const int prevSource = m_CurrentSubtitle.source;
+          const int64_t prevDemuxerId = m_CurrentSubtitle.demuxerId;
+          const int prevId = m_CurrentSubtitle.id;
+          const bool prevVisible = m_VideoPlayerVideo->IsSubtitleEnabled();
+          CloseStream(m_CurrentSubtitle, false);
+          if (OpenStream(m_CurrentSubtitle, st.demuxerId, st.id, st.source))
+          {
+            applied = true;
+            auto* sub = m_pDemuxer ? m_pDemuxer->GetStream(st.demuxerId, st.id) : nullptr;
+            if (isDiscSub && CanCacheSubtitleForSwitch(sub))
+              ReplaySubtitleForSwitch(
+                  sub, canControlVisibility ? savedVisible : (bluray ? bluray->IsPgEnabled() : savedVisible));
+          }
+          else if (prevId >= 0 && prevSource != STREAM_SOURCE_NONE)
+          {
+            if (isDiscSub && current >= 0)
+              SelectDiscStream(m_SelectionStreams.Get(STREAM_SUBTITLE, current), prevVisible);
+            if (OpenStream(m_CurrentSubtitle, prevDemuxerId, prevId, prevSource))
+            {
+              SetEnableStream(m_CurrentSubtitle, prevVisible);
+              SetSubtitleVisibleInternal(prevVisible);
+            }
+          }
+        }
+        else if (applied && isDiscSub && bluray && bluray->CanToggleSubtitle())
+        {
+          visibilityApplied = bluray->SetSubtitleVisible(savedVisible);
+        }
+
+        if (applied)
+        {
+          const bool finalVisible = (canControlVisibility && visibilityApplied)
+                                        ? savedVisible
+                                        : (bluray ? bluray->IsPgEnabled() : savedVisible);
+          const bool savedExact = !canControlVisibility || (finalVisible == savedVisible);
+          SetEnableStream(m_CurrentSubtitle, finalVisible);
+          SetSubtitleVisibleInternal(finalVisible);
+          {
+            std::lock_guard<std::mutex> lock(m_videoSettingsMutex);
+            if (!m_pgsManualSelection.load(std::memory_order_acquire))
+            {
+              CVideoSettings updated = m_processInfo->GetVideoSettings();
+              updated.m_SubtitleStream = savedStream;
+              updated.m_SubtitleOn = finalVisible;
+              updated.m_SubtitleSelectionSaved = savedExact;
+              m_processInfo->SetVideoSettings(updated);
+            }
+          }
+          CLog::Log(LOGDEBUG,
+                    "CVideoPlayer::ApplyPendingSavedSubtitle - restored Blu-ray subtitle index={} visible={} exact={}",
+                    savedStream, finalVisible, savedExact);
+        }
+        else
+        {
+          syncActualBlurayState(true);
+        }
+      }
+      else
+      {
+        syncActualBlurayState(true);
+      }
+    }
+    else if (!savedVisible && bluray && bluray->CanToggleSubtitle())
+    {
+      if (bluray->SetSubtitleVisible(false))
+      {
+        SetEnableStream(m_CurrentSubtitle, false);
+        SetSubtitleVisibleInternal(false);
+        std::lock_guard<std::mutex> lock(m_videoSettingsMutex);
+        if (!m_pgsManualSelection.load(std::memory_order_acquire))
+        {
+          CVideoSettings updated = m_processInfo->GetVideoSettings();
+          updated.m_SubtitleOn = false;
+          updated.m_SubtitleSelectionSaved = true;
+          m_processInfo->SetVideoSettings(updated);
+        }
+      }
+      else
+      {
+        syncActualBlurayState(true);
+      }
+    }
+    else if (savedStream >= subCount)
+    {
+      syncActualBlurayState(true);
+    }
+#endif
+    return;
+  }
+
+  // Late RequestVideoSettings() arrival (>500ms) for normal videos / non-menu Blu-ray.
+  if (savedStream >= 0 && savedStream < subCount)
+  {
+    const bool needsDemuxReopen =
+        (savedStream == current) && savedVisible && m_subtitleDemuxDisabled &&
+        STREAM_SOURCE_MASK(m_CurrentSubtitle.source) == STREAM_SOURCE_DEMUX;
+    bool applied = (savedStream == current) && !needsDemuxReopen;
+    if (!applied)
+    {
+      const SelectionStream& st = m_SelectionStreams.Get(STREAM_SUBTITLE, savedStream);
+      if (st.source != STREAM_SOURCE_NONE)
+      {
+        if (st.source == STREAM_SOURCE_NAV && m_pInputStream &&
+            m_pInputStream->IsStreamType(DVDSTREAM_TYPE_DVD))
+        {
+          auto pStream = std::static_pointer_cast<CDVDInputStreamNavigator>(m_pInputStream);
+          if (pStream->SetActiveSubtitleStream(st.id))
+          {
+            m_dvd.iSelectedSPUStream = -1;
+            CloseStream(m_CurrentSubtitle, false);
+            applied = true;
+          }
+        }
+        else
+        {
+          const int prevSource = m_CurrentSubtitle.source;
+          const int64_t prevDemuxerId = m_CurrentSubtitle.demuxerId;
+          const int prevId = m_CurrentSubtitle.id;
+          const bool prevVisible =
+              (STREAM_SOURCE_MASK(prevSource) == STREAM_SOURCE_DEMUX && m_subtitleDemuxDisabled)
+                  ? false
+                  : m_VideoPlayerVideo->IsSubtitleEnabled();
+          CloseStream(m_CurrentSubtitle, false);
+          if (OpenStream(m_CurrentSubtitle, st.demuxerId, st.id, st.source))
+          {
+            applied = true;
+            auto* sub = m_pDemuxer ? m_pDemuxer->GetStream(st.demuxerId, st.id) : nullptr;
+            if (STREAM_SOURCE_MASK(st.source) == STREAM_SOURCE_DEMUX &&
+                CanCacheSubtitleForSwitch(sub))
+              ReplaySubtitleForSwitch(sub, savedVisible);
+            CLog::Log(LOGDEBUG,
+                      "CVideoPlayer::ApplyPendingSavedSubtitle - late-applied saved subtitle index={} visible={}",
+                      savedStream, savedVisible);
+          }
+          else
+          {
+            // Restore the previously open subtitle stream (or fall back to default selection)
+            // so a broken saved external track never leaves playback without subtitles.
+            bool restored = false;
+            if (prevId >= 0 && prevSource != STREAM_SOURCE_NONE &&
+                OpenStream(m_CurrentSubtitle, prevDemuxerId, prevId, prevSource))
+            {
+              restored = true;
+              SetEnableStream(m_CurrentSubtitle, prevVisible);
+              SetSubtitleVisibleInternal(prevVisible);
+            }
+            if (!restored)
+            {
+              SelectionStream as = m_SelectionStreams.Get(STREAM_AUDIO, GetAudioStream());
+              PredicateSubtitlePriority psp(as.language, -1);
+              bool fallbackVisible = prevVisible;
+              for (const auto& fallback : m_SelectionStreams.Get(STREAM_SUBTITLE, psp))
+              {
+                if (OpenStream(m_CurrentSubtitle, fallback.demuxerId, fallback.id, fallback.source))
+                {
+                  if (!psp.relevant(fallback))
+                    fallbackVisible = false;
+                  SetEnableStream(m_CurrentSubtitle, fallbackVisible);
+                  SetSubtitleVisibleInternal(fallbackVisible);
+                  break;
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    if (applied)
+    {
+      SetEnableStream(m_CurrentSubtitle, savedVisible);
+      SetSubtitleVisibleInternal(savedVisible);
+      std::lock_guard<std::mutex> lock(m_videoSettingsMutex);
+      if (!m_pgsManualSelection.load(std::memory_order_acquire))
+      {
+        CVideoSettings updated = m_processInfo->GetVideoSettings();
+        updated.m_SubtitleStream = savedStream;
+        updated.m_SubtitleOn = savedVisible;
+        updated.m_SubtitleSelectionSaved = true;
+        m_processInfo->SetVideoSettings(updated);
+      }
+    }
+    else
+    {
+      std::lock_guard<std::mutex> lock(m_videoSettingsMutex);
+      if (!m_pgsManualSelection.load(std::memory_order_acquire))
+      {
+        CVideoSettings vs = m_processInfo->GetVideoSettings();
+        vs.m_SubtitleSelectionSaved = false;
+        m_processInfo->SetVideoSettings(vs);
+      }
+    }
+  }
+  else if (!savedVisible)
+  {
+    SetEnableStream(m_CurrentSubtitle, false);
+    SetSubtitleVisibleInternal(false);
+    std::lock_guard<std::mutex> lock(m_videoSettingsMutex);
+    if (!m_pgsManualSelection.load(std::memory_order_acquire))
+    {
+      CVideoSettings updated = m_processInfo->GetVideoSettings();
+      updated.m_SubtitleOn = false;
+      updated.m_SubtitleSelectionSaved = true;
+      m_processInfo->SetVideoSettings(updated);
+    }
+  }
+  else if (savedStream >= subCount)
+  {
+    std::lock_guard<std::mutex> lock(m_videoSettingsMutex);
+    if (!m_pgsManualSelection.load(std::memory_order_acquire))
+    {
+      CVideoSettings vs = m_processInfo->GetVideoSettings();
+      vs.m_SubtitleSelectionSaved = false;
+      m_processInfo->SetVideoSettings(vs);
+    }
+  }
+}
+
 void CVideoPlayer::CheckPGSPreferredSubtitle()
 {
   const auto settings = CServiceBroker::GetSettingsComponent()->GetSettings();
   const int preference = settings->GetInt(CSettings::SETTING_SUBTITLES_PGSPREFERREDTYPE);
   m_pgsProbe.SetPreferredType(preference);
+#if defined(HAVE_LIBBLURAY)
+  if (m_pgsAutoSwitchRejectedGen)
+  {
+    const auto bluray = GetBlurayInputStream();
+    if (!bluray || bluray->GetSubtitleSelectGeneration() != *m_pgsAutoSwitchRejectedGen)
+    {
+      m_pgsAutoSwitchRejectedGen.reset();
+      m_pgsAutoSwitchDone = false;
+    }
+  }
+#endif
   if (m_pgsManualSelection || m_pgsAutoSwitchDone || !m_pgsVideoSettingsReady ||
       m_processInfo->GetVideoSettings().m_SubtitleSelectionSaved ||
       !settings->GetBool(CSettings::SETTING_SUBTITLES_IDENTIFYPGS) ||
       !settings->GetBool(CSettings::SETTING_SUBTITLES_PGSAUTOSWITCH) ||
+      (m_blurayMenu &&
+       !settings->GetBool(CSettings::SETTING_SUBTITLES_PGSAUTOSWITCH_BLURAYMENU)) ||
       !m_processInfo->GetVideoSettings().m_SubtitleOn || IsInMenuInternal())
     return;
+#if defined(HAVE_LIBBLURAY)
+  if (m_blurayMenu)
+  {
+    if (const auto bluray = GetBlurayInputStream(); bluray && !bluray->CanSelectStream())
+      return;
+  }
+#endif
   const int selected = FindPGSPreferredSubtitle(preference);
   if (selected < 0) return;
   const int current = m_SelectionStreams.TypeIndexOf(STREAM_SUBTITLE, m_CurrentSubtitle.source,
@@ -8320,9 +9012,15 @@ int CVideoPlayer::FindPGSPreferredSubtitle(int preference)
 
 void CVideoPlayer::SetSubtitle(int iStream)
 {
-  m_pgsManualSelection = true;
+  {
+    std::lock_guard<std::mutex> lock(m_videoSettingsMutex);
+    m_pgsManualSelection.store(true, std::memory_order_release);
+    if (!m_blurayMenu.load(std::memory_order_acquire) ||
+        m_blurayOnFeaturePlaylist.load(std::memory_order_acquire))
+      m_blurayMenuFeaturePersistReady.store(true, std::memory_order_release);
+    m_processInfo->GetVideoSettingsLocked().SetSubtitleStream(iStream);
+  }
   m_messenger.Put(std::make_shared<CDVDMsgPlayerSetSubtitleStream>(iStream));
-  m_processInfo->GetVideoSettingsLocked().SetSubtitleStream(iStream);
 }
 
 int CVideoPlayer::GetSubtitleCount() const

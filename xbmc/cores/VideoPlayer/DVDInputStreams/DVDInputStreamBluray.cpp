@@ -931,6 +931,18 @@ bool CDVDInputStreamBluray::IsFeaturePlaylistActive()
   return m_titleInfo && m_titleInfo->duration >= 10 * 60 * 90000ULL;
 }
 
+bool CDVDInputStreamBluray::IsFeaturePlaylistLoaded()
+{
+  if (m_playlist > MAX_PLAYLIST_ID)
+    return false;
+  if (m_isInMainMenu)
+    return false;
+  if (m_featurePlaylist <= MAX_PLAYLIST_ID && m_playlist == m_featurePlaylist)
+    return true;
+  std::lock_guard<std::mutex> lock(m_clipTableMutex);
+  return m_titleInfo && m_titleInfo->duration >= 10 * 60 * 90000ULL;
+}
+
 bool CDVDInputStreamBluray::IsOnFeaturePlaylist()
 {
   if (m_playlist > MAX_PLAYLIST_ID || m_featurePlaylist > MAX_PLAYLIST_ID)
@@ -1468,6 +1480,7 @@ void CDVDInputStreamBluray::ProcessEvent() {
     }
     m_playlist = m_event.param;
     ProcessItem(m_playlist);
+    m_subtitleSelectGen.fetch_add(1, std::memory_order_release);
     break;
 
   case BD_EVENT_PLAYITEM:
@@ -1516,6 +1529,7 @@ void CDVDInputStreamBluray::ProcessEvent() {
             resolvedPgPid = m_clip->pg_streams[m_pgStreamNumber - 1].pid;
         }
       }
+      m_subtitleSelectGen.fetch_add(1, std::memory_order_release);
       LoadPipLayouts(m_event.param);
       // Re-resolve active PSR audio/PG stream numbers against the new PlayItem's STN table.
       // libbluray only emits BD_EVENT_AUDIO_STREAM / BD_EVENT_PG_TEXTST_STREAM on PlayItem
@@ -1534,6 +1548,7 @@ void CDVDInputStreamBluray::ProcessEvent() {
         }
         if (m_pgStreamNumber > 0)
         {
+          m_pgStreamPick = false;
           logComponentM(LOGDEBUG, LOGBLURAY,
                         "CDVDInputStreamBluray - BD_EVENT_PLAYITEM {} resolved pg stream {} -> pid {}",
                         m_event.param, m_pgStreamNumber, resolvedPgPid);
@@ -1583,6 +1598,9 @@ void CDVDInputStreamBluray::ProcessEvent() {
       if (m_titleInfo && m_clip &&
           static_cast<uint32_t>(m_clip->pg_stream_count) > (m_event.param - 1))
         pid = m_clip->pg_streams[m_event.param - 1].pid;
+      m_pgStreamPick = pid >= 0 && m_event.param != m_pgStreamNumber && m_titleInfo &&
+                       m_clip && m_pgStreamNumber > 0 &&
+                       m_pgStreamNumber <= static_cast<uint32_t>(m_clip->pg_stream_count);
     }
     m_pgStreamNumber = m_event.param;
     logComponentM(LOGDEBUG, LOGBLURAY, "CDVDInputStreamBluray - BD_EVENT_PG_TEXTST_STREAM {}, {}", m_event.param,
@@ -1663,6 +1681,7 @@ void CDVDInputStreamBluray::ProcessEvent() {
 
   case BD_EVENT_UO_MASK_CHANGED:
     m_uoMask = m_event.param;
+    m_subtitleSelectGen.fetch_add(1, std::memory_order_release);
     logComponentM(LOGDEBUG, LOGBLURAY,
                   "CDVDInputStreamBluray - BD_EVENT_UO_MASK_CHANGED 0x{:x} (menu_call={} time_search={} chapter_search={})",
                   m_event.param, (m_event.param & BLURAY_UO_MENU_CALL) != 0,
@@ -1672,6 +1691,7 @@ void CDVDInputStreamBluray::ProcessEvent() {
 
   case BD_EVENT_PLAYLIST_STOP:
     logComponentM(LOGDEBUG, LOGBLURAY, "CDVDInputStreamBluray - BD_EVENT_PLAYLIST_STOP: flush buffers");
+    m_subtitleSelectGen.fetch_add(1, std::memory_order_release);
     m_titleEndWait = false;
     m_menuRestorePlaylist = (m_menu && m_hasMenuOverlay) ? m_playlist : MAX_PLAYLIST_ID + 1;
     m_menu = false;
@@ -3803,20 +3823,21 @@ bool CDVDInputStreamBluray::SetActiveSubtitleStream(int pid, bool visible)
     return false;
 
   // the flag rides along with the stream number, so keep the disc's while it forbids toggling
-  bd_select_stream(m_bd, BLURAY_PG_TEXTST_STREAM, number,
-                   CanToggleSubtitle() ? visible : m_pgEnabled);
+  const bool targetVisible = CanToggleSubtitle() ? visible : m_pgEnabled;
+  bd_select_stream(m_bd, BLURAY_PG_TEXTST_STREAM, number, targetVisible);
   m_pgStreamNumber = number;
+  m_pgEnabled = targetVisible;
   return true;
 }
 
-void CDVDInputStreamBluray::SetSubtitleVisible(bool visible)
+bool CDVDInputStreamBluray::SetSubtitleVisible(bool visible)
 {
   if (!m_bd || !m_navmode)
-    return;
+    return false;
   if (!CanSelectStream())
   {
     m_pgVisiblePending = visible;
-    return;
+    return true;
   }
   m_pgVisiblePending.reset();
 
@@ -3824,13 +3845,15 @@ void CDVDInputStreamBluray::SetSubtitleVisible(bool visible)
   {
     std::lock_guard<std::mutex> lock(m_clipTableMutex);
     if (!m_clip)
-      return;
+      return false;
     pgCount = static_cast<uint32_t>(m_clip->pg_stream_count);
   }
   if (!CanToggleSubtitle() || m_pgStreamNumber == 0 || m_pgStreamNumber > pgCount)
-    return;
+    return false;
 
   bd_select_stream(m_bd, BLURAY_PG_TEXTST_STREAM, m_pgStreamNumber, visible);
+  m_pgEnabled = visible;
+  return true;
 }
 
 bool CDVDInputStreamBluray::CanChangeAudioStream() const

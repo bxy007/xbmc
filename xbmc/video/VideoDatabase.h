@@ -553,7 +553,7 @@ public:
   bool GetSetInfo(int idSet, CVideoInfoTag& details, CFileItem* item = nullptr);
   bool GetFileInfo(const std::string& strFilenameAndPath, CVideoInfoTag& details, int idFile = -1);
 
-  int GetPathId(const std::string& strPath) const;
+  int GetPathId(const std::string& strPath, bool* querySucceeded = nullptr) const;
   int GetTvShowId(const std::string& strPath);
   int GetEpisodeId(const std::string& strFilenameAndPath, int idEpisode=-1, int idSeason=-1); // idEpisode, idSeason are used for multipart episodes as hints
   int GetSeasonId(int idShow, int season) const;
@@ -621,21 +621,27 @@ public:
    \return true if video settings found, false otherwise
    \sa SetVideoSettings
    */
-  bool GetVideoSettings(int idFile, CVideoSettings &settings) const;
+  bool GetVideoSettings(int idFile,
+                        CVideoSettings& settings,
+                        bool* querySucceeded = nullptr) const;
 
   /*! \brief Get video settings for the specified file item
    \param item item to get the settings for
    \return true if video settings found, false otherwise
    \sa SetVideoSettings
    */
-  bool GetVideoSettings(const CFileItem &item, CVideoSettings &settings);
+  bool GetVideoSettings(const CFileItem& item,
+                        CVideoSettings& settings,
+                        bool* querySucceeded = nullptr);
 
   /*! \brief Get video settings for the specified file path
    \param filePath filepath to get the settings for
    \return true if video settings found, false otherwise
    \sa SetVideoSettings
    */
-  bool GetVideoSettings(const std::string &filePath, CVideoSettings &settings);
+  bool GetVideoSettings(const std::string& filePath,
+                        CVideoSettings& settings,
+                        bool* querySucceeded = nullptr);
 
   /*! \brief Set video settings for the specified file path
    \param fileItem to set the settings for
@@ -1110,8 +1116,8 @@ protected:
    \param item CFileItem to grab the fileid of
    \return id of the file, -1 if it is not in the db.
    */
-  int GetFileId(const CFileItem &item);
-  int GetFileId(const CVideoInfoTag& details);
+  int GetFileId(const CFileItem& item, bool* querySucceeded = nullptr);
+  int GetFileId(const CVideoInfoTag& details, bool* querySucceeded = nullptr);
 
   /*! \brief Get the id of the file of this item and store it in the item
    \param details CVideoInfoTag for which to get and store the id of the file
@@ -1123,7 +1129,7 @@ protected:
    \param url full path to the file
    \return id of the file, -1 if it is not in the db.
    */
-  int GetFileId(const std::string& url);
+  int GetFileId(const std::string& url, bool* querySucceeded = nullptr);
 
   int AddToTable(const std::string& table, const std::string& firstField, const std::string& secondField, const std::string& value) const;
   int UpdateRatings(int mediaId, const char *mediaType, const RatingMap& values, const std::string& defaultRating);

@@ -305,7 +305,7 @@ int pgs_sub_word_language(const char* text, struct pgs_sub_caption_language* cap
 void pgs_sub_line_language(const char* text, int line, int minimumConfidence,
                            struct pgs_sub_caption_language* caption)
 {
-  if (line != 1 || minimumConfidence < 70)
+  if (line < 0 || minimumConfidence < 70)
     return;
   int letters = 0;
   std::string_view s(text);
@@ -319,6 +319,9 @@ void pgs_sub_line_language(const char* text, int line, int minimumConfidence,
       return; // Includes Han, other scripts and invalid UTF-8.
   }
   // A single letter is too little evidence; short words such as "No!" count.
+  // Same-caption Han evidence is checked in pgs_sub_bilingual_feed(), so any
+  // separate English line (top, second, or third) confirms bilingual captions
+  // while English-only signs/credits never trigger false positives.
   caption->english_second_line |= letters >= 2;
 }
 
@@ -346,7 +349,7 @@ bool pgs_sub_matches_preference(const pgs_subtitle_info& info, int preference)
     return false;
   const auto script = preference % 2 == 0 ? PGS_SUB_SCRIPT_SIMPLIFIED : PGS_SUB_SCRIPT_TRADITIONAL;
   return info.script == script && (preference >= 2 ? info.bilingual :
-      (!info.bilingual && (info.descriptive_title || info.sampled)));
+      (!info.bilingual && (info.descriptive_title || info.monolingual_confirmed)));
 }
 
 int pgs_sub_select_preference(const std::vector<pgs_subtitle_info>& candidates,
@@ -388,7 +391,7 @@ void pgs_sub_bilingual_feed(struct pgs_sub_bilingual_evidence* e,
                             const struct pgs_sub_caption_language* c,
                             struct pgs_subtitle_info* info)
 {
-  e->english_line |= c->english_second_line;
+  e->english_line |= c->english_second_line && c->han_chars >= 2;
   e->chinese |= c->han_chars >= 2;
   info->bilingual |= e->english_line && (e->chinese || info->script_from_title ||
                                        info->script != PGS_SUB_SCRIPT_UNKNOWN);

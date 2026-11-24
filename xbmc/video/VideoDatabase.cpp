@@ -733,7 +733,9 @@ void CVideoDatabase::CreateViews()
 }
 
 //********************************************************************************************************************************
-int CVideoDatabase::GetPathId(const std::string& strPath) const {
+int CVideoDatabase::GetPathId(const std::string& strPath, bool* querySucceeded) const {
+  if (querySucceeded)
+    *querySucceeded = false;
   std::string strSQL;
   try
   {
@@ -750,11 +752,14 @@ int CVideoDatabase::GetPathId(const std::string& strPath) const {
     URIUtils::AddSlashAtEnd(strPath1);
 
     strSQL=PrepareSQL("select idPath from path where strPath='%s'",strPath1.c_str());
-    m_pDS->query(strSQL);
+    if (!m_pDS->query(strSQL))
+      return -1;
     if (!m_pDS->eof())
       idPath = m_pDS->fv("path.idPath").get_asInt();
 
     m_pDS->close();
+    if (querySucceeded)
+      *querySucceeded = true;
     return idPath;
   }
   catch (...)
@@ -1300,8 +1305,10 @@ bool CVideoDatabase::GetLinksToTvShow(int idMovie, std::vector<int>& ids) const 
 
 
 //********************************************************************************************************************************
-int CVideoDatabase::GetFileId(const std::string& strFilenameAndPath)
+int CVideoDatabase::GetFileId(const std::string& strFilenameAndPath, bool* querySucceeded)
 {
+  if (querySucceeded)
+    *querySucceeded = false;
   try
   {
     if (nullptr == m_pDB)
@@ -1311,19 +1318,28 @@ int CVideoDatabase::GetFileId(const std::string& strFilenameAndPath)
     std::string strPath, strFileName;
     SplitPath(strFilenameAndPath,strPath,strFileName);
 
-    int idPath = GetPathId(strPath);
+    bool pathOk = false;
+    int idPath = GetPathId(strPath, &pathOk);
+    if (!pathOk)
+      return -1;
     if (idPath >= 0)
     {
       std::string strSQL;
       strSQL=PrepareSQL("select idFile from files where strFileName='%s' and idPath=%i", strFileName.c_str(),idPath);
-      m_pDS->query(strSQL);
+      if (!m_pDS->query(strSQL))
+        return -1;
       if (m_pDS->num_rows() > 0)
       {
         int idFile = m_pDS->fv("files.idFile").get_asInt();
         m_pDS->close();
+        if (querySucceeded)
+          *querySucceeded = true;
         return idFile;
       }
+      m_pDS->close();
     }
+    if (querySucceeded)
+      *querySucceeded = true;
   }
   catch (...)
   {
@@ -1332,28 +1348,50 @@ int CVideoDatabase::GetFileId(const std::string& strFilenameAndPath)
   return -1;
 }
 
-int CVideoDatabase::GetFileId(const CFileItem &item)
+int CVideoDatabase::GetFileId(const CFileItem& item, bool* querySucceeded)
 {
+  if (querySucceeded)
+    *querySucceeded = false;
   int fileId = -1;
   if (item.HasVideoInfoTag())
-    fileId = GetFileId(*item.GetVideoInfoTag());
+  {
+    bool tagOk = false;
+    fileId = GetFileId(*item.GetVideoInfoTag(), &tagOk);
+    if (!tagOk)
+      return -1;
+  }
 
   if (fileId == -1)
-    fileId = GetFileId(item.GetPath());
+  {
+    bool pathOk = false;
+    fileId = GetFileId(item.GetPath(), &pathOk);
+    if (!pathOk)
+      return -1;
+  }
 
+  if (querySucceeded)
+    *querySucceeded = true;
   return fileId;
 }
 
-int CVideoDatabase::GetFileId(const CVideoInfoTag& details)
+int CVideoDatabase::GetFileId(const CVideoInfoTag& details, bool* querySucceeded)
 {
   if (details.m_iFileId > 0)
+  {
+    if (querySucceeded)
+      *querySucceeded = true;
     return details.m_iFileId;
+  }
 
   const auto& filePath = details.GetPath();
   if (filePath.empty())
+  {
+    if (querySucceeded)
+      *querySucceeded = true;
     return -1;
+  }
 
-  return GetFileId(filePath);
+  return GetFileId(filePath, querySucceeded);
 }
 
 int CVideoDatabase::GetAndFillFileId(CVideoInfoTag& details)
@@ -4885,29 +4923,67 @@ void CVideoDatabase::GetUniqueIDs(int media_id, const std::string &media_type, C
   }
 }
 
-bool CVideoDatabase::GetVideoSettings(const CFileItem &item, CVideoSettings &settings)
+bool CVideoDatabase::GetVideoSettings(const CFileItem& item,
+                                      CVideoSettings& settings,
+                                      bool* querySucceeded)
 {
-  return GetVideoSettings(GetFileId(item), settings);
+  if (querySucceeded)
+    *querySucceeded = false;
+  bool fileIdOk = false;
+  const int idFile = GetFileId(item, &fileIdOk);
+  if (!fileIdOk)
+    return false;
+  if (idFile < 0)
+  {
+    if (querySucceeded)
+      *querySucceeded = true;
+    return false;
+  }
+  return GetVideoSettings(idFile, settings, querySucceeded);
 }
 
 /// \brief GetVideoSettings() obtains any saved video settings for the current file.
 /// \retval Returns true if the settings exist, false otherwise.
-bool CVideoDatabase::GetVideoSettings(const std::string &filePath, CVideoSettings &settings)
+bool CVideoDatabase::GetVideoSettings(const std::string& filePath,
+                                      CVideoSettings& settings,
+                                      bool* querySucceeded)
 {
-  return GetVideoSettings(GetFileId(filePath), settings);
+  if (querySucceeded)
+    *querySucceeded = false;
+  bool fileIdOk = false;
+  const int idFile = GetFileId(filePath, &fileIdOk);
+  if (!fileIdOk)
+    return false;
+  if (idFile < 0)
+  {
+    if (querySucceeded)
+      *querySucceeded = true;
+    return false;
+  }
+  return GetVideoSettings(idFile, settings, querySucceeded);
 }
 
-bool CVideoDatabase::GetVideoSettings(int idFile, CVideoSettings &settings) const {
+bool CVideoDatabase::GetVideoSettings(int idFile,
+                                      CVideoSettings& settings,
+                                      bool* querySucceeded) const {
+  if (querySucceeded)
+    *querySucceeded = false;
   try
   {
-    if (idFile < 0) return false;
     if (nullptr == m_pDB)
       return false;
     if (nullptr == m_pDS)
       return false;
+    if (idFile < 0)
+    {
+      if (querySucceeded)
+        *querySucceeded = true;
+      return false;
+    }
 
     std::string strSQL=PrepareSQL("select * from settings where settings.idFile = '%i'", idFile);
-    m_pDS->query( strSQL );
+    if (!m_pDS->query(strSQL))
+      return false;
 
     if (m_pDS->num_rows() > 0)
     { // get the video settings info
@@ -4940,9 +5016,13 @@ bool CVideoDatabase::GetVideoSettings(int idFile, CVideoSettings &settings) cons
       settings.m_Orientation = m_pDS->fv("Orientation").get_asInt();
       settings.m_CenterMixLevel = m_pDS->fv("CenterMixLevel").get_asInt();
       m_pDS->close();
+      if (querySucceeded)
+        *querySucceeded = true;
       return true;
     }
     m_pDS->close();
+    if (querySucceeded)
+      *querySucceeded = true;
   }
   catch (...)
   {

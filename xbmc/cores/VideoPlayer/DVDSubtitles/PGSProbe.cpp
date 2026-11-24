@@ -36,11 +36,11 @@ extern "C"
 
 namespace
 {
-constexpr size_t MAX_TRACKS = 16;
+constexpr size_t MAX_TRACKS = 32;
 constexpr size_t MAX_QUEUE = 1024;
 constexpr size_t MAX_BYTES = 4 * 1024 * 1024;
 constexpr int MAX_ATTEMPTS = 96;
-constexpr int MAX_BILINGUAL_CAPTIONS = 24;
+constexpr int MAX_BILINGUAL_CAPTIONS = 12;
 constexpr int MAX_DECODE_CAPTIONS = 96;
 constexpr int MAX_DISPLAY_SETS = 4096;
 constexpr size_t RECENT_BITMAPS = 128;
@@ -54,7 +54,7 @@ struct Evidence
   pgs_sub_bilingual_evidence bilingual{};
   std::array<uint64_t, RECENT_BITMAPS> recent{};
   unsigned numBitmaps{};
-  int attempts{}, decoded{}, displaySets{};
+  int attempts{}, decoded{}, completeBilingualChecks{}, displaySets{};
   double lastPts{NAN}, lastOcrPts{NAN};
   uint64_t ocrMs{};
 };
@@ -242,16 +242,34 @@ struct CPGSProbe::Impl
   }
   void FinishSparseTracks()
   {
+    if (tracks.size() < 2)
+      return;
     size_t active = 0;
     for (const auto& entry : tracks)
       active += entry.second->activity.Active(sampleClock);
-    if (active < 2 || active * 2 <= tracks.size())
+    const bool multiTrackQuorum = active >= 2 && active * 2 > tracks.size();
+    if (tracks.size() > 2 && !multiTrackQuorum)
       return;
     for (auto& entry : tracks)
     {
       auto& track = *entry.second;
       if (track.finished || !track.activity.Sparse(sampleClock))
         continue;
+      if (tracks.size() == 2)
+      {
+        bool otherActive = false;
+        for (const auto& peer : tracks)
+        {
+          if (peer.second.get() == &track)
+            continue;
+          const auto& other = *peer.second;
+          if (other.activity.Active(sampleClock) &&
+              ((other.finished && !other.sparseFinished) || !other.activity.Sparse(sampleClock)))
+            otherActive = true;
+        }
+        if (!otherActive)
+          continue;
+      }
       const bool pending = std::any_of(queue.begin(), queue.end(), [&](const Packet& packet)
       {
         return packet.track == entry.second && packet.epoch == epoch &&
@@ -567,10 +585,12 @@ struct CPGSProbe::Impl
     int confidence = 100;
     const auto ocrBegin = std::chrono::steady_clock::now();
     int lineOffset = 0;
+    bool captionIncomplete = sample.images.empty();
     for (const auto& image : sample.images)
     {
       if (!ocr || Cancel(&cancel)) break;
       int conf = 0;
+      bool imageIncomplete = false;
       struct Lines { pgs_sub_caption_language& caption; int offset; } lines{caption, lineOffset};
       char* part = pgs_ocr_recognise(ocr, image.pixels.data(), image.w, image.h, &conf,
           Cancel, &cancel, ObserveWord, &caption,
@@ -578,7 +598,9 @@ struct CPGSProbe::Impl
           {
             const auto& lines = *static_cast<Lines*>(ctx);
             ObserveLine(&lines.caption, line + lines.offset, raw, minimumConfidence);
-          }, &lines);
+          }, &lines, &imageIncomplete);
+      if (!part || imageIncomplete)
+        captionIncomplete = true;
       if (part && *part && conf >= 55)
       {
         text += part;
@@ -591,6 +613,8 @@ struct CPGSProbe::Impl
         std::chrono::steady_clock::now() - ocrBegin).count();
     if (Cancel(&cancel))
       return;
+    if (ocr && !captionIncomplete)
+      ++e.completeBilingualChecks;
     if (!text.empty() && !info.script_from_title)
       pgs_sub_script_feed(&e.script, text.c_str(), confidence);
     if (e.script.confirmed != PGS_SUB_SCRIPT_UNKNOWN)
@@ -598,8 +622,10 @@ struct CPGSProbe::Impl
     pgs_sub_bilingual_feed(&e.bilingual, &caption, &info);
     info.samples = e.decoded;
     info.ocr_available = ocr != nullptr;
+    info.monolingual_confirmed =
+        !info.bilingual && e.completeBilingualChecks >= MAX_BILINGUAL_CAPTIONS;
     const bool scriptDone = info.script_from_title || e.script.confirmed != PGS_SUB_SCRIPT_UNKNOWN;
-    const bool bilingualDone = info.bilingual || e.decoded >= MAX_BILINGUAL_CAPTIONS;
+    const bool bilingualDone = info.bilingual || info.monolingual_confirmed;
     info.sampled = (scriptDone && bilingualDone) || (!ocr && e.displaySets >= MAX_DECODE_CAPTIONS) ||
                    e.attempts >= MAX_ATTEMPTS;
     Publish(q, e, info);
@@ -825,8 +851,29 @@ void CPGSProbe::Feed(Key key,
     if (it == p.tracks.end())
     {
       const auto candidateLanguage = static_cast<CandidateLanguage>(pgs_sub_candidate_language(language, title));
-      if (candidateLanguage == CandidateLanguage::Other || p.tracks.size() >= MAX_TRACKS)
+      if (candidateLanguage == CandidateLanguage::Other)
         return;
+      if (p.tracks.size() >= MAX_TRACKS)
+      {
+        if (candidateLanguage != CandidateLanguage::Chinese)
+          return;
+        auto victim = p.tracks.end();
+        for (auto cand = p.tracks.begin(); cand != p.tracks.end(); ++cand)
+        {
+          const auto& track = *cand->second;
+          if (track.candidateLanguage != CandidateLanguage::Unknown || track.finished ||
+              track.info.script != PGS_SUB_SCRIPT_UNKNOWN || track.info.bilingual)
+            continue;
+          if (victim == p.tracks.end() || track.info.samples < victim->second->info.samples)
+            victim = cand;
+        }
+        if (victim == p.tracks.end())
+          return;
+        ++victim->second->generation;
+        victim->second->finished = true;
+        p.tracks.erase(victim);
+        p.PruneReady();
+      }
       auto t = std::make_shared<Impl::Track>();
       t->key = key;
       t->language = language;

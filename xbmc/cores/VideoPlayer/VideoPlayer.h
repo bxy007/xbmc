@@ -25,6 +25,7 @@
 #include "cores/VideoPlayer/Interface/TimingConstants.h"
 #include "cores/VideoPlayer/VideoRenderers/RenderManager.h"
 #include "guilib/DispResource.h"
+#include "threads/Event.h"
 #include "threads/SystemClock.h"
 #include "threads/Thread.h"
 
@@ -32,6 +33,7 @@
 #include <chrono>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <unordered_map>
 #include <utility>
@@ -432,7 +434,8 @@ protected:
   bool PlayNavTail();
   void SendVideoDrain();
   bool DropInNavTail(CDVDMsg& msg);
-  bool SelectDiscStream(const SelectionStream& st);
+  bool SelectDiscStream(const SelectionStream& st,
+                        std::optional<bool> subtitleVisible = std::nullopt);
   bool TakeDiscAudioPick(CDemuxStream* stream);
   void UpdateBluraySubtitleStream();
   void UpdateBlurayPip();
@@ -595,9 +598,25 @@ protected:
   CSelectionStreams m_SelectionStreams;
   CPGSProbe m_pgsProbe;
   CSubtitleSwitchCache m_subtitleSwitchCache;
+  std::mutex m_videoSettingsMutex;
+  CEvent m_videoSettingsEvent{true};
+  std::atomic<uint64_t> m_videoSettingsGeneration{0};
+  std::atomic<uint64_t> m_videoSettingsLoadedGen{0};
+  std::atomic<bool> m_videoSettingsPersistable{false};
+  std::atomic<bool> m_blurayMenuFeaturePersistReady{false};
+  std::atomic<bool> m_blurayOnFeaturePlaylist{false};
+  std::atomic<bool> m_pendingInitialSubtitleApply{false};
+  std::atomic<bool> m_discStateRestored{false};
+  std::atomic<bool> m_discStateKnown{false};
+  std::atomic<int> m_initialSubtitleStream{-1};
+  std::atomic<bool> m_initialSubtitleOn{true};
+  std::atomic<bool> m_initialSubtitleSaved{false};
   std::atomic<bool> m_pgsVideoSettingsReady{false};
   std::atomic<bool> m_pgsManualSelection{false};
   bool m_pgsAutoSwitchDone{false}; // player thread only
+  std::optional<uint64_t> m_pgsAutoSwitchRejectedGen; // player thread only
+  mutable bool m_subtitleDemuxDisabled{false}; // player thread only
+  void ApplyPendingSavedSubtitle();
   void CheckPGSPreferredSubtitle();
   int FindPGSPreferredSubtitle(int preference);
   std::vector<ProgramInfo> m_programs;

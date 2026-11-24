@@ -295,14 +295,18 @@ void CApplicationPlayerCallback::RequestVideoSettings(const CFileItem& fileItem)
 
     // Load stored settings if they exist, otherwise use default
     CVideoSettings vs;
-    const bool saved = dbs.GetVideoSettings(fileItem, vs);
-    if (!saved)
-      vs = CMediaSettings::GetInstance().GetDefaultVideoSettings();
-    vs.m_SubtitleSelectionSaved = saved && (vs.m_SubtitleStream >= 0 || !vs.m_SubtitleOn);
+    bool querySucceeded = false;
+    const bool saved = dbs.GetVideoSettings(fileItem, vs, &querySucceeded);
+    if (querySucceeded)
+    {
+      if (!saved)
+        vs = CMediaSettings::GetInstance().GetDefaultVideoSettings();
+      vs.m_SubtitleSelectionSaved = saved && (vs.m_SubtitleStream >= 0 || !vs.m_SubtitleOn);
 
-    auto& components = CServiceBroker::GetAppComponents();
-    const auto appPlayer = components.GetComponent<CApplicationPlayer>();
-    appPlayer->SetVideoSettings(vs);
+      auto& components = CServiceBroker::GetAppComponents();
+      const auto appPlayer = components.GetComponent<CApplicationPlayer>();
+      appPlayer->SetVideoSettings(vs);
+    }
 
     dbs.Close();
   }

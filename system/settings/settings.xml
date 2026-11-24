@@ -726,6 +726,20 @@
           </dependencies>
           <control type="toggle" />
         </setting>
+        <setting id="subtitles.pgsautoswitchbluraymenu" type="boolean" label="44418" help="44419">
+          <requirement>HAS_PGS_OCR</requirement>
+          <level>0</level>
+          <default>true</default>
+          <dependencies>
+            <dependency type="enable">
+              <and>
+                <condition setting="subtitles.identifypgs" operator="is">true</condition>
+                <condition setting="subtitles.pgsautoswitch" operator="is">true</condition>
+              </and>
+            </dependency>
+          </dependencies>
+          <control type="toggle" />
+        </setting>
         <setting id="subtitles.pgspreferredtype" type="integer" label="44416" help="44417">
           <requirement>HAS_PGS_OCR</requirement>
           <level>0</level>

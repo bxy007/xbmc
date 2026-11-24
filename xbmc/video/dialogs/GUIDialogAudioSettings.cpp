@@ -182,6 +182,7 @@ bool CGUIDialogAudioSettings::Save()
   const auto appPlayer = components.GetComponent<CApplicationPlayer>();
   CMediaSettings::GetInstance().GetDefaultVideoSettings() = appPlayer->GetVideoSettings();
   CMediaSettings::GetInstance().GetDefaultVideoSettings().m_AudioStream = -1;
+  CMediaSettings::GetInstance().GetDefaultVideoSettings().m_SubtitleStream = -1;
   CServiceBroker::GetSettingsComponent()->GetSettings()->Save();
 
   return true;

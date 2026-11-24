@@ -17,17 +17,25 @@ A word such as 特效 in an original authoritative title is not erased.
 
 Five consecutive script-specific characters confirm Simplified/Traditional
 Chinese. Shared/ambiguous characters do not vote; confidence and bitmap/text
-deduplication remain unchanged. A confidently recognized second physical line containing English letters and
+deduplication remain unchanged. Any confidently recognized separate physical line containing English letters and
 only ASCII digits/punctuation or common typographic punctuation confirms English
-immediately (at least two letters; every decoded character confidence >=70%).
+immediately when the same caption also contains Chinese evidence (at least two
+Han characters, at least two English letters, and every decoded character on the
+English line confidence >=70%).
 The unfiltered line is checked so low-confidence Chinese cannot disappear and
-produce false English evidence. Separate Chinese evidence (two Han characters
-or known script) is still required. Script identification keeps its five-character
+produce false English evidence; requiring same-caption Han characters allows
+English-on-top and multi-line Chinese+English layouts while preventing
+English-only credits/signs from triggering false positives. Script identification keeps its five-character
 rule. Other layouts retain the fallback: at least four Han characters, eight
 Latin letters and two Latin word groups in each of three usable captions. Script and bilingual completion are separate; a confirmed
-bilingual track no longer needs extra samples for styling. A script-confirmed
-track without bilingual evidence finishes after 24 distinct OCR captions;
-the maximum remains 96 attempts/decoded captions and 4096 display sets.
+bilingual track no longer needs extra samples for styling. A script-confirmed track without bilingual evidence confirms monolingual only
+after 12 complete OCR captions (no soft-timeout truncation, no skipped
+over-wide line, no unreadable/low-confidence detected text line, and no
+null/failed image recognition). Incomplete captions
+retain positive script/bilingual evidence without exhausting the monolingual
+budget; hitting the 96-attempt hard cap (or sparsity / unavailable OCR) stops
+further work (`sampled`) without falsely confirming monolingual. The maximum
+remains 96 attempts/decoded captions and 4096 display sets.
 
 Chinese aliases and unknown-language candidates retain the original filter.
 A useful title, including 简英/繁英, skips bitmap analysis. Language tags alone
@@ -44,16 +52,19 @@ layouts cheaply: bilingual preferences prioritize multiline images, monolingual
 preferences prioritize single-line images. Within that group, matching script
 precedes unknown then other script; Chinese metadata precedes unknown language.
 Tracks rotate within each level; each
-track's PGS packet order is preserved. The bounded queue remains 1024 packets /
+track's PGS packet order is preserved. Up to 32 candidate tracks are admitted
+(when full, Chinese-tagged tracks evict the least-sampled unconfirmed unknown-language
+track). The bounded queue remains 1024 packets /
 4 MiB including FFmpeg padding, with lower-priority backlog eviction and decoder
 generation resets when higher-priority work needs space. Prepared grayscale images
-hold at most one sample per track. Decode-ahead yields after64 packets or when
-prepared images reach8 MiB (one final sample may exceed that threshold, by at most
-four bounded2080x544 images). Epoch/generation changes discard prepared work too;
+hold at most one sample per track. Decode-ahead yields after 64 packets or when
+prepared images reach 8 MiB (one final sample may exceed that threshold, by at most
+four bounded 2080x544 images). Epoch/generation changes discard prepared work too;
 pending images protect tracks from premature sparse completion. No decoded user
 images or recognized text are written to disk. Sample spacing is at
 least one media second and the recent-ink hash history is 128 entries.
-The per-image soft cutoff stays four seconds for multiline/slower ARM inputs.
+The per-image soft cutoff is six seconds for multiline/slower ARM inputs, keeping
+already-decoded lines instead of discarding the caption on timeout.
 
 ## Sparse tracks and model lifetime
 
@@ -63,8 +74,11 @@ cannot prematurely age a track. Nonempty PGS PCS objects count as data activity;
 clear/empty PCS packets do not. At a one-second maintenance cadence while a model
 is loaded, a candidate is active only after a full 60 playback seconds of
 observation, with at least three data events in the last 60 seconds and at least
-one in the last 20 seconds. At least two active tracks and a strict majority of
-registered candidates are required before sparsity can finish other tracks.
+one in the last 20 seconds. For two registered candidates, the *other* track must be active (and either
+already finished normally or still producing new samples, not itself sparse)
+before a sparse track can finish; for three or more candidates, at least two
+active tracks and a strict majority are required before sparsity can finish
+other tracks.
 
 An unfinished track with no new visible bitmap candidate for 60 playback seconds
 and no valid queued packets is then marked sampling-finished. This deadline is
@@ -89,8 +103,11 @@ reasons are debug logged without text.
 
 `subtitles.identifypgs` is default-on below preferred subtitle language in
 Player / Language / Subtitles. Immediately below are default-on
-`subtitles.pgsautoswitch` and `subtitles.pgspreferredtype` (0 Simplified, 1
-Traditional, 2 Simplified/English default, 3 Traditional/English). Preference
+`subtitles.pgsautoswitch`, `subtitles.pgsautoswitchbluraymenu` (controls whether
+automatic switching is allowed during full Blu-ray menu playback; when disabled,
+tracks are still identified and labelled without overriding the disc menu), and
+`subtitles.pgspreferredtype` (0 Simplified, 1 Traditional, 2 Simplified/English
+default, 3 Traditional/English). Preference
 also drives recognition priority while auto-switch is off. A monolingual match
 requires authoritative metadata or completed sampling, not merely a lack of
 English evidence so far. Exact preference wins over fallback, even if the current
@@ -117,9 +134,16 @@ No runtime network service or target Python is required for identification.
 ## Saved selections and smooth switching
 
 A per-file subtitle choice restored from the video database (or saved hidden
-state) takes precedence over OCR auto-selection. The runtime provenance flag is
-not itself persisted as a preference. Auto-selection also waits until the
-asynchronous settings read completes.
+state) takes precedence over OCR auto-selection. `Prepare()` waits briefly (up
+to 500 ms) for the asynchronous `RequestVideoSettings()` database load before
+opening default streams, and late arrivals are re-applied in `Process()` so
+saved subtitle selections are not lost to startup timing races. On Blu-ray
+full-menu (`MenuType::NATIVE`) playback, fresh main-menu launches never override
+the disc menu's choice with stale database rows, while skipped-menu direct
+resumes restore the saved subtitle stream and visibility through libbluray and
+sync `BD_EVENT_PG_TEXTST` back to Kodi's video settings. The runtime provenance
+flag is not itself persisted as a preference. Auto-selection also waits until
+the asynchronous settings read completes.
 
 Manual and automatic changes to Chinese/unknown main-demux PGS or text streams
 replay bounded compressed subtitle history into the subtitle decoder only. PGS

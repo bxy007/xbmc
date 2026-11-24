@@ -134,6 +134,8 @@ public:
     return hold == HOLD_NONE || hold == HOLD_DATA;
   }
   bool IsFeaturePlaylistActive();
+  bool IsFeaturePlaylistLoaded();
+  bool IsInMainMenu() const { return m_isInMainMenu.load(std::memory_order_relaxed); }
   bool IsOnFeaturePlaylist();
   bool OnMouseMove(const CPoint &point) override  { return MouseMove(point); }
   bool OnMouseClick(const CPoint &point) override { return MouseClick(point); }
@@ -184,12 +186,18 @@ public:
 
   bool SetActiveAudioStream(int pid);
   bool SetActiveSubtitleStream(int pid, bool visible);
-  void SetSubtitleVisible(bool visible);
+  bool SetSubtitleVisible(bool visible);
+  bool CanSelectStream() const;
   bool CanChangeAudioStream() const;
   bool CanChangeSubtitleStream() const;
   bool CanToggleSubtitle() const;
+  uint64_t GetSubtitleSelectGeneration() const
+  {
+    return m_subtitleSelectGen.load(std::memory_order_acquire);
+  }
   bool IsPgEnabled() const { return m_pgEnabled; }
   bool IsAudioStreamPick() const { return m_audioStreamPick; }
+  bool IsPgStreamPick() const { return m_pgStreamPick; }
 
   int GetChapter() override;
   int GetChapterCount() override;
@@ -286,7 +294,6 @@ protected:
   void UpdatePendingGraphicsRegime(int64_t titleTime);
   void RecordTitleTimeSpan(const BLURAY_CLIP_INFO* clip, bool reset);
   int64_t ConvertPtsToTitleTime90k(double ptsDvdTime) const;
-  bool CanSelectStream() const;
   void SelectPendingStreams();
   void PollHeldJoin();
   bool TakeHeldEvent();
@@ -334,6 +341,7 @@ protected:
   std::atomic_bool m_menu{false};
   std::atomic_bool m_isBdjTitle{false};
   std::atomic_bool m_isInMainMenu{false};
+  std::atomic<uint64_t> m_subtitleSelectGen{0};
   std::atomic_bool m_discontinuityFlush{false};
   std::atomic_bool m_hasOverlay{false};
   std::atomic_bool m_hasMenuOverlay{false};
@@ -385,6 +393,7 @@ protected:
   uint32_t m_pgStreamNumber{0};
   uint32_t m_audioStreamNumber{0};
   bool m_audioStreamPick{false};
+  bool m_pgStreamPick{false};
   bool m_pgEnabled{false};
   std::optional<int> m_audioPidPending;
   std::optional<int> m_pgPidPending;

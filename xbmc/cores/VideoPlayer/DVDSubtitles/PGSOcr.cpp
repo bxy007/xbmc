@@ -156,32 +156,57 @@ extern "C" char* pgs_ocr_recognise(void* ptr,
                                    pgs_ocr_word_cb callback,
                                    void* word_ctx,
                                    pgs_ocr_line_cb lineCallback,
-                                   void* lineContext)
+                                   void* lineContext,
+                                   bool* incomplete)
 {
   *confidence = 0;
+  if (incomplete)
+    *incomplete = false;
   if (!ptr || !img || w <= 0 || h <= 0 || w > 2080 || h > 544)
+  {
+    if (incomplete)
+      *incomplete = true;
     return nullptr;
+  }
   try
   {
     auto& e = *static_cast<engine*>(ptr);
     e.run_options.UnsetTerminate();
     auto bands = PGSFindLines(img, w, h);
     if (bands.size() > 16)
+    {
+      if (incomplete)
+        *incomplete = true;
       return nullptr;
-    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(4000);
+    }
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(6000);
     std::string text;
     double sum = 0;
     int count = 0;
     int lineIndex = 0;
     for (auto b : bands)
     {
-      if ((cancel && cancel(ctx)) || std::chrono::steady_clock::now() > deadline)
+      if (cancel && cancel(ctx))
+      {
+        if (incomplete)
+          *incomplete = true;
         return nullptr;
+      }
+      if (std::chrono::steady_clock::now() > deadline)
+      {
+        if (incomplete)
+          *incomplete = true;
+        break;
+      }
       const int currentLine = lineIndex++;
       int cw = b.x1 - b.x0 + 12, ch = b.y1 - b.y0 + 6;
       int resized = (32 * cw + ch - 1) / ch;
       if (resized > max_width)
+      {
+        if (incomplete)
+          *incomplete = true;
         continue; // do not squash extreme layouts
+      }
       int width = std::max(320, resized);
       std::vector<float> tensor(3 * 48 * width, 0.0f);
       auto pixel = [&](int x, int y) -> double
@@ -252,7 +277,11 @@ extern "C" char* pgs_ocr_recognise(void* ptr,
       for (auto g : decoded)
         mean += static_cast<double>(g.score);
       if (decoded.empty() || mean / decoded.size() < 0.70)
+      {
+        if (incomplete)
+          *incomplete = true;
         continue;
+      }
       for (auto g : decoded)
       {
         // Individual dubious characters must not win a five-glyph vote
@@ -294,6 +323,8 @@ extern "C" char* pgs_ocr_recognise(void* ptr,
   }
   catch (...)
   {
+    if (incomplete)
+      *incomplete = true;
     return nullptr;
   }
 }

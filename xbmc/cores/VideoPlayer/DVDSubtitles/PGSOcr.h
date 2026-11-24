@@ -25,7 +25,8 @@ extern "C"
                           pgs_ocr_word_cb word_cb,
                           void* word_ctx,
                           pgs_ocr_line_cb line_cb = nullptr,
-                          void* line_ctx = nullptr);
+                          void* line_ctx = nullptr,
+                          bool* incomplete = nullptr);
   void pgs_ocr_free_text(char* text);
 #ifdef __cplusplus
 }

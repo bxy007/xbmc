@@ -156,6 +156,8 @@ public:
   static constexpr auto SETTING_LOCALE_SUBTITLELANGUAGE = "locale.subtitlelanguage";
   static constexpr auto SETTING_SUBTITLES_IDENTIFYPGS = "subtitles.identifypgs";
   static constexpr auto SETTING_SUBTITLES_PGSAUTOSWITCH = "subtitles.pgsautoswitch";
+  static constexpr auto SETTING_SUBTITLES_PGSAUTOSWITCH_BLURAYMENU =
+      "subtitles.pgsautoswitchbluraymenu";
   static constexpr auto SETTING_SUBTITLES_PGSPREFERREDTYPE = "subtitles.pgspreferredtype";
   static constexpr auto SETTING_SUBTITLES_PARSECAPTIONS = "subtitles.parsecaptions";
   static constexpr auto SETTING_SUBTITLES_PGSVERTICALMODE = "subtitles.pgsverticalmode";

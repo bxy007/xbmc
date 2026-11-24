@@ -54,7 +54,8 @@ struct pgs_subtitle_info
   bool forced; // container/title or at least one PGS forced object
   bool signs_from_title;
   bool ocr_available;
-  bool sampled; // Sampling finished (confirmed or budget); not a full scan
+  bool sampled; // Sampling finished (confirmed or budget/sparse); not a full scan
+  bool monolingual_confirmed; // Sufficient complete OCR captions checked with no bilingual evidence
   int samples;
 };
 
@@ -70,7 +71,8 @@ struct pgs_sub_bilingual_evidence
   bool english_line, chinese;
 };
 int pgs_sub_word_language(const char* text, struct pgs_sub_caption_language* caption);
-// Second physical text line: confident ASCII English, allowing punctuation/digits.
+// Separate physical text line: confident ASCII English, allowing punctuation/digits.
+// Requires same-caption Han evidence in pgs_sub_bilingual_feed() to avoid false positives.
 void pgs_sub_line_language(const char* text, int line, int minimumConfidence,
                            struct pgs_sub_caption_language* caption);
 // 0: not a candidate; 1: Chinese; 2: unknown language. Shared by registration and selection.
