@@ -182,7 +182,7 @@ bool CVideoThumbLoader::LoadItemCached(CFileItem* pItem)
   if (!pItem->HasVideoInfoTag() || !pItem->GetVideoInfoTag()->HasStreamDetails()) // no stream details
   {
     if ((pItem->HasVideoInfoTag() && pItem->GetVideoInfoTag()->m_iFileId >= 0) // file (or maybe folder) is in the database
-    || (!pItem->m_bIsFolder && pItem->IsVideo())) // Some other video file for which we haven't yet got any database details
+    || (!pItem->m_bIsFolder && !pItem->IsArchiveFileFolder() && pItem->IsVideo())) // Some other video file for which we haven't yet got any database details
     {
       if (m_videoDatabase->GetStreamDetails(*pItem))
         pItem->SetInvalid();
@@ -287,7 +287,7 @@ bool CVideoThumbLoader::LoadItemLookup(CFileItem* pItem)
   }
 
   // We can only extract flags/thumbs for file-like items
-  if (!pItem->m_bIsFolder && pItem->IsVideo())
+  if (!pItem->m_bIsFolder && !pItem->IsArchiveFileFolder() && pItem->IsVideo())
   {
     const std::shared_ptr<CSettings> settings = CServiceBroker::GetSettingsComponent()->GetSettings();
     if (!pItem->HasArt("thumb"))
@@ -561,7 +561,8 @@ std::string CVideoThumbLoader::GetEmbeddedThumbURL(const CFileItem &item)
 
 void CVideoThumbLoader::DetectAndAddMissingItemData(CFileItem &item) const {
   // @todo remove exception for hybrid movie/folder of versions
-  if (item.m_bIsFolder && !StringUtils::StartsWith(item.GetPath(), VIDEODB_PATH_VERSION_ID_ALL))
+  if ((item.m_bIsFolder && !StringUtils::StartsWith(item.GetPath(), VIDEODB_PATH_VERSION_ID_ALL)) ||
+      item.IsArchiveFileFolder())
     return;
 
   if (item.HasVideoInfoTag())

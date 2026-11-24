@@ -389,9 +389,6 @@ void CGUIWindowMusicBase::OnQueueItem(int iItem, bool first)
   // add item 2 playlist
   const auto item = m_vecItems->Get(iItem);
 
-  if (item->IsRAR() || item->IsZIP())
-    return;
-
   MUSIC_UTILS::QueueItem(item, first ? MUSIC_UTILS::QueuePosition::POSITION_BEGIN
                                      : MUSIC_UTILS::QueuePosition::POSITION_END);
 
@@ -587,11 +584,14 @@ void CGUIWindowMusicBase::OnRipTrack(int iItem) const {
 
 void CGUIWindowMusicBase::PlayItem(int iItem)
 {
+  if (iItem < 0 || iItem >= m_vecItems->Size())
+    return;
+
   // restrictions should be placed in the appropriate window code
   // only call the base code if the item passes since this clears
   // the current playlist
 
-  const CFileItemPtr pItem = m_vecItems->Get(iItem);
+  CFileItemPtr pItem = m_vecItems->Get(iItem);
 #ifdef HAS_OPTICAL_DRIVE
   if (pItem->IsDVD())
   {
@@ -610,11 +610,26 @@ void CGUIWindowMusicBase::PlayItem(int iItem)
       return;
   }
 
+  if (!pItem->m_bIsFolder && pItem->IsArchiveFileFolder())
+  {
+    CFileItem resolvedItem;
+    switch (ResolveFileDirectoryOnClick(iItem, resolvedItem))
+    {
+      case FileDirectoryResolution::BUSY_OR_STALE:
+      case FileDirectoryResolution::EMPTY:
+      case FileDirectoryResolution::UNCHANGED:
+        return;
+      case FileDirectoryResolution::FOLDER:
+        pItem = std::make_shared<CFileItem>(resolvedItem);
+        break;
+    }
+  }
+
   // if its a folder, build a playlist
   if (pItem->m_bIsFolder && !pItem->IsPlugin())
   {
     // make a copy so that we can alter the queue state
-    CFileItemPtr item(new CFileItem(*m_vecItems->Get(iItem)));
+    CFileItemPtr item(new CFileItem(*pItem));
 
     //  Allow queuing of unqueueable items
     //  when we try to queue them directly
@@ -626,7 +641,8 @@ void CGUIWindowMusicBase::PlayItem(int iItem)
       return;
 
     CFileItemList queuedItems;
-    MUSIC_UTILS::GetItemsForPlayList(item, queuedItems);
+    if (!MUSIC_UTILS::GetItemsForPlayList(item, queuedItems) || queuedItems.IsEmpty())
+      return;
     if (g_partyModeManager.IsEnabled())
     {
       g_partyModeManager.AddUserSongs(queuedItems, true);

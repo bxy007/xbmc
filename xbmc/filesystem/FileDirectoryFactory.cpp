@@ -97,40 +97,36 @@ IFileDirectory* CFileDirectoryFactory::Create(const CURL& url, CFileItem* pItem,
     /*!
      * Scan here about VFS addons.
      */
-    for (const auto& vfsAddon : CServiceBroker::GetVFSAddonCache().GetAddonInstances())
+    if (strExtension != ".001" || URIUtils::IsRAR(url.Get()))
     {
-      if (vfsAddon->HasFileDirectories())
+      for (const auto& vfsAddon : CServiceBroker::GetVFSAddonCache().GetAddonInstances())
       {
-        auto exts = StringUtils::Split(vfsAddon->GetExtensions(), "|");
-        if (std::find(exts.begin(), exts.end(), strExtension) != exts.end())
+        if (vfsAddon->HasFileDirectories())
         {
-          auto wrap = new CVFSEntryIFileDirectoryWrapper(vfsAddon);
-          if (wrap->ContainsFiles(url))
+          auto exts = StringUtils::Split(vfsAddon->GetExtensions(), "|");
+          if (std::find(exts.begin(), exts.end(), strExtension) != exts.end())
           {
-            if (wrap->m_items.Size() == 1)
+            auto wrap = new CVFSEntryIFileDirectoryWrapper(vfsAddon);
+            if (wrap->ContainsFiles(url))
             {
-              // one STORED file - collapse it down
-              *pItem = *wrap->m_items[0];
-            }
-            else
-            {
-              // compressed or more than one file -> create a dir
-              pItem->SetPath(wrap->m_items.GetPath());
+              // Always expose non-empty archive as a directory (no single-STORED-file auto-collapse)
+              std::string dirPath = wrap->m_items.GetPath();
+              if (dirPath.empty() && wrap->m_items.Size() == 1)
+                dirPath = URIUtils::GetDirectory(wrap->m_items[0]->GetPath());
+
+              if (!dirPath.empty())
+              {
+                URIUtils::AddSlashAtEnd(dirPath);
+                pItem->SetPath(dirPath);
+                pItem->m_bIsFolder = true;
+                return wrap;
+              }
             }
 
-            // Check for folder, if yes return also wrap.
-            // Needed to fix for e.g. RAR files with only one file inside
-            pItem->m_bIsFolder = URIUtils::HasSlashAtEnd(pItem->GetPath());
-            if (pItem->m_bIsFolder)
-              return wrap;
-          }
-          else
-          {
             pItem->m_bIsFolder = true;
+            delete wrap;
+            return nullptr;
           }
-
-          delete wrap;
-          return nullptr;
         }
       }
     }
@@ -167,13 +163,8 @@ IFileDirectory* CFileDirectoryFactory::Create(const CURL& url, CFileItem* pItem,
     CDirectory::GetDirectory(zipURL, items, strMask, DIR_FLAG_DEFAULTS);
     if (items.Size() == 0) // no files
       pItem->m_bIsFolder = true;
-    else if (items.Size() == 1 && items[0]->m_idepth == 0 && !items[0]->m_bIsFolder)
-    {
-      // one STORED file - collapse it down
-      *pItem = *items[0];
-    }
     else
-    { // compressed or more than one file -> create a apk dir
+    { // always open non-empty apk as a directory
       pItem->SetURL(zipURL);
       return new CAPKDirectory;
     }
@@ -188,13 +179,8 @@ IFileDirectory* CFileDirectoryFactory::Create(const CURL& url, CFileItem* pItem,
     CDirectory::GetDirectory(zipURL, items, strMask, DIR_FLAG_DEFAULTS);
     if (items.Size() == 0) // no files
       pItem->m_bIsFolder = true;
-    else if (items.Size() == 1 && items[0]->m_idepth == 0 && !items[0]->m_bIsFolder)
-    {
-      // one STORED file - collapse it down
-      *pItem = *items[0];
-    }
     else
-    { // compressed or more than one file -> create a zip dir
+    { // always open non-empty zip as a directory (no single-STORED-file auto-collapse)
       pItem->SetURL(zipURL);
       return new CZipDirectory;
     }

@@ -108,6 +108,29 @@ protected:
   CFileItemList &m_items;
   bool m_useDir;
 };
+
+class CCreateFileDirectory : public IRunnable
+{
+public:
+  CCreateFileDirectory(const CURL& url, CFileItem& item, const std::string& mask)
+    : m_url(url), m_item(item), m_mask(mask)
+  {
+  }
+
+  void Run() override
+  {
+    std::unique_ptr<XFILE::IFileDirectory> dir(
+        XFILE::CFileDirectoryFactory::Create(m_url, &m_item, m_mask));
+    m_isFolder = (dir != nullptr);
+  }
+
+  bool m_isFolder = false;
+
+private:
+  CURL m_url;
+  CFileItem& m_item;
+  std::string m_mask;
+};
 }
 
 CGUIMediaWindow::CGUIMediaWindow(int id, const char *xmlFile)
@@ -1001,6 +1024,123 @@ void CGUIMediaWindow::OnCacheFileItems(CFileItemList &items)
     items.Save(GetID());
 }
 
+CGUIMediaWindow::FileDirectoryResolution CGUIMediaWindow::ResolveFileDirectoryOnClick(
+    int iItem, CFileItem& resolvedItem, const std::string& mask)
+{
+  if (iItem < 0 || iItem >= m_vecItems->Size())
+    return FileDirectoryResolution::BUSY_OR_STALE;
+
+  CFileItemPtr pItem = m_vecItems->Get(iItem);
+  if (!pItem || pItem->m_bIsFolder || !pItem->IsFileFolder(EFILEFOLDER_MASK_ONCLICK))
+    return FileDirectoryResolution::UNCHANGED;
+
+  // Audiobook chapter items share the source file path and identify themselves via music tag + end offset
+  if (pItem->IsAudioBook() && pItem->HasMusicInfoTag() && pItem->GetEndOffset() > 0)
+    return FileDirectoryResolution::UNCHANGED;
+
+  if (m_vecItemsUpdating)
+  {
+    CLog::Log(LOGWARNING, "CGUIMediaWindow::ResolveFileDirectoryOnClick - updating in progress");
+    return FileDirectoryResolution::BUSY_OR_STALE;
+  }
+
+  resolvedItem = CFileItem(pItem->GetPath(), false);
+  resolvedItem.SetLabel(pItem->GetLabel());
+  bool isFolder = false;
+  {
+    CUpdateGuard ug(m_vecItemsUpdating);
+    CCreateFileDirectory createDir(resolvedItem.GetURL(), resolvedItem, mask);
+    CGUIDialogBusy::Wait(&createDir, 100, false);
+    isFolder = createDir.m_isFolder;
+  }
+
+  if (iItem >= m_vecItems->Size() || m_vecItems->Get(iItem) != pItem)
+    return FileDirectoryResolution::BUSY_OR_STALE;
+
+  if (isFolder)
+  {
+    resolvedItem.m_bIsFolder = true;
+    return FileDirectoryResolution::FOLDER;
+  }
+
+  if (resolvedItem.m_bIsFolder)
+  {
+    CGUIDialogKaiToast::QueueNotification(CGUIDialogKaiToast::Info, g_localizeStrings.Get(2080),
+                                          pItem->GetLabel());
+    return FileDirectoryResolution::EMPTY;
+  }
+
+  return FileDirectoryResolution::UNCHANGED;
+}
+
+CGUIMediaWindow::FileDirectoryResolution CGUIMediaWindow::ResolveFileDirectoryOnClick(
+    int iItem, CFileItem& resolvedItem)
+{
+  return ResolveFileDirectoryOnClick(iItem, resolvedItem, m_rootDir.GetMask());
+}
+
+bool CGUIMediaWindow::OpenFolderItem(const CFileItemPtr& pItem)
+{
+  if (!pItem || !pItem->m_bIsFolder)
+    return false;
+
+  const std::shared_ptr<CProfileManager> profileManager =
+      CServiceBroker::GetSettingsComponent()->GetProfileManager();
+
+  if (pItem->m_bIsShareOrDrive)
+  {
+    const std::string& strLockType = m_guiState->GetLockType();
+    if (profileManager->GetMasterProfile().getLockMode() != LOCK_MODE_EVERYONE)
+      if (!strLockType.empty() && !g_passwordManager.IsItemUnlocked(pItem.get(), strLockType))
+        return true;
+
+    if (!HaveDiscOrConnection(pItem->GetPath(), pItem->m_iDriveType))
+      return true;
+  }
+
+  // check for the partymode playlist items - they may not exist yet
+  if ((pItem->GetPath() == profileManager->GetUserDataItem("PartyMode.xsp")) ||
+      (pItem->GetPath() == profileManager->GetUserDataItem("PartyMode-Video.xsp")))
+  {
+    // party mode playlist item - if it doesn't exist, prompt for user to define it
+    if (!CFileUtils::Exists(pItem->GetPath()))
+    {
+      m_vecItems->RemoveDiscCache(GetID());
+      if (CGUIDialogSmartPlaylistEditor::EditPlaylist(pItem->GetPath()))
+        Refresh();
+      return true;
+    }
+  }
+
+  // remove the directory cache if the folder is not normally cached
+  CFileItemList items(pItem->GetPath());
+  if (!items.AlwaysCache())
+    items.RemoveDiscCache(GetID());
+
+  // if we have a filtered list, we need to add the filtered
+  // path to be able to come back to the filtered view
+  std::string strCurrentDirectory = m_vecItems->GetPath();
+  if (m_canFilterAdvanced && !m_filter.IsEmpty() &&
+      !URIUtils::PathEquals(m_strFilterPath, strCurrentDirectory))
+  {
+    m_history.RemoveParentPath();
+    m_history.AddPath(strCurrentDirectory, m_strFilterPath);
+  }
+
+  if (m_vecItemsUpdating)
+  {
+    CLog::Log(LOGWARNING, "CGUIMediaWindow::OnClick - updating in progress");
+    return true;
+  }
+  CUpdateGuard ug(m_vecItemsUpdating);
+
+  CFileItem directory(*pItem);
+  if (!Update(directory.GetPath()))
+    ShowShareErrorMessage(&directory);
+
+  return true;
+}
+
 /*!
  * \brief On click
  *
@@ -1041,13 +1181,20 @@ bool CGUIMediaWindow::OnClick(int iItem, const std::string &player)
 
   if (!pItem->m_bIsFolder && pItem->IsFileFolder(EFILEFOLDER_MASK_ONCLICK))
   {
-    XFILE::IFileDirectory *pFileDirectory = nullptr;
-    pFileDirectory = XFILE::CFileDirectoryFactory::Create(pItem->GetURL(), pItem.get(), "");
-    if(pFileDirectory)
-      pItem->m_bIsFolder = true;
-    else if(pItem->m_bIsFolder)
-      pItem->m_bIsFolder = false;
-    delete pFileDirectory;
+    CFileItem resolvedItem;
+    switch (ResolveFileDirectoryOnClick(iItem, resolvedItem))
+    {
+      case FileDirectoryResolution::BUSY_OR_STALE:
+      case FileDirectoryResolution::EMPTY:
+        return true;
+      case FileDirectoryResolution::FOLDER:
+        pItem = std::make_shared<CFileItem>(resolvedItem);
+        break;
+      case FileDirectoryResolution::UNCHANGED:
+        if (pItem->IsArchiveFileFolder())
+          return false;
+        break;
+    }
   }
 
   if (pItem->IsScript())
@@ -1069,58 +1216,7 @@ bool CGUIMediaWindow::OnClick(int iItem, const std::string &player)
 
   if (pItem->m_bIsFolder)
   {
-    if ( pItem->m_bIsShareOrDrive )
-    {
-      const std::string& strLockType=m_guiState->GetLockType();
-      if (profileManager->GetMasterProfile().getLockMode() != LOCK_MODE_EVERYONE)
-        if (!strLockType.empty() && !g_passwordManager.IsItemUnlocked(pItem.get(), strLockType))
-            return true;
-
-      if (!HaveDiscOrConnection(pItem->GetPath(), pItem->m_iDriveType))
-        return true;
-    }
-
-    // check for the partymode playlist items - they may not exist yet
-    if ((pItem->GetPath() == profileManager->GetUserDataItem("PartyMode.xsp")) ||
-        (pItem->GetPath() == profileManager->GetUserDataItem("PartyMode-Video.xsp")))
-    {
-      // party mode playlist item - if it doesn't exist, prompt for user to define it
-      if (!CFileUtils::Exists(pItem->GetPath()))
-      {
-        m_vecItems->RemoveDiscCache(GetID());
-        if (CGUIDialogSmartPlaylistEditor::EditPlaylist(pItem->GetPath()))
-          Refresh();
-        return true;
-      }
-    }
-
-    // remove the directory cache if the folder is not normally cached
-    CFileItemList items(pItem->GetPath());
-    if (!items.AlwaysCache())
-      items.RemoveDiscCache(GetID());
-
-    // if we have a filtered list, we need to add the filtered
-    // path to be able to come back to the filtered view
-    std::string strCurrentDirectory = m_vecItems->GetPath();
-    if (m_canFilterAdvanced && !m_filter.IsEmpty() &&
-        !URIUtils::PathEquals(m_strFilterPath, strCurrentDirectory))
-    {
-      m_history.RemoveParentPath();
-      m_history.AddPath(strCurrentDirectory, m_strFilterPath);
-    }
-
-    if (m_vecItemsUpdating)
-    {
-      CLog::Log(LOGWARNING, "CGUIMediaWindow::OnClick - updating in progress");
-      return true;
-    }
-    CUpdateGuard ug(m_vecItemsUpdating);
-
-    CFileItem directory(*pItem);
-    if (!Update(directory.GetPath()))
-      ShowShareErrorMessage(&directory);
-
-    return true;
+    return OpenFolderItem(pItem);
   }
   else if (pItem->IsPlugin() && !pItem->GetProperty("isplayable").asBoolean())
   {
@@ -1496,8 +1592,8 @@ bool CGUIMediaWindow::OnPlayMedia(int iItem, const std::string &player)
   // not use the playlistplayer.
   CServiceBroker::GetPlaylistPlayer().Reset();
   CServiceBroker::GetPlaylistPlayer().SetCurrentPlaylist(PLAYLIST::TYPE_NONE);
-  CFileItemPtr pItem=m_vecItems->Get(iItem);
 
+  CFileItemPtr pItem = m_vecItems->Get(iItem);
   CLog::Log(LOGDEBUG, "{} {}", __FUNCTION__, CURL::GetRedacted(pItem->GetPath()));
 
   bool bResult = false;
@@ -1526,8 +1622,6 @@ bool CGUIMediaWindow::OnPlayAndQueueMedia(const CFileItemPtr& item, const std::s
   PLAYLIST::Id playlistId = m_guiState->GetPlaylist();
   if (playlistId != PLAYLIST::TYPE_NONE)
   {
-    CServiceBroker::GetPlaylistPlayer().ClearPlaylist(playlistId);
-    CServiceBroker::GetPlaylistPlayer().Reset();
     int mediaToPlay = 0;
 
     // first try to find mainDVD file (VIDEO_TS.IFO).
@@ -1543,22 +1637,46 @@ bool CGUIMediaWindow::OnPlayAndQueueMedia(const CFileItemPtr& item, const std::s
       }
     }
 
-    // now queue...
-    for ( int i = 0; i < m_vecItems->Size(); i++ )
+    // Collect pointers in a vector (not CFileItemList, whose destructor calls FreeMemory() on items)
+    std::vector<CFileItemPtr> queuedItems;
+    queuedItems.reserve(m_vecItems->Size());
+    bool foundSelectedItem = false;
+    int mainDVDIndex = -1;
+    for (int i = 0; i < m_vecItems->Size(); i++)
     {
       CFileItemPtr nItem = m_vecItems->Get(i);
 
       if (nItem->m_bIsFolder)
         continue;
 
-      if (!nItem->IsZIP() && !nItem->IsRAR() && (!nItem->IsDVDFile() || (URIUtils::GetFileName(nItem->GetDynPath()) == mainDVD)))
-        CServiceBroker::GetPlaylistPlayer().Add(playlistId, nItem);
+      if (!nItem->IsArchiveFileFolder() &&
+          (!nItem->IsDVDFile() || (URIUtils::GetFileName(nItem->GetDynPath()) == mainDVD)))
+      {
+        queuedItems.push_back(nItem);
+        if (!mainDVD.empty() && mainDVDIndex < 0 &&
+            URIUtils::GetFileName(nItem->GetDynPath()) == mainDVD)
+          mainDVDIndex = static_cast<int>(queuedItems.size()) - 1;
 
-      if (item->IsSamePath(nItem.get()))
-      { // item that was clicked
-        mediaToPlay = CServiceBroker::GetPlaylistPlayer().GetPlaylist(playlistId).size() - 1;
+        if (item->IsSamePath(nItem.get()))
+        { // item that was clicked
+          mediaToPlay = static_cast<int>(queuedItems.size()) - 1;
+          foundSelectedItem = true;
+        }
       }
     }
+
+    if (!foundSelectedItem)
+    {
+      // Allow clicking secondary VIDEO_TS files (e.g. VTS_01_1.VOB) to play the queued main VIDEO_TS.IFO
+      if (mainDVDIndex < 0 || !item->IsDVDFile() || item->IsArchiveFileFolder())
+        return false;
+      mediaToPlay = mainDVDIndex;
+    }
+
+    CServiceBroker::GetPlaylistPlayer().ClearPlaylist(playlistId);
+    CServiceBroker::GetPlaylistPlayer().Reset();
+    for (const auto& queuedItem : queuedItems)
+      CServiceBroker::GetPlaylistPlayer().Add(playlistId, queuedItem);
 
     // Save current window and directory to know where the selected item was
     if (m_guiState)
@@ -1618,7 +1736,7 @@ void CGUIMediaWindow::UpdateFileList()
       if (pItem->m_bIsFolder)
         continue;
 
-      if (!pItem->IsPlayList() && !pItem->IsZIP() && !pItem->IsRAR())
+      if (!pItem->IsPlayList() && !pItem->IsArchiveFileFolder())
         CServiceBroker::GetPlaylistPlayer().Add(playlistId, pItem);
 
       if (pItem->GetPath() == playlistItem.GetPath() &&

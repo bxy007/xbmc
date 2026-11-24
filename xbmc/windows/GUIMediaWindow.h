@@ -155,6 +155,18 @@ protected:
   virtual void LoadPlayList(const std::string& strFileName) {}
   virtual bool OnPlayMedia(int iItem, const std::string &player = "");
   virtual bool OnPlayAndQueueMedia(const CFileItemPtr& item, const std::string& player = "");
+  enum class FileDirectoryResolution
+  {
+    UNCHANGED,
+    BUSY_OR_STALE,
+    EMPTY,
+    FOLDER,
+  };
+  FileDirectoryResolution ResolveFileDirectoryOnClick(int iItem,
+                                                      CFileItem& resolvedItem,
+                                                      const std::string& mask);
+  FileDirectoryResolution ResolveFileDirectoryOnClick(int iItem, CFileItem& resolvedItem);
+  bool OpenFolderItem(const CFileItemPtr& pItem);
   void UpdateFileList();
   virtual void OnDeleteItem(int iItem);
   void OnRenameItem(int iItem);

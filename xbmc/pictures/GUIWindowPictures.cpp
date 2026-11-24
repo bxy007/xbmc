@@ -314,6 +314,28 @@ bool CGUIWindowPictures::ShowPicture(int iItem, bool startSlideShow)
   if (pItem->m_bIsShareOrDrive)
     return false;
 
+  if (!pItem->m_bIsFolder && pItem->IsArchiveFileFolder())
+  {
+    if (pItem->IsCBZ() || pItem->IsCBR())
+    {
+      CURL pathToUrl = URIUtils::CreateArchivePath(pItem->IsCBZ() ? "zip" : "rar", pItem->GetURL(), "");
+      OnShowPictureRecursive(pathToUrl.Get());
+      return true;
+    }
+
+    CFileItem resolvedItem;
+    switch (ResolveFileDirectoryOnClick(iItem, resolvedItem))
+    {
+      case FileDirectoryResolution::FOLDER:
+        OnSlideShow(resolvedItem.GetPath());
+        return true;
+      case FileDirectoryResolution::BUSY_OR_STALE:
+      case FileDirectoryResolution::EMPTY:
+      case FileDirectoryResolution::UNCHANGED:
+        return false;
+    }
+  }
+
   //! @todo this should be reactive, based on a given event app player should stop the playback
   const auto& components = CServiceBroker::GetAppComponents();
   const auto appPlayer = components.GetComponent<CApplicationPlayer>();
@@ -325,8 +347,7 @@ bool CGUIWindowPictures::ShowPicture(int iItem, bool startSlideShow)
   bool bShowVideos = CServiceBroker::GetSettingsComponent()->GetSettings()->GetBool(CSettings::SETTING_PICTURES_SHOWVIDEOS);
   for (const auto& pItem : *m_vecItems)
   {
-    if (!pItem->m_bIsFolder &&
-        !(URIUtils::IsRAR(pItem->GetPath()) || URIUtils::IsZIP(pItem->GetPath())) &&
+    if (!pItem->m_bIsFolder && !pItem->IsArchiveFileFolder() &&
         (pItem->IsPicture() || (bShowVideos && pItem->IsVideo())))
     {
       slideShow.Add(pItem.get());
@@ -445,13 +466,14 @@ void CGUIWindowPictures::GetContextButtons(int itemNumber, CContextButtons &butt
     {
       if (item)
       {
-        if (!(item->m_bIsFolder || item->IsZIP() || item->IsRAR() || item->IsCBZ() || item->IsCBR() || item->IsScript()))
+        if (!(item->m_bIsFolder || item->IsScript()))
         {
-          if (item->IsPicture())
+          if (item->IsPicture() && !item->IsArchiveFileFolder())
             buttons.Add(CONTEXT_BUTTON_INFO, 13406); // picture info
-          buttons.Add(CONTEXT_BUTTON_VIEW_SLIDESHOW, item->m_bIsFolder ? 13317 : 13422);      // View Slideshow
+          buttons.Add(CONTEXT_BUTTON_VIEW_SLIDESHOW,
+                      (item->m_bIsFolder || item->IsArchiveFileFolder()) ? 13317 : 13422); // View Slideshow
         }
-        if (item->m_bIsFolder)
+        if (item->m_bIsFolder || item->IsArchiveFileFolder())
           buttons.Add(CONTEXT_BUTTON_RECURSIVE_SLIDESHOW, 13318);     // Recursive Slideshow
 
         if (!m_thumbLoader.IsLoading())
@@ -488,7 +510,28 @@ bool CGUIWindowPictures::OnContextButton(int itemNumber, CONTEXT_BUTTON button)
     return true;
   case CONTEXT_BUTTON_RECURSIVE_SLIDESHOW:
     if (item)
-      OnSlideShowRecursive(item->GetPath());
+    {
+      if (!item->m_bIsFolder && item->IsArchiveFileFolder())
+      {
+        if (item->IsCBZ() || item->IsCBR())
+        {
+          CURL pathToUrl =
+              URIUtils::CreateArchivePath(item->IsCBZ() ? "zip" : "rar", item->GetURL(), "");
+          OnSlideShowRecursive(pathToUrl.Get());
+        }
+        else
+        {
+          CFileItem resolvedItem;
+          if (ResolveFileDirectoryOnClick(itemNumber, resolvedItem) ==
+              FileDirectoryResolution::FOLDER)
+            OnSlideShowRecursive(resolvedItem.GetPath());
+        }
+      }
+      else
+      {
+        OnSlideShowRecursive(item->GetPath());
+      }
+    }
     return true;
   case CONTEXT_BUTTON_INFO:
     OnItemInfo(itemNumber);
@@ -552,7 +595,7 @@ void CGUIWindowPictures::LoadPlayList(const std::string& strPlayList)
     {
       CFileItemPtr pItem = playlist[i];
       //CLog::Log(LOGDEBUG,"-- playlist item: {}", pItem->GetPath());
-      if (pItem->IsPicture() && !(pItem->IsZIP() || pItem->IsRAR() || pItem->IsCBZ() || pItem->IsCBR()))
+      if (pItem->IsPicture() && !pItem->IsArchiveFileFolder())
       {
         slideShow.Add(pItem.get());
       }
@@ -576,7 +619,7 @@ void CGUIWindowPictures::OnItemInfo(int itemNumber) const {
     CGUIDialogAddonInfo::ShowForItem(item);
     return;
   }
-  if (item->m_bIsFolder || item->IsZIP() || item->IsRAR() || item->IsCBZ() || item->IsCBR() || !item->IsPicture())
+  if (item->m_bIsFolder || item->IsArchiveFileFolder() || !item->IsPicture())
     return;
   CGUIDialogPictureInfo *pictureInfo = CServiceBroker::GetGUI()->GetWindowManager().GetWindow<CGUIDialogPictureInfo>(WINDOW_DIALOG_PICTURE_INFO);
   if (pictureInfo)

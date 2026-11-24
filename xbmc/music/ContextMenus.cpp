@@ -63,8 +63,22 @@ bool CMusicBrowse::IsVisible(const CFileItem& item) const
 bool CMusicBrowse::Execute(const std::shared_ptr<CFileItem>& item) const
 {
   // For file directory browsing, we need item's dyn path, for everything else the path.
-  const std::string path{item->IsFileFolder(EFILEFOLDER_MASK_ONBROWSE) ? item->GetDynPath()
-                                                                       : item->GetPath()};
+  std::string path{item->IsFileFolder(EFILEFOLDER_MASK_ONBROWSE) ? item->GetDynPath()
+                                                                 : item->GetPath()};
+  if (!item->m_bIsFolder && item->IsArchiveFileFolder())
+  {
+    CFileItem resolvedItem;
+    switch (MUSIC_UTILS::ResolveArchiveItem(*item, resolvedItem))
+    {
+      case MUSIC_UTILS::ArchiveResolution::FOLDER:
+        path = resolvedItem.GetPath();
+        break;
+      case MUSIC_UTILS::ArchiveResolution::EMPTY:
+        return true;
+      case MUSIC_UTILS::ArchiveResolution::UNCHANGED:
+        return false;
+    }
+  }
 
   auto& windowMgr = CServiceBroker::GetGUI()->GetWindowManager();
   if (windowMgr.GetActiveWindow() == WINDOW_MUSIC_NAV)
@@ -132,12 +146,30 @@ bool CMusicPlayUsing::IsVisible(const CFileItem& item) const
 
 bool CMusicPlayUsing::Execute(const std::shared_ptr<CFileItem>& item) const
 {
+  std::shared_ptr<CFileItem> playItem = item;
+  if (!item->m_bIsFolder && item->IsArchiveFileFolder())
+  {
+    CFileItem resolvedItem;
+    switch (MUSIC_UTILS::ResolveArchiveItem(*item, resolvedItem))
+    {
+      case MUSIC_UTILS::ArchiveResolution::FOLDER:
+        playItem = std::make_shared<CFileItem>(resolvedItem);
+        break;
+      case MUSIC_UTILS::ArchiveResolution::EMPTY:
+        return true;
+      case MUSIC_UTILS::ArchiveResolution::UNCHANGED:
+        return false;
+    }
+    if (item->HasProperty("CheckAutoPlayNextItem"))
+      playItem->SetProperty("CheckAutoPlayNextItem", item->GetProperty("CheckAutoPlayNextItem"));
+  }
+
   const CPlayerCoreFactory& playerCoreFactory{CServiceBroker::GetPlayerCoreFactory()};
-  const std::vector<std::string> players{GetPlayers(playerCoreFactory, *item)};
+  const std::vector<std::string> players{GetPlayers(playerCoreFactory, *playItem)};
   const std::string player{playerCoreFactory.SelectPlayerDialog(players)};
   if (!player.empty())
   {
-    Play(item, player);
+    Play(playItem, player);
     return true;
   }
   return false;

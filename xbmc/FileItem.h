@@ -256,6 +256,7 @@ public:
   bool CanQueue() const;
   void SetCanQueue(bool bYesNo);
   bool IsParentFolder() const;
+  bool IsArchiveFileFolder() const;
   bool IsFileFolder(EFileFolderType types = EFILEFOLDER_MASK_ALL) const;
   bool IsRemovable() const;
   bool IsPVR() const;

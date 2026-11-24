@@ -74,11 +74,11 @@ bool CPictureThumbLoader::LoadItemCached(CFileItem* pItem)
   }
 
   std::string thumb;
-  if (pItem->IsPicture() && !pItem->IsZIP() && !pItem->IsRAR() && !pItem->IsCBZ() && !pItem->IsCBR() && !pItem->IsPlayList())
+  if (pItem->IsPicture() && !pItem->IsArchiveFileFolder() && !pItem->IsPlayList())
   { // load the thumb from the image file
     thumb = pItem->HasArt("thumb") ? pItem->GetArt("thumb") : CTextureUtils::GetWrappedThumbURL(pItem->GetPath());
   }
-  else if (pItem->IsVideo() && !pItem->IsZIP() && !pItem->IsRAR() && !pItem->IsCBZ() && !pItem->IsCBR() && !pItem->IsPlayList())
+  else if (pItem->IsVideo() && !pItem->IsArchiveFileFolder() && !pItem->IsPlayList())
   { // video
     CVideoThumbLoader loader;
     loader.LoadItem(pItem);
@@ -119,8 +119,8 @@ void CPictureThumbLoader::ProcessFoldersAndArchives(CFileItem *pItem)
       return;
     }
   }
-  if ((pItem->m_bIsFolder || pItem->IsCBR() || pItem->IsCBZ()) && !pItem->m_bIsShareOrDrive
-      && !pItem->IsParentFolder() && !pItem->IsPath("add"))
+  if (pItem->m_bIsFolder && !pItem->IsArchiveFileFolder() && !pItem->m_bIsShareOrDrive &&
+      !pItem->IsParentFolder() && !pItem->IsPath("add"))
   {
     // first check for a folder.jpg
     std::string thumb = "folder.jpg";
@@ -159,7 +159,7 @@ void CPictureThumbLoader::ProcessFoldersAndArchives(CFileItem *pItem)
       // count the number of images
       for (int i=0; i < items.Size();)
       {
-        if (!items[i]->IsPicture() || items[i]->IsZIP() || items[i]->IsRAR() || items[i]->IsPlayList())
+        if (!items[i]->IsPicture() || items[i]->IsArchiveFileFolder() || items[i]->IsPlayList())
         {
           items.Remove(i);
         }

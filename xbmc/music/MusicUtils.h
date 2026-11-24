@@ -81,6 +81,20 @@ std::vector<std::string> GetArtTypesToScan(const MediaType& mediaType);
   */
 bool IsValidArtType(const std::string& potentialArtType);
 
+enum class ArchiveResolution
+{
+  UNCHANGED,
+  EMPTY,
+  FOLDER,
+};
+
+/*! \brief Resolve a deferred archive file item into a virtual folder.
+  \param item [in] the archive item to resolve
+  \param resolvedItem [out] receives the resolved folder item
+  \return Resolution outcome.
+  */
+ArchiveResolution ResolveArchiveItem(const CFileItem& item, CFileItem& resolvedItem);
+
 /*! \brief Check whether auto play next item is set for the given item.
   \param item [in] the item to check
   \return True if auto play next item is active, false otherwise.

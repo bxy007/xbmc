@@ -32,6 +32,7 @@ protected:
   std::string GetStartFolder(const std::string& dir) override { return ""; }
 
   void OnSourcesContext();
+  bool BrowseIntoItem(int iItem);
   void OnPlaylistContext();
   int GetCurrentPlaylistItem();
   void OnDeletePlaylistItem(int item);

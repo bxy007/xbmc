@@ -320,7 +320,7 @@ bool CGUIWindowVideoBase::OnItemInfo(const CFileItem& fileItem)
                                                             ->m_moviesExcludeFromScanRegExps;
       for (const auto& i : items)
       {
-        if (i->IsVideo() && !i->IsPlayList() &&
+        if (!i->IsArchiveFileFolder() && i->IsVideo() && !i->IsPlayList() &&
             !CUtil::ExcludeFileOrFolder(i->GetPath(), excludeFromScan))
         {
           item.SetPath(i->GetPath());
@@ -548,9 +548,6 @@ void CGUIWindowVideoBase::OnQueueItem(const std::shared_ptr<CFileItem>& item, in
   if (GetID() == WINDOW_VIDEO_PLAYLIST)
     return;
 
-  if (item->IsRAR() || item->IsZIP())
-    return;
-
   VIDEO_UTILS::QueueItem(item, first ? VIDEO_UTILS::QueuePosition::POSITION_BEGIN
                                      : VIDEO_UTILS::QueuePosition::POSITION_END);
 
@@ -566,7 +563,7 @@ bool CGUIWindowVideoBase::OnSelect(int iItem)
   const std::shared_ptr<CFileItem> item = m_vecItems->Get(iItem);
 
   const std::string path = item->GetPath();
-  if (!item->m_bIsFolder && path != "add" &&
+  if (!item->m_bIsFolder && !item->IsArchiveFileFolder() && path != "add" &&
       ((!StringUtils::StartsWith(path, "newsmartplaylist://") &&
         !StringUtils::StartsWith(path, "newplaylist://") &&
         !StringUtils::StartsWith(path, "newtag://") &&
@@ -757,7 +754,7 @@ void CGUIWindowVideoBase::LoadVideoInfo(CFileItemList& items,
       }
 
       // set the watched overlay
-      if (pItem->IsVideo())
+      if (pItem->IsVideo() && !pItem->IsArchiveFileFolder())
         pItem->SetOverlayImage(pItem->HasVideoInfoTag() &&
                                        pItem->GetVideoInfoTag()->GetPlayCount() > 0
                                    ? CGUIListItem::ICON_OVERLAY_WATCHED
@@ -802,7 +799,23 @@ bool CGUIWindowVideoBase::OnPlayOrResumeItem(int iItem, const std::string& playe
   if (iItem < 0 || iItem >= m_vecItems->Size())
     return false;
 
-  CVideoPlayActionProcessor proc{*this, m_vecItems->Get(iItem), player};
+  const std::shared_ptr<CFileItem> item = m_vecItems->Get(iItem);
+  if (!item->m_bIsFolder && item->IsArchiveFileFolder())
+  {
+    CFileItem resolvedItem;
+    switch (ResolveFileDirectoryOnClick(iItem, resolvedItem))
+    {
+      case FileDirectoryResolution::BUSY_OR_STALE:
+      case FileDirectoryResolution::EMPTY:
+        return true;
+      case FileDirectoryResolution::FOLDER:
+        return PlayItem(std::make_shared<CFileItem>(resolvedItem), player);
+      case FileDirectoryResolution::UNCHANGED:
+        return false;
+    }
+  }
+
+  CVideoPlayActionProcessor proc{*this, item, player};
   return proc.ProcessDefaultAction();
 }
 
@@ -840,7 +853,7 @@ void CGUIWindowVideoBase::GetContextButtons(int itemNumber, CContextButtons &but
       // if the item isn't a folder or script, is not explicitly marked as not playable,
       // is a member of a list rather than a single item and we're not on the last element of the list,
       // then add either 'play from here' or 'play only this' depending on default behaviour
-      if (!(item->m_bIsFolder || item->IsScript()) &&
+      if (!(item->m_bIsFolder || item->IsArchiveFileFolder() || item->IsScript()) &&
           (!item->HasProperty("IsPlayable") || item->GetProperty("IsPlayable").asBoolean()) &&
           m_vecItems->Size() > 1 && itemNumber < m_vecItems->Size() - 1)
       {
@@ -1146,8 +1159,10 @@ bool CGUIWindowVideoBase::PlayItem(const std::shared_ptr<CFileItem>& pItem,
 
     // recursively add items to list
     CFileItemList queuedItems;
-    VIDEO_UTILS::GetItemsForPlayList(item, queuedItems,
-                                     ContentUtils::PlayMode::CHECK_AUTO_PLAY_NEXT_ITEM);
+    if (!VIDEO_UTILS::GetItemsForPlayList(item, queuedItems,
+                                          ContentUtils::PlayMode::CHECK_AUTO_PLAY_NEXT_ITEM) ||
+        queuedItems.IsEmpty())
+      return true;
 
     CServiceBroker::GetPlaylistPlayer().ClearPlaylist(PLAYLIST::TYPE_VIDEO);
     CServiceBroker::GetPlaylistPlayer().Reset();

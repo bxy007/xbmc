@@ -97,6 +97,16 @@ std::string CFileExtensionProvider::GetFileFolderExtensions() const
   return extensions;
 }
 
+std::string CFileExtensionProvider::GetVfsFileFolderExtensions() const
+{
+  return GetAddonFileFolderExtensions(AddonType::VFS);
+}
+
+std::string CFileExtensionProvider::GetAudioDecoderFileFolderExtensions() const
+{
+  return GetAddonFileFolderExtensions(AddonType::AUDIODECODER);
+}
+
 bool CFileExtensionProvider::CanOperateExtension(const std::string& path) const
 {
   /*!

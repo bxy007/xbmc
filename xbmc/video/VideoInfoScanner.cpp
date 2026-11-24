@@ -482,6 +482,10 @@ namespace VIDEO
       if (pItem->m_bIsFolder && HasNoMedia(pItem->GetPath()))
         continue;
 
+      // Skip unexpanded archive files
+      if (!pItem->m_bIsFolder && pItem->IsArchiveFileFolder())
+        continue;
+
       // Discard all exclude files defined by regExExclude
       if (CUtil::ExcludeFileOrFolder(pItem->GetPath(), (content == CONTENT_TVSHOWS) ? CServiceBroker::GetSettingsComponent()->GetAdvancedSettings()->m_tvshowExcludeFromScanRegExps
                                                                     : CServiceBroker::GetSettingsComponent()->GetAdvancedSettings()->m_moviesExcludeFromScanRegExps))
@@ -726,7 +730,7 @@ namespace VIDEO
                                           CScraperUrl* pURL,
                                           CGUIDialogProgress* pDlgProgress)
   {
-    if (pItem->m_bIsFolder || !pItem->IsVideo() || pItem->IsNFO() ||
+    if (pItem->m_bIsFolder || !pItem->IsVideo() || pItem->IsNFO() || pItem->IsArchiveFileFolder() ||
        (pItem->IsPlayList() && !URIUtils::HasExtension(pItem->GetPath(), ".strm")))
       return INFO_NOT_NEEDED;
 
@@ -834,7 +838,7 @@ namespace VIDEO
                                                CScraperUrl* pURL,
                                                CGUIDialogProgress* pDlgProgress)
   {
-    if (pItem->m_bIsFolder || !pItem->IsVideo() || pItem->IsNFO() ||
+    if (pItem->m_bIsFolder || !pItem->IsVideo() || pItem->IsNFO() || pItem->IsArchiveFileFolder() ||
        (pItem->IsPlayList() && !URIUtils::HasExtension(pItem->GetPath(), ".strm")))
       return INFO_NOT_NEEDED;
 
@@ -1119,7 +1123,7 @@ namespace VIDEO
     // enumerate
     for (int i=0;i<items.Size();++i)
     {
-      if (items[i]->m_bIsFolder)
+      if (items[i]->m_bIsFolder || items[i]->IsArchiveFileFolder())
         continue;
       std::string strPath = URIUtils::GetDirectory(items[i]->GetPath());
       URIUtils::RemoveSlashAtEnd(strPath); // want no slash for the test that follows
@@ -2499,6 +2503,9 @@ namespace VIDEO
         path,
         [this, content, dbId, path](const std::shared_ptr<CFileItem>& item)
         {
+          if (item->IsArchiveFileFolder())
+            return;
+
           if (CServiceBroker::GetSettingsComponent()->GetSettings()->GetBool(
                   CSettings::SETTING_MYVIDEOS_EXTRACTFLAGS))
           {

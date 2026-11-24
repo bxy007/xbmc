@@ -37,8 +37,8 @@ std::unique_ptr<CTexture> CPictureFolderImageFileLoader::Load(const std::string&
 
   for (int i = 0; i < imagesInFolder.Size();)
   {
-    if (!imagesInFolder[i]->IsPicture() || imagesInFolder[i]->IsZIP() ||
-        imagesInFolder[i]->IsRAR() || imagesInFolder[i]->IsPlayList())
+    if (!imagesInFolder[i]->IsPicture() || imagesInFolder[i]->IsArchiveFileFolder() ||
+        imagesInFolder[i]->IsPlayList())
     {
       imagesInFolder.Remove(i);
     }

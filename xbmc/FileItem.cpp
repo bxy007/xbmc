@@ -1102,6 +1102,25 @@ bool CFileItem::IsStreamedFilesystem() const
   return URIUtils::IsStreamedFilesystem(m_strPath);
 }
 
+bool CFileItem::IsArchiveFileFolder() const
+{
+  if (IsZIP() || IsRAR() || IsAPK() || IsCBZ() || IsCBR())
+    return true;
+
+  // Non-.ts.001 .001 archives are already matched by IsRAR() above; do not let VFS .001 addons
+  // (e.g. vfs.rar) misclassify .ts.001 video recordings as archives.
+  if (!IsDiscImage() && !IsType(".001") && CServiceBroker::IsAddonInterfaceUp())
+  {
+    const std::string vfsExts =
+        CServiceBroker::GetFileExtensionProvider().GetVfsFileFolderExtensions();
+    if (!vfsExts.empty() && IsType(vfsExts.c_str()) &&
+        CServiceBroker::GetFileExtensionProvider().CanOperateExtension(m_strPath))
+      return true;
+  }
+
+  return false;
+}
+
 bool CFileItem::IsFileFolder(EFileFolderType types) const
 {
   EFileFolderType always_type = EFILEFOLDER_TYPE_ALWAYS;
@@ -1114,26 +1133,28 @@ bool CFileItem::IsFileFolder(EFileFolderType types) const
   if (IsType(".strm") && (types & EFILEFOLDER_TYPE_ONBROWSE))
     return false;
 
-  if(types & always_type)
+  const bool isArchive = IsArchiveFileFolder();
+
+  if (types & always_type)
   {
-    if(IsSmartPlayList()
-    || (IsPlayList() && CServiceBroker::GetSettingsComponent()->GetAdvancedSettings()->m_playlistAsFolders)
-    || IsAPK()
-    || IsZIP()
-    || IsRAR()
-    || IsRSS()
-    || IsAudioBook()
-    || IsType(".ogg|.oga|.xbt")
-#if defined(TARGET_ANDROID)
-    || IsType(".apk")
-#endif
-    )
-    return true;
+    if (IsSmartPlayList() ||
+        (IsPlayList() &&
+         CServiceBroker::GetSettingsComponent()->GetAdvancedSettings()->m_playlistAsFolders) ||
+        IsRSS() || IsAudioBook() || IsType(".ogg|.oga|.xbt"))
+      return true;
+
+    if (!isArchive && CServiceBroker::IsAddonInterfaceUp())
+    {
+      const std::string audioExts =
+          CServiceBroker::GetFileExtensionProvider().GetAudioDecoderFileFolderExtensions();
+      if (!audioExts.empty() && IsType(audioExts.c_str()) &&
+          CServiceBroker::GetFileExtensionProvider().CanOperateExtension(m_strPath))
+        return true;
+    }
   }
 
-  if (CServiceBroker::IsAddonInterfaceUp() &&
-      IsType(CServiceBroker::GetFileExtensionProvider().GetFileFolderExtensions().c_str()) &&
-      CServiceBroker::GetFileExtensionProvider().CanOperateExtension(m_strPath))
+  // Defer archive parsing until explicitly clicked or browsed.
+  if ((types & EFILEFOLDER_TYPE_ONCLICK) && isArchive)
     return true;
 
   if(types & EFILEFOLDER_TYPE_ONBROWSE)
@@ -1464,7 +1485,7 @@ void CFileItem::FillInDefaultIcon()
         // Live TV Channel
         SetArt("icon", "DefaultTVShows.png");
       }
-      else if ( URIUtils::IsArchive(m_strPath) )
+      else if (IsArchiveFileFolder())
       { // archive
         SetArt("icon", "DefaultFile.png");
       }
@@ -3027,17 +3048,36 @@ void CFileItemList::StackFiles()
     ++strRegExp;
   }
 
+  CRegExp multiPartRarRegExp(true, CRegExp::autoUtf8);
+  multiPartRarRegExp.RegComp("\\.part[0-9]+\\.rar$");
+  auto isMultiPartRar = [&multiPartRarRegExp](const CFileItemPtr& item) {
+    if (!item->IsRAR())
+      return false;
+    std::string dirPath, fileName;
+    URIUtils::Split(item->GetPath(), dirPath, fileName);
+    if (URIUtils::IsURL(item->GetPath()))
+    {
+      const size_t optPos = fileName.find_first_of("?|");
+      if (optPos != std::string::npos)
+        fileName.resize(optPos);
+    }
+    if (URIUtils::HasEncodedFilename(CURL(dirPath)))
+      fileName = CURL::Decode(fileName);
+    return multiPartRarRegExp.RegFind(fileName) != -1;
+  };
+
   // now stack the files, some of which may be from the previous stack iteration
   int i = 0;
   while (i < Size())
   {
     CFileItemPtr item1 = Get(i);
 
-    // skip folders, nfo files, playlists
+    // skip folders, nfo files, playlists, and archives (except .partN.rar multi-volume sets)
     if (item1->m_bIsFolder
       || item1->IsParentFolder()
       || item1->IsNFO()
       || item1->IsPlayList()
+      || (item1->IsArchiveFileFolder() && !isMultiPartRar(item1))
       )
     {
       // increment index
@@ -3073,11 +3113,12 @@ void CFileItemList::StackFiles()
         {
           CFileItemPtr item2 = Get(j);
 
-          // skip folders, nfo files, playlists
+          // skip folders, nfo files, playlists, and archives (except .partN.rar multi-volume sets)
           if (item2->m_bIsFolder
             || item2->IsParentFolder()
             || item2->IsNFO()
             || item2->IsPlayList()
+            || (item2->IsArchiveFileFolder() && !isMultiPartRar(item2))
             )
           {
             // increment index
@@ -3161,7 +3202,7 @@ void CFileItemList::StackFiles()
         // have a stack, remove the items and add the stacked item
         // dont actually stack a multipart rar set, just remove all items but the first
         std::string stackPath;
-        if (Get(stack[0])->IsRAR())
+        if (isMultiPartRar(Get(stack[0])))
           stackPath = Get(stack[0])->GetPath();
         else
         {
@@ -3169,9 +3210,9 @@ void CFileItemList::StackFiles()
           stackPath = dir.ConstructStackPath(*this, stack);
         }
         item1->SetPath(stackPath);
-        // clean up list
-        for (unsigned k = 1; k < stack.size(); k++)
-          Remove(i+1);
+        // clean up list using exact stacked indices in reverse order (skipped items may sit between parts)
+        for (size_t k = stack.size(); k-- > 1;)
+          Remove(stack[k]);
         // item->m_bIsFolder = true;  // don't treat stacked files as folders
         // the label may be in a different char set from the filename (eg over smb
         // the label is converted from utf8, but the filename is not)

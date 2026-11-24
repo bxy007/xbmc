@@ -15,7 +15,7 @@
             <delimiter>,</delimiter>
           </constraints>
           <level>0</level>
-          <default>1,2,3,4</default>
+          <default>2</default>
           <control type="list" format="string">
             <multiselect>true</multiselect>
             <hidevalue>false</hidevalue>

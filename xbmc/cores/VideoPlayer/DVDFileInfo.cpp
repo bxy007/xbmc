@@ -254,7 +254,7 @@ std::unique_ptr<CTexture> CDVDFileInfo::ExtractThumbToTexture(const CFileItem& f
 
 bool CDVDFileInfo::CanExtract(const CFileItem& fileItem)
 {
-  if (fileItem.m_bIsFolder)
+  if (fileItem.m_bIsFolder || fileItem.IsArchiveFileFolder())
     return false;
 
   if (fileItem.IsLiveTV() ||

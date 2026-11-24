@@ -59,6 +59,16 @@ public:
   std::string GetFileFolderExtensions() const;
 
   /*!
+   * @brief Returns VFS add-on file folder extensions
+   */
+  std::string GetVfsFileFolderExtensions() const;
+
+  /*!
+   * @brief Returns audio decoder add-on file folder extensions
+   */
+  std::string GetAudioDecoderFileFolderExtensions() const;
+
+  /*!
    * @brief Returns whether a url protocol from add-ons use encoded hostnames
    */
   bool EncodedHostName(const std::string& protocol) const;

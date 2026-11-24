@@ -18,6 +18,7 @@
 #include "dialogs/GUIDialogContextMenu.h"
 #include "dialogs/GUIDialogMediaSource.h"
 #include "dialogs/GUIDialogProgress.h"
+#include "filesystem/Directory.h"
 #include "filesystem/FileDirectoryFactory.h"
 #include "games/GameUtils.h"
 #include "guilib/GUIComponent.h"
@@ -146,6 +147,44 @@ bool CGUIWindowGames::OnClick(int iItem, const std::string& player /* = "" */)
   CFileItemPtr item = m_vecItems->Get(iItem);
   if (item)
   {
+    if (!item->m_bIsFolder && item->IsArchiveFileFolder())
+    {
+      CFileItem resolvedItem;
+      switch (ResolveFileDirectoryOnClick(iItem, resolvedItem, ""))
+      {
+        case FileDirectoryResolution::BUSY_OR_STALE:
+        case FileDirectoryResolution::EMPTY:
+          return true;
+        case FileDirectoryResolution::FOLDER:
+        {
+          CFileItemList fileFolderItems;
+          if (!XFILE::CDirectory::GetDirectory(resolvedItem.GetURL(), fileFolderItems, "",
+                                               XFILE::DIR_FLAG_NO_FILE_DIRS) ||
+              fileFolderItems.IsEmpty())
+          {
+            return true;
+          }
+
+          if (std::any_of(fileFolderItems.begin(), fileFolderItems.end(),
+                          [](const CFileItemPtr& fileFolderItem) {
+                            return fileFolderItem->m_bIsFolder ||
+                                   fileFolderItem->GetURL().IsFileType("zip") ||
+                                   CGameUtils::HasGameExtension(fileFolderItem->GetPath());
+                          }))
+          {
+            return OpenFolderItem(std::make_shared<CFileItem>(resolvedItem));
+          }
+
+          // Archive contains no recognized game extensions (e.g. MAME ROM zip), play directly
+          PlayGame(*item);
+          return true;
+        }
+        case FileDirectoryResolution::UNCHANGED:
+          PlayGame(*item);
+          return true;
+      }
+    }
+
     if (!item->m_bIsFolder)
     {
       PlayGame(*item);

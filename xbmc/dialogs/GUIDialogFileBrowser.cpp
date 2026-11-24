@@ -10,7 +10,9 @@
 
 #include "AutoSwitch.h"
 #include "FileItem.h"
+#include "GUIDialogBusy.h"
 #include "GUIDialogContextMenu.h"
+#include "GUIDialogKaiToast.h"
 #include "GUIDialogMediaSource.h"
 #include "GUIDialogYesNo.h"
 #include "GUIPassword.h"
@@ -20,6 +22,7 @@
 #include "Util.h"
 #include "filesystem/Directory.h"
 #include "filesystem/File.h"
+#include "filesystem/FileDirectoryFactory.h"
 #include "filesystem/MultiPathDirectory.h"
 #include "guilib/GUIComponent.h"
 #include "guilib/GUIKeyboardFactory.h"
@@ -34,6 +37,7 @@
 #include "settings/MediaSourceSettings.h"
 #include "settings/SettingsComponent.h"
 #include "storage/MediaManager.h"
+#include "threads/IRunnable.h"
 #include "utils/FileExtensionProvider.h"
 #include "utils/StringUtils.h"
 #include "utils/URIUtils.h"
@@ -51,6 +55,34 @@ using namespace XFILE;
 #define CONTROL_CANCEL        414
 #define CONTROL_NEWFOLDER     415
 #define CONTROL_FLIP          416
+
+namespace
+{
+bool IsExpandableDeferredArchive(const CFileItem& item)
+{
+  if (item.m_bIsFolder || !item.IsFileFolder(EFILEFOLDER_TYPE_ONCLICK))
+    return false;
+
+  if (item.GetURL().IsFileType("zip"))
+    return true;
+
+#if defined(TARGET_ANDROID)
+  if (item.GetURL().IsFileType("apk"))
+    return true;
+#endif
+
+  if (!item.IsDiscImage() && CServiceBroker::IsAddonInterfaceUp())
+  {
+    const std::string vfsExts =
+        CServiceBroker::GetFileExtensionProvider().GetVfsFileFolderExtensions();
+    if (!vfsExts.empty() && item.IsType(vfsExts.c_str()) &&
+        CServiceBroker::GetFileExtensionProvider().CanOperateExtension(item.GetPath()))
+      return true;
+  }
+
+  return false;
+}
+} // namespace
 
 CGUIDialogFileBrowser::CGUIDialogFileBrowser()
     : CGUIDialog(WINDOW_DIALOG_FILE_BROWSER, "FileBrowser.xml")
@@ -180,16 +212,21 @@ bool CGUIDialogFileBrowser::OnMessage(CGUIMessage& message)
         int iAction = message.GetParam1();
         if (iItem < 0) break;
         CFileItemPtr pItem = (*m_vecItems)[iItem];
+        const bool isDeferredFileDir =
+            !m_browsingForFolders && m_useFileDirectories && IsExpandableDeferredArchive(*pItem);
         if ((iAction == ACTION_SELECT_ITEM || iAction == ACTION_MOUSE_LEFT_CLICK) &&
-           (!m_multipleSelection || pItem->m_bIsShareOrDrive || pItem->m_bIsFolder))
+            (!m_multipleSelection || pItem->m_bIsShareOrDrive || pItem->m_bIsFolder ||
+             isDeferredFileDir))
         {
           OnClick(iItem);
           return true;
         }
         else if ((iAction == ACTION_HIGHLIGHT_ITEM || iAction == ACTION_MOUSE_LEFT_CLICK || iAction == ACTION_SELECT_ITEM) &&
-                (m_multipleSelection && !pItem->m_bIsShareOrDrive && !pItem->m_bIsFolder))
+                 (m_multipleSelection && !pItem->m_bIsShareOrDrive && !pItem->m_bIsFolder &&
+                  !isDeferredFileDir))
         {
           pItem->Select(!pItem->IsSelected());
+          m_selectedCount += pItem->IsSelected() ? 1 : -1;
           CGUIMessage msg(GUI_MSG_ITEM_SELECT, GetID(), message.GetSenderId(), iItem + 1);
           OnMessage(msg);
         }
@@ -225,8 +262,23 @@ bool CGUIDialogFileBrowser::OnMessage(CGUIMessage& message)
             for (int iItem = 0; iItem < m_vecItems->Size(); ++iItem)
             {
               CFileItemPtr pItem = (*m_vecItems)[iItem];
-              if (pItem->IsSelected())
+              if (pItem->IsSelected() &&
+                  !(!m_browsingForFolders && m_useFileDirectories &&
+                    IsExpandableDeferredArchive(*pItem)))
                 m_markedPath.push_back(pItem->GetPath());
+            }
+          }
+          else if (!m_browsingForFolders && m_useFileDirectories)
+          {
+            int iItem = m_viewControl.GetSelectedItem();
+            if (iItem >= 0 && iItem < m_vecItems->Size())
+            {
+              CFileItemPtr pItem = (*m_vecItems)[iItem];
+              if (IsExpandableDeferredArchive(*pItem))
+              {
+                OnClick(iItem);
+                return true;
+              }
             }
           }
           m_bConfirmed = true;
@@ -393,6 +445,7 @@ void CGUIDialogFileBrowser::Update(const std::string &strDirectory)
     }
 
     ClearFileItems();
+    m_selectedCount = 0;
     m_vecItems->Copy(items);
     m_Directory->SetPath(strDirectory);
     m_strParentPath = strParentPath;
@@ -490,7 +543,13 @@ void CGUIDialogFileBrowser::FrameMove()
       std::string safePath = url.GetWithoutUserDetails();
       SET_CONTROL_LABEL(CONTROL_LABEL_PATH, safePath);
     }
-    if ((!m_browsingForFolders && (*m_vecItems)[item]->m_bIsFolder) || ((*m_vecItems)[item]->GetPath() == "image://Browse"))
+    const CFileItemPtr curItem = (*m_vecItems)[item];
+    const bool isDeferredFileDir =
+        !m_browsingForFolders && m_useFileDirectories && IsExpandableDeferredArchive(*curItem);
+    const bool hasMultiSelection = m_multipleSelection && m_selectedCount > 0;
+    if ((!m_browsingForFolders && !hasMultiSelection &&
+         (curItem->m_bIsFolder || isDeferredFileDir)) ||
+        (curItem->GetPath() == "image://Browse"))
     {
       CONTROL_DISABLE(CONTROL_OK);
     }
@@ -518,11 +577,60 @@ void CGUIDialogFileBrowser::FrameMove()
   CGUIDialog::FrameMove();
 }
 
+namespace
+{
+class CCreateBrowserFileDirectory : public IRunnable
+{
+public:
+  CCreateBrowserFileDirectory(const CURL& url, CFileItem& item, const std::string& mask)
+    : m_url(url), m_item(item), m_mask(mask)
+  {
+  }
+
+  void Run() override
+  {
+    std::unique_ptr<XFILE::IFileDirectory> dir(
+        XFILE::CFileDirectoryFactory::Create(m_url, &m_item, m_mask));
+    m_isFolder = (dir != nullptr);
+  }
+
+  bool m_isFolder = false;
+
+private:
+  CURL m_url;
+  CFileItem& m_item;
+  std::string m_mask;
+};
+} // namespace
+
 void CGUIDialogFileBrowser::OnClick(int iItem)
 {
   if ( iItem < 0 || iItem >= m_vecItems->Size() ) return ;
   CFileItemPtr pItem = (*m_vecItems)[iItem];
   std::string strPath = pItem->GetPath();
+
+  if (!m_browsingForFolders && m_useFileDirectories && IsExpandableDeferredArchive(*pItem))
+  {
+    CFileItem resolvedItem(pItem->GetPath(), false);
+    resolvedItem.SetLabel(pItem->GetLabel());
+    CCreateBrowserFileDirectory createDir(resolvedItem.GetURL(), resolvedItem, m_rootDir.GetMask());
+    CGUIDialogBusy::Wait(&createDir, 100, false);
+
+    if (iItem >= m_vecItems->Size() || (*m_vecItems)[iItem] != pItem)
+      return;
+
+    if (createDir.m_isFolder)
+    {
+      Update(resolvedItem.GetPath());
+      return;
+    }
+    if (resolvedItem.m_bIsFolder)
+    {
+      CGUIDialogKaiToast::QueueNotification(CGUIDialogKaiToast::Info, g_localizeStrings.Get(2080),
+                                            pItem->GetLabel());
+    }
+    return;
+  }
 
   if (pItem->m_bIsFolder)
   {
@@ -550,7 +658,7 @@ void CGUIDialogFileBrowser::OnClick(int iItem)
   }
   else if (!m_browsingForFolders)
   {
-    m_selectedPath = pItem->GetPath();
+    m_selectedPath = strPath;
     m_bConfirmed = true;
     Close();
   }

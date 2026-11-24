@@ -807,8 +807,19 @@ bool URIUtils::IsRAR(const std::string& strFile)
 {
   std::string strExtension = GetExtension(strFile);
 
-  if (strExtension == ".001" && !StringUtils::EndsWithNoCase(strFile, ".ts.001"))
-    return true;
+  if (strExtension == ".001")
+  {
+    std::string fileName = strFile;
+    while (IsURL(fileName))
+    {
+      const std::string next = CURL(fileName).GetFileName();
+      if (next == fileName)
+        break;
+      fileName = next;
+    }
+    if (!StringUtils::EndsWithNoCase(fileName, ".ts.001"))
+      return true;
+  }
 
   if (StringUtils::EqualsNoCase(strExtension, ".cbr"))
     return true;

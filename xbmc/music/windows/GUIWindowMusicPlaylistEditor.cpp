@@ -81,9 +81,9 @@ bool CGUIWindowMusicPlaylistEditor::OnClick(int iItem, const std::string& player
   if (iItem < 0 || iItem >= m_vecItems->Size()) return false;
   CFileItemPtr item = m_vecItems->Get(iItem);
 
-  // Expand .m3u files in sources list when clicked on regardless of <playlistasfolders>
+  // Expand .m3u files and deferred archives in sources list when clicked on
   if (item->IsFileFolder(EFILEFOLDER_MASK_ONBROWSE))
-    return Update(item->GetPath());
+    return BrowseIntoItem(iItem);
   // Avoid playback (default click behaviour) of media files
   if (!item->m_bIsFolder)
     return false;
@@ -256,9 +256,23 @@ void CGUIWindowMusicPlaylistEditor::OnQueueItem(int iItem, bool)
 
   // add this item to our playlist.  We make a new copy here as we may be rendering them side by side,
   // and thus want a different layout for each item
-  CFileItemPtr item(new CFileItem(*m_vecItems->Get(iItem)));
+  const CFileItemPtr sourceItem = m_vecItems->Get(iItem);
+  CFileItemPtr item;
+  if (!sourceItem->m_bIsFolder && sourceItem->IsArchiveFileFolder())
+  {
+    CFileItem resolvedItem;
+    if (MUSIC_UTILS::ResolveArchiveItem(*sourceItem, resolvedItem) !=
+        MUSIC_UTILS::ArchiveResolution::FOLDER)
+      return;
+    item = std::make_shared<CFileItem>(resolvedItem);
+  }
+  else
+  {
+    item = std::make_shared<CFileItem>(*sourceItem);
+  }
   CFileItemList newItems;
-  MUSIC_UTILS::GetItemsForPlayList(item, newItems);
+  if (!MUSIC_UTILS::GetItemsForPlayList(item, newItems) || newItems.IsEmpty())
+    return;
   AppendToPlaylist(newItems);
 }
 
@@ -403,23 +417,50 @@ void CGUIWindowMusicPlaylistEditor::AppendToPlaylist(CFileItemList &newItems)
   UpdatePlaylist();
 }
 
+bool CGUIWindowMusicPlaylistEditor::BrowseIntoItem(int iItem)
+{
+  if (iItem < 0 || iItem >= m_vecItems->Size())
+    return false;
+
+  CFileItemPtr item = m_vecItems->Get(iItem);
+  if (!item->m_bIsFolder && item->IsArchiveFileFolder())
+  {
+    CFileItem resolvedItem;
+    switch (ResolveFileDirectoryOnClick(iItem, resolvedItem))
+    {
+      case FileDirectoryResolution::BUSY_OR_STALE:
+      case FileDirectoryResolution::EMPTY:
+        return true;
+      case FileDirectoryResolution::FOLDER:
+        return Update(resolvedItem.GetPath());
+      case FileDirectoryResolution::UNCHANGED:
+        return false;
+    }
+  }
+
+  return Update(item->GetPath());
+}
+
 void CGUIWindowMusicPlaylistEditor::OnSourcesContext()
 {
   static constexpr int CONTEXT_BUTTON_QUEUE_ITEM = 0;
   static constexpr int CONTEXT_BUTTON_BROWSE_INTO = 1;
 
   CFileItemPtr item = GetCurrentListItem();
+  if (!item)
+    return;
+
   CContextButtons buttons;
   if (item->IsFileFolder(EFILEFOLDER_MASK_ONBROWSE))
     buttons.Add(CONTEXT_BUTTON_BROWSE_INTO, 37015); //Browse into
-  if (item && !item->IsParentFolder() && !m_vecItems->IsVirtualDirectoryRoot())
+  if (!item->IsParentFolder() && !m_vecItems->IsVirtualDirectoryRoot())
     buttons.Add(CONTEXT_BUTTON_QUEUE_ITEM, 15019); // Add (to playlist)
 
   int btnid = CGUIDialogContextMenu::ShowAndGetChoice(buttons);
   if (btnid == CONTEXT_BUTTON_QUEUE_ITEM)
     OnQueueItem(m_viewControl.GetSelectedItem(), false);
   else if (btnid == CONTEXT_BUTTON_BROWSE_INTO)
-    Update(item->GetPath());
+    BrowseIntoItem(m_viewControl.GetSelectedItem());
 }
 
 void CGUIWindowMusicPlaylistEditor::OnPlaylistContext()

@@ -1358,7 +1358,7 @@ void CGUIWindowSlideShow::AddItems(const std::string &strPath, path_set *recursi
     {
       AddItems(item->GetPath(), recursivePaths);
     }
-    else if (!item->m_bIsFolder && !URIUtils::IsRAR(item->GetPath()) && !URIUtils::IsZIP(item->GetPath()))
+    else if (!item->m_bIsFolder && !item->IsArchiveFileFolder())
     { // add to the slideshow
       Add(item.get());
     }

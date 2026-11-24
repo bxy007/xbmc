@@ -130,3 +130,106 @@ const TestFileData BaseMovies[] = {{ "c:\\dir\\filename.avi", false, "c:\\dir\\f
                                    { "/home/user/movies/movie_name/BDMV/index.bdmv", true, "/home/user/movies/movie_name/" }};
 
 INSTANTIATE_TEST_SUITE_P(BaseNameMovies, TestFileItemBasePath, ValuesIn(BaseMovies));
+
+TEST_F(AdvancedSettingsResetBase, ArchiveFileFolderDeferredToOnClick)
+{
+  const char* archivePaths[] = {
+      "/media/movies/sample.zip", "/media/movies/sample.rar", "/media/movies/sample.cbz",
+      "/media/movies/sample.cbr", "/media/movies/sample.apk", "dav://192.168.50.101/video/test.zip",
+  };
+  for (const char* path : archivePaths)
+  {
+    CFileItem item(path, false);
+    EXPECT_TRUE(item.IsArchiveFileFolder()) << path;
+    EXPECT_FALSE(item.IsFileFolder(EFILEFOLDER_TYPE_ALWAYS)) << path;
+    EXPECT_TRUE(item.IsFileFolder(EFILEFOLDER_MASK_ONCLICK)) << path;
+    EXPECT_TRUE(item.IsFileFolder(EFILEFOLDER_MASK_ONBROWSE)) << path;
+    EXPECT_TRUE(item.IsFileFolder(EFILEFOLDER_MASK_ALL)) << path;
+  }
+
+  CFileItem discImage("/media/movies/movie.iso", false);
+  EXPECT_FALSE(discImage.IsArchiveFileFolder());
+  EXPECT_FALSE(discImage.IsFileFolder(EFILEFOLDER_TYPE_ALWAYS));
+  EXPECT_FALSE(discImage.IsFileFolder(EFILEFOLDER_MASK_ONCLICK));
+  EXPECT_TRUE(discImage.IsFileFolder(EFILEFOLDER_MASK_ONBROWSE));
+
+  CFileItem smartPlaylist("special://videoplaylists/test.xsp", false);
+  EXPECT_FALSE(smartPlaylist.IsArchiveFileFolder());
+  EXPECT_TRUE(smartPlaylist.IsFileFolder(EFILEFOLDER_TYPE_ALWAYS));
+
+  CFileItem audioBook("/media/books/book.m4b", false);
+  EXPECT_FALSE(audioBook.IsArchiveFileFolder());
+  EXPECT_TRUE(audioBook.IsFileFolder(EFILEFOLDER_TYPE_ALWAYS));
+
+  CFileItem movie("/media/movies/movie.mkv", false);
+  EXPECT_FALSE(movie.IsArchiveFileFolder());
+  EXPECT_FALSE(movie.IsFileFolder(EFILEFOLDER_MASK_ALL));
+
+  // .ts.001 recordings (including URLs with query/protocol options) must not be treated as .001 archives
+  CFileItem tsPartLocal("/media/tv/recording.ts.001", false);
+  EXPECT_FALSE(tsPartLocal.IsRAR());
+  EXPECT_FALSE(tsPartLocal.IsArchiveFileFolder());
+
+  CFileItem tsPartUrl("http://example.com/tv/recording.ts.001?token=abc|User-Agent=test", false);
+  EXPECT_FALSE(tsPartUrl.IsRAR());
+  EXPECT_FALSE(tsPartUrl.IsArchiveFileFolder());
+
+  CFileItem splitArchiveUrl("http://example.com/movies/archive.001?token=abc|User-Agent=test",
+                            false);
+  EXPECT_TRUE(splitArchiveUrl.IsRAR());
+  EXPECT_TRUE(splitArchiveUrl.IsArchiveFileFolder());
+}
+
+TEST_F(AdvancedSettingsResetBase, ArchiveFilesNotStacked)
+{
+  // Plain archives must not stack into stack://
+  CFileItemList zipItems("/media/movies/");
+  zipItems.Add(std::make_shared<CFileItem>("/media/movies/Film CD1.zip", false));
+  zipItems.Add(std::make_shared<CFileItem>("/media/movies/Film CD2.zip", false));
+  zipItems.Stack();
+
+  ASSERT_EQ(zipItems.Size(), 2);
+  EXPECT_FALSE(zipItems[0]->IsStack());
+  EXPECT_FALSE(zipItems[1]->IsStack());
+  EXPECT_EQ(zipItems[0]->GetPath(), "/media/movies/Film CD1.zip");
+  EXPECT_EQ(zipItems[1]->GetPath(), "/media/movies/Film CD2.zip");
+
+  // Stacking video parts with an interleaved archive must remove only the stacked video part
+  CFileItemList mixedItems("/media/movies/");
+  mixedItems.Add(std::make_shared<CFileItem>("/media/movies/Film CD1.mkv", false));
+  mixedItems.Add(std::make_shared<CFileItem>("/media/movies/Film CD1.zip", false));
+  mixedItems.Add(std::make_shared<CFileItem>("/media/movies/Film CD2.mkv", false));
+  mixedItems.Stack();
+
+  ASSERT_EQ(mixedItems.Size(), 2);
+  EXPECT_TRUE(mixedItems[0]->IsStack());
+  EXPECT_EQ(mixedItems[0]->GetPath(),
+            "stack:///media/movies/Film CD1.mkv , /media/movies/Film CD2.mkv");
+  EXPECT_FALSE(mixedItems[1]->IsStack());
+  EXPECT_EQ(mixedItems[1]->GetPath(), "/media/movies/Film CD1.zip");
+
+  // Independent RARs (Film CD1/CD2) must not be hidden, while .partN.rar sets keep dedup
+  CFileItemList rarItems("/media/movies/");
+  rarItems.Add(std::make_shared<CFileItem>("/media/movies/Film CD1.rar", false));
+  rarItems.Add(std::make_shared<CFileItem>("/media/movies/Film CD2.rar", false));
+  rarItems.Add(std::make_shared<CFileItem>("/media/movies/Multi.part1.rar", false));
+  rarItems.Add(std::make_shared<CFileItem>("/media/movies/Multi.part2.rar", false));
+  rarItems.Stack();
+
+  ASSERT_EQ(rarItems.Size(), 3);
+  EXPECT_EQ(rarItems[0]->GetPath(), "/media/movies/Film CD1.rar");
+  EXPECT_EQ(rarItems[1]->GetPath(), "/media/movies/Film CD2.rar");
+  EXPECT_EQ(rarItems[2]->GetPath(), "/media/movies/Multi.part1.rar");
+
+  // Multi-volume RARs with query parameters and/or protocol options must still deduplicate
+  CFileItemList urlRarItems("http://example.com/movies/");
+  urlRarItems.Add(std::make_shared<CFileItem>(
+      "http://example.com/movies/Multi.part1.rar?token=abc|User-Agent=test", false));
+  urlRarItems.Add(std::make_shared<CFileItem>(
+      "http://example.com/movies/Multi.part2.rar?token=abc|User-Agent=test", false));
+  urlRarItems.Stack();
+
+  ASSERT_EQ(urlRarItems.Size(), 1);
+  EXPECT_EQ(urlRarItems[0]->GetPath(),
+            "http://example.com/movies/Multi.part1.rar?token=abc|User-Agent=test");
+}

@@ -13,6 +13,7 @@
 #include "PartyModeManager.h"
 #include "PlayListPlayer.h"
 #include "ServiceBroker.h"
+#include "URL.h"
 #include "application/Application.h"
 #include "application/ApplicationComponents.h"
 #include "application/ApplicationPlayer.h"
@@ -20,6 +21,7 @@
 #include "dialogs/GUIDialogKaiToast.h"
 #include "dialogs/GUIDialogSelect.h"
 #include "filesystem/Directory.h"
+#include "filesystem/FileDirectoryFactory.h"
 #include "filesystem/MusicDatabaseDirectory.h"
 #include "guilib/GUIComponent.h"
 #include "guilib/GUIKeyboardFactory.h"
@@ -35,6 +37,7 @@
 #include "settings/Settings.h"
 #include "settings/SettingsComponent.h"
 #include "threads/IRunnable.h"
+#include "utils/FileExtensionProvider.h"
 #include "utils/FileUtils.h"
 #include "utils/JobManager.h"
 #include "utils/StringUtils.h"
@@ -497,7 +500,7 @@ SortDescription GetSortDescription(const CGUIViewState& state, const CFileItemLi
 
 void CAsyncGetItemsForPlaylist::GetItemsForPlaylist(const std::shared_ptr<CFileItem>& item)
 {
-  if (item->IsParentFolder() || !item->CanQueue() || item->IsRAR() || item->IsZIP())
+  if (item->IsParentFolder() || !item->CanQueue() || item->IsArchiveFileFolder())
     return;
 
   if (item->IsMusicDb() && item->m_bIsFolder && !item->IsParentFolder())
@@ -660,7 +663,8 @@ void AddItemToPlayListAndPlay(const std::shared_ptr<CFileItem>& itemToQueue,
 {
   // recursively add items to list
   CFileItemList queuedItems;
-  MUSIC_UTILS::GetItemsForPlayList(itemToQueue, queuedItems);
+  if (!MUSIC_UTILS::GetItemsForPlayList(itemToQueue, queuedItems) || queuedItems.IsEmpty())
+    return;
 
   auto& playlistPlayer = CServiceBroker::GetPlaylistPlayer();
   playlistPlayer.ClearPlaylist(PLAYLIST::TYPE_MUSIC);
@@ -690,10 +694,59 @@ void AddItemToPlayListAndPlay(const std::shared_ptr<CFileItem>& itemToQueue,
   playlistPlayer.SetCurrentPlaylist(PLAYLIST::TYPE_MUSIC);
   playlistPlayer.Play(pos, player);
 }
+class CAsyncResolveMusicArchive : public IRunnable
+{
+public:
+  CAsyncResolveMusicArchive(const CURL& url, CFileItem& item, const std::string& mask)
+    : m_url(url), m_item(item), m_mask(mask)
+  {
+  }
+
+  void Run() override
+  {
+    std::unique_ptr<XFILE::IFileDirectory> dir(
+        XFILE::CFileDirectoryFactory::Create(m_url, &m_item, m_mask));
+    m_isFolder = (dir != nullptr);
+  }
+
+  bool m_isFolder{false};
+
+private:
+  CURL m_url;
+  CFileItem& m_item;
+  std::string m_mask;
+};
 } // unnamed namespace
 
 namespace MUSIC_UTILS
 {
+ArchiveResolution ResolveArchiveItem(const CFileItem& item, CFileItem& resolvedItem)
+{
+  if (item.m_bIsFolder || !item.IsArchiveFileFolder())
+    return ArchiveResolution::UNCHANGED;
+
+  resolvedItem = CFileItem(item.GetPath(), false);
+  resolvedItem.SetLabel(item.GetLabel());
+  const std::string mask = CServiceBroker::GetFileExtensionProvider().GetMusicExtensions();
+  CAsyncResolveMusicArchive resolver(resolvedItem.GetURL(), resolvedItem, mask);
+  CGUIDialogBusy::Wait(&resolver, 100, false);
+
+  if (resolver.m_isFolder)
+  {
+    resolvedItem.m_bIsFolder = true;
+    return ArchiveResolution::FOLDER;
+  }
+
+  if (resolvedItem.m_bIsFolder)
+  {
+    CGUIDialogKaiToast::QueueNotification(CGUIDialogKaiToast::Info, g_localizeStrings.Get(2080),
+                                          item.GetLabel());
+    return ArchiveResolution::EMPTY;
+  }
+
+  return ArchiveResolution::UNCHANGED;
+}
+
 bool IsAutoPlayNextItem(const CFileItem& item)
 {
   if (!item.HasMusicInfoTag())
@@ -710,12 +763,20 @@ void PlayItem(const std::shared_ptr<CFileItem>& itemIn,
 {
   auto item = itemIn;
 
+  if (!item->m_bIsFolder && item->IsArchiveFileFolder())
+  {
+    CFileItem resolvedItem;
+    if (ResolveArchiveItem(*item, resolvedItem) != ArchiveResolution::FOLDER)
+      return;
+    item = std::make_shared<CFileItem>(resolvedItem);
+  }
+
   //  Allow queuing of unqueueable items
   //  when we try to queue them directly
-  if (!itemIn->CanQueue())
+  if (!item->CanQueue())
   {
     // make a copy to not alter the original item
-    item = std::make_shared<CFileItem>(*itemIn);
+    item = std::make_shared<CFileItem>(*item);
     item->SetCanQueue(true);
   }
 
@@ -767,12 +828,20 @@ void QueueItem(const std::shared_ptr<CFileItem>& itemIn, QueuePosition pos)
 {
   auto item = itemIn;
 
+  if (!item->m_bIsFolder && item->IsArchiveFileFolder())
+  {
+    CFileItem resolvedItem;
+    if (ResolveArchiveItem(*item, resolvedItem) != ArchiveResolution::FOLDER)
+      return;
+    item = std::make_shared<CFileItem>(resolvedItem);
+  }
+
   //  Allow queuing of unqueueable items
   //  when we try to queue them directly
-  if (!itemIn->CanQueue())
+  if (!item->CanQueue())
   {
     // make a copy to not alter the original item
-    item = std::make_shared<CFileItem>(*itemIn);
+    item = std::make_shared<CFileItem>(*item);
     item->SetCanQueue(true);
   }
 
@@ -799,7 +868,8 @@ void QueueItem(const std::shared_ptr<CFileItem>& itemIn, QueuePosition pos)
   const int oldSize = player.GetPlaylist(playlistId).size();
 
   CFileItemList queuedItems;
-  GetItemsForPlayList(item, queuedItems);
+  if (!GetItemsForPlayList(item, queuedItems) || queuedItems.IsEmpty())
+    return;
 
   // if party mode, add items but DONT start playing
   if (g_partyModeManager.IsEnabled())
@@ -929,6 +999,13 @@ bool IsItemPlayable(const CFileItem& item)
       return false;
 
     return true;
+  }
+
+  if (!item.m_bIsFolder && item.IsArchiveFileFolder())
+  {
+    if (item.HasMusicInfoTag() && item.CanQueue() && !item.IsPlugin() && !item.IsScript())
+      return true;
+    return CServiceBroker::GetGUI()->GetWindowManager().GetActiveWindow() == WINDOW_MUSIC_NAV;
   }
 
   if (item.IsPlugin() && item.IsAudio() && !IsEmptyMusicItem(item) &&

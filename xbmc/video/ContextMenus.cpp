@@ -187,8 +187,22 @@ bool CVideoBrowse::Execute(const std::shared_ptr<CFileItem>& item) const
   auto& windowMgr = CServiceBroker::GetGUI()->GetWindowManager();
 
   // For file directory browsing, we need item's dyn path, for everything else the path.
-  const std::string path{item->IsFileFolder(EFILEFOLDER_MASK_ONBROWSE) ? item->GetDynPath()
-                                                                       : item->GetPath()};
+  std::string path{item->IsFileFolder(EFILEFOLDER_MASK_ONBROWSE) ? item->GetDynPath()
+                                                                 : item->GetPath()};
+  if (!item->m_bIsFolder && item->IsArchiveFileFolder())
+  {
+    CFileItem resolvedItem;
+    switch (VIDEO_UTILS::ResolveArchiveItem(*item, resolvedItem))
+    {
+      case VIDEO_UTILS::ArchiveResolution::FOLDER:
+        path = resolvedItem.GetPath();
+        break;
+      case VIDEO_UTILS::ArchiveResolution::EMPTY:
+        return true;
+      case VIDEO_UTILS::ArchiveResolution::UNCHANGED:
+        return false;
+    }
+  }
 
   if (target == windowMgr.GetActiveWindow())
   {
@@ -331,11 +345,16 @@ protected:
   bool OnResumeSelected() override
   {
     m_item->SetStartOffset(STARTOFFSET_RESUME);
-    Play();
-    return true;
+    return SelectPlayerAndPlay();
   }
 
   bool OnPlaySelected() override
+  {
+    return SelectPlayerAndPlay();
+  }
+
+private:
+  bool SelectPlayerAndPlay()
   {
     std::string player;
     if (m_choosePlayer)
@@ -354,7 +373,6 @@ protected:
     return true;
   }
 
-private:
   void Play(const std::string& player = "") const {
     m_item->SetProperty("playlist_type_hint", PLAYLIST::TYPE_VIDEO);
     const ContentUtils::PlayMode mode{m_item->GetProperty("CheckAutoPlayNextItem").asBoolean()
@@ -383,7 +401,21 @@ void SetPathAndPlay(const std::shared_ptr<CFileItem>& item, PlayMode mode)
   }
   else
   {
-    const auto itemCopy{std::make_shared<CFileItem>(*item)};
+    std::shared_ptr<CFileItem> itemCopy;
+    if (!item->m_bIsFolder && item->IsArchiveFileFolder())
+    {
+      CFileItem resolvedItem;
+      if (VIDEO_UTILS::ResolveArchiveItem(*item, resolvedItem) !=
+          VIDEO_UTILS::ArchiveResolution::FOLDER)
+        return;
+      itemCopy = std::make_shared<CFileItem>(resolvedItem);
+      if (item->HasProperty("CheckAutoPlayNextItem"))
+        itemCopy->SetProperty("CheckAutoPlayNextItem", item->GetProperty("CheckAutoPlayNextItem"));
+    }
+    else
+    {
+      itemCopy = std::make_shared<CFileItem>(*item);
+    }
     if (itemCopy->IsVideoDb())
     {
       if (!itemCopy->m_bIsFolder)

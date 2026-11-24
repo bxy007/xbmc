@@ -130,6 +130,7 @@ public:
   virtual DIR_CACHE_TYPE GetCacheType(const CURL& url) const { return DIR_CACHE_ONCE; }
 
   void SetMask(const std::string& strMask);
+  const std::string& GetMask() const { return m_strFileMask; }
   void SetFlags(int flags);
 
   /*! \brief Process additional requirements before the directory fetch is performed.

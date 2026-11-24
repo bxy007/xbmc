@@ -18,7 +18,9 @@
 #include "application/ApplicationComponents.h"
 #include "application/ApplicationPlayer.h"
 #include "dialogs/GUIDialogBusy.h"
+#include "dialogs/GUIDialogKaiToast.h"
 #include "filesystem/Directory.h"
+#include "filesystem/FileDirectoryFactory.h"
 #include "filesystem/VideoDatabaseDirectory.h"
 #include "guilib/GUIComponent.h"
 #include "guilib/GUIWindowManager.h"
@@ -32,6 +34,7 @@
 #include "settings/Settings.h"
 #include "settings/SettingsComponent.h"
 #include "threads/IRunnable.h"
+#include "utils/FileExtensionProvider.h"
 #include "utils/FileUtils.h"
 #include "utils/StringUtils.h"
 #include "utils/URIUtils.h"
@@ -133,7 +136,7 @@ SortDescription GetSortDescription(const CGUIViewState& state, const CFileItemLi
 
 void CAsyncGetItemsForPlaylist::GetItemsForPlaylist(const std::shared_ptr<CFileItem>& item)
 {
-  if (item->IsParentFolder() || !item->CanQueue() || item->IsRAR() || item->IsZIP())
+  if (item->IsParentFolder() || !item->CanQueue() || item->IsArchiveFileFolder())
     return;
 
   if (item->m_bIsFolder)
@@ -341,7 +344,8 @@ void AddItemToPlayListAndPlay(const std::shared_ptr<CFileItem>& itemToQueue,
 {
   // recursively add items to list
   CFileItemList queuedItems;
-  VIDEO_UTILS::GetItemsForPlayList(itemToQueue, queuedItems, mode);
+  if (!VIDEO_UTILS::GetItemsForPlayList(itemToQueue, queuedItems, mode) || queuedItems.IsEmpty())
+    return;
 
   auto& playlistPlayer = CServiceBroker::GetPlaylistPlayer();
   playlistPlayer.ClearPlaylist(PLAYLIST::TYPE_VIDEO);
@@ -372,10 +376,59 @@ void AddItemToPlayListAndPlay(const std::shared_ptr<CFileItem>& itemToQueue,
   playlistPlayer.Play(pos, player);
 }
 
+class CAsyncResolveVideoArchive : public IRunnable
+{
+public:
+  CAsyncResolveVideoArchive(const CURL& url, CFileItem& item, const std::string& mask)
+    : m_url(url), m_item(item), m_mask(mask)
+  {
+  }
+
+  void Run() override
+  {
+    std::unique_ptr<XFILE::IFileDirectory> dir(
+        XFILE::CFileDirectoryFactory::Create(m_url, &m_item, m_mask));
+    m_isFolder = (dir != nullptr);
+  }
+
+  bool m_isFolder{false};
+
+private:
+  CURL m_url;
+  CFileItem& m_item;
+  std::string m_mask;
+};
 } // unnamed namespace
 
 namespace VIDEO_UTILS
 {
+ArchiveResolution ResolveArchiveItem(const CFileItem& item, CFileItem& resolvedItem)
+{
+  if (item.m_bIsFolder || !item.IsArchiveFileFolder())
+    return ArchiveResolution::UNCHANGED;
+
+  resolvedItem = CFileItem(item.GetPath(), false);
+  resolvedItem.SetLabel(item.GetLabel());
+  const std::string mask = CServiceBroker::GetFileExtensionProvider().GetVideoExtensions();
+  CAsyncResolveVideoArchive resolver(resolvedItem.GetURL(), resolvedItem, mask);
+  CGUIDialogBusy::Wait(&resolver, 100, false);
+
+  if (resolver.m_isFolder)
+  {
+    resolvedItem.m_bIsFolder = true;
+    return ArchiveResolution::FOLDER;
+  }
+
+  if (resolvedItem.m_bIsFolder)
+  {
+    CGUIDialogKaiToast::QueueNotification(CGUIDialogKaiToast::Info, g_localizeStrings.Get(2080),
+                                          item.GetLabel());
+    return ArchiveResolution::EMPTY;
+  }
+
+  return ArchiveResolution::UNCHANGED;
+}
+
 bool IsAutoPlayNextItem(const CFileItem& item)
 {
   if (!item.HasVideoInfoTag())
@@ -412,12 +465,20 @@ void PlayItem(
 {
   auto item = itemIn;
 
+  if (!item->m_bIsFolder && item->IsArchiveFileFolder())
+  {
+    CFileItem resolvedItem;
+    if (ResolveArchiveItem(*item, resolvedItem) != ArchiveResolution::FOLDER)
+      return;
+    item = std::make_shared<CFileItem>(resolvedItem);
+  }
+
   //  Allow queuing of unqueueable items
   //  when we try to queue them directly
-  if (!itemIn->CanQueue())
+  if (!item->CanQueue())
   {
     // make a copy to not alter the original item
-    item = std::make_shared<CFileItem>(*itemIn);
+    item = std::make_shared<CFileItem>(*item);
     item->SetCanQueue(true);
   }
 
@@ -469,12 +530,20 @@ void QueueItem(const std::shared_ptr<CFileItem>& itemIn, QueuePosition pos)
 {
   auto item = itemIn;
 
+  if (!item->m_bIsFolder && item->IsArchiveFileFolder())
+  {
+    CFileItem resolvedItem;
+    if (ResolveArchiveItem(*item, resolvedItem) != ArchiveResolution::FOLDER)
+      return;
+    item = std::make_shared<CFileItem>(resolvedItem);
+  }
+
   //  Allow queuing of unqueueable items
   //  when we try to queue them directly
-  if (!itemIn->CanQueue())
+  if (!item->CanQueue())
   {
     // make a copy to not alter the original item
-    item = std::make_shared<CFileItem>(*itemIn);
+    item = std::make_shared<CFileItem>(*item);
     item->SetCanQueue(true);
   }
 
@@ -490,7 +559,9 @@ void QueueItem(const std::shared_ptr<CFileItem>& itemIn, QueuePosition pos)
     playlistId = PLAYLIST::TYPE_VIDEO;
 
   CFileItemList queuedItems;
-  GetItemsForPlayList(item, queuedItems, ContentUtils::PlayMode::CHECK_AUTO_PLAY_NEXT_ITEM);
+  if (!GetItemsForPlayList(item, queuedItems, ContentUtils::PlayMode::CHECK_AUTO_PLAY_NEXT_ITEM) ||
+      queuedItems.IsEmpty())
+    return;
 
   // if party mode, add items but DONT start playing
   if (g_partyModeManager.IsEnabled(PARTYMODECONTEXT_VIDEO))
@@ -611,6 +682,13 @@ bool IsItemPlayable(const CFileItem& item)
       return false;
 
     return true;
+  }
+
+  if (!item.m_bIsFolder && item.IsArchiveFileFolder())
+  {
+    if (item.HasVideoInfoTag() && item.CanQueue() && !item.IsPlugin() && !item.IsScript())
+      return true;
+    return CServiceBroker::GetGUI()->GetWindowManager().GetActiveWindow() == WINDOW_VIDEO_NAV;
   }
 
   if (item.IsPlugin() && item.IsVideo() && !IsEmptyVideoItem(item) &&

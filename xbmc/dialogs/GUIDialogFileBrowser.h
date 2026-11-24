@@ -81,6 +81,7 @@ protected:
   bool m_useFileDirectories;
   bool m_singleList;              // if true, we have no shares or anything
   bool m_multipleSelection;
+  int m_selectedCount{0};
   std::vector<std::string> m_markedPath;
 
   CPictureThumbLoader m_thumbLoader;
