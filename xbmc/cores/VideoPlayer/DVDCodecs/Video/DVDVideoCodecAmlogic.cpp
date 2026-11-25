@@ -121,6 +121,7 @@ CDVDVideoCodecAmlogic::CDVDVideoCodecAmlogic(CProcessInfo &processInfo)
           CSettings::SETTING_COREELEC_AMLOGIC_DV_CMV40_APPEND,
           CSettings::SETTING_COREELEC_AMLOGIC_DV_CMV40_AUTO_TRIGGER,
           CSettings::SETTING_COREELEC_AMLOGIC_DV_CMV40_AUTO2_THRESHOLD,
+          CSettings::SETTING_COREELEC_AMLOGIC_DV_VSVDB_INJECT,
           CSettings::SETTING_COREELEC_AMLOGIC_DV_VSVDB_MAX_LUM,
           CSettings::SETTING_COREELEC_AMLOGIC_DV_TYPE,
           CSettings::SETTING_COREELEC_AMLOGIC_DV_VIDEO_PROCESSOR,
@@ -131,8 +132,6 @@ CDVDVideoCodecAmlogic::CDVDVideoCodecAmlogic(CProcessInfo &processInfo)
       m_settingsCallbackRegistered = true;
     }
   }
-
-  UpdateAppendCMv40SettingCache();
 }
 
 CDVDVideoCodecAmlogic::~CDVDVideoCodecAmlogic()
@@ -154,27 +153,6 @@ CDVDVideoCodecAmlogic::~CDVDVideoCodecAmlogic()
   Close();
 }
 
-void CDVDVideoCodecAmlogic::UpdateAppendCMv40SettingCache()
-{
-  const auto settingsComponent = CServiceBroker::GetSettingsComponent();
-  const auto settings = settingsComponent ? settingsComponent->GetSettings() : nullptr;
-  if (!settings) return;
-
-  m_appendCMv40ModeSetting.store(
-      settings->GetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_CMV40_APPEND));
-  m_appendCMv40AutoThresholdSetting.store(
-      settings->GetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_CMV40_AUTO_TRIGGER));
-  m_appendCMv40Auto2ThresholdSetting.store(
-      settings->GetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_CMV40_AUTO2_THRESHOLD));
-  m_cmv40DisplayMaxLumSetting.store(
-      settings->GetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_VSVDB_MAX_LUM));
-  m_cmv40DvTypeSetting.store(
-      settings->GetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_TYPE));
-  m_cmv40VideoProcessorSetting.store(
-      settings->GetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_VIDEO_PROCESSOR));
-  m_dvSettingsGeneration.fetch_add(1, std::memory_order_release);
-}
-
 void CDVDVideoCodecAmlogic::OnSettingChanged(const std::shared_ptr<const CSetting>& setting)
 {
   if (!setting) return;
@@ -183,10 +161,11 @@ void CDVDVideoCodecAmlogic::OnSettingChanged(const std::shared_ptr<const CSettin
   if (id == CSettings::SETTING_COREELEC_AMLOGIC_DV_CMV40_APPEND ||
       id == CSettings::SETTING_COREELEC_AMLOGIC_DV_CMV40_AUTO_TRIGGER ||
       id == CSettings::SETTING_COREELEC_AMLOGIC_DV_CMV40_AUTO2_THRESHOLD ||
+      id == CSettings::SETTING_COREELEC_AMLOGIC_DV_VSVDB_INJECT ||
       id == CSettings::SETTING_COREELEC_AMLOGIC_DV_VSVDB_MAX_LUM ||
       id == CSettings::SETTING_COREELEC_AMLOGIC_DV_TYPE ||
       id == CSettings::SETTING_COREELEC_AMLOGIC_DV_VIDEO_PROCESSOR)
-    UpdateAppendCMv40SettingCache();
+    m_dvSettingsGeneration.fetch_add(1, std::memory_order_release);
   else if (id == CSettings::SETTING_COREELEC_AMLOGIC_DV_STD_SOURCE_LEVEL_5 ||
            id == CSettings::SETTING_COREELEC_AMLOGIC_DV_STD_SOURCE_LEVEL_5_OSDST ||
            id == CSettings::SETTING_SUBTITLES_DOLBYVISION_L5_SIGNAL_MODE)
@@ -200,8 +179,10 @@ DOVICMv40Mode CDVDVideoCodecAmlogic::EffectiveCMv40Mode(DOVICMv40Mode mode)
 
   const auto settingsComponent = CServiceBroker::GetSettingsComponent();
   const auto settings = settingsComponent ? settingsComponent->GetSettings() : nullptr;
-  if (settings &&
-      settings->GetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_VIDEO_PROCESSOR) != 0)
+  const bool vpEngaged =
+      (settings && settings->GetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_VIDEO_PROCESSOR) != 0) ||
+      (aml_dv_active_video_processor_mode() != 0);
+  if (vpEngaged)
   {
     if (!m_cmv40VideoProcessorLogged)
     {
@@ -211,6 +192,7 @@ DOVICMv40Mode CDVDVideoCodecAmlogic::EffectiveCMv40Mode(DOVICMv40Mode mode)
     }
     return DOVICMv40Mode::CMV40_NONE;
   }
+  m_cmv40VideoProcessorLogged = false;
 
   if (mode != DOVICMv40Mode::CMV40_AUTO2 ||
       !aml_dv_player_led_output_active(m_hints.hdrType, m_hints.bitdepth))
@@ -225,30 +207,50 @@ DOVICMv40Mode CDVDVideoCodecAmlogic::EffectiveCMv40Mode(DOVICMv40Mode mode)
   return DOVICMv40Mode::CMV40_ALWAYS;
 }
 
-void CDVDVideoCodecAmlogic::ApplyDynamicDoViSettings()
+void CDVDVideoCodecAmlogic::ApplyDynamicDoViSettings(bool initialize)
 {
   if (!m_bitstream) return;
 
   const bool vs10Converting = aml_dv_vs10_converting();
-  if (vs10Converting != m_cmv40Vs10ConvertingApplied)
+  const unsigned int activeVpMode = aml_dv_active_video_processor_mode();
+  const bool outputChanged = vs10Converting != m_cmv40Vs10ConvertingApplied ||
+                             activeVpMode != m_cmv40ActiveVpApplied;
+  if (initialize || outputChanged)
   {
     m_bitstream->SetCMv40Vs10Converting(vs10Converting);
     m_cmv40Vs10ConvertingApplied = vs10Converting;
-    m_bitstream->SetAppendCMv40(
-        EffectiveCMv40Mode(static_cast<DOVICMv40Mode>(m_appendCMv40ModeSetting.load())));
+    m_cmv40ActiveVpApplied = activeVpMode;
   }
 
   const unsigned int gen = m_dvSettingsGeneration.load(std::memory_order_acquire);
-  if (gen == m_dvSettingsGenApplied) return;
-  m_dvSettingsGenApplied = gen;
+  const unsigned int capsGen = aml_dv_display_caps_generation();
+  const bool usesDisplayPeak = m_appendCMv40ModeApplied == DOVICMv40Mode::CMV40_AUTO2 ||
+      (m_appendCMv40ModeApplied == DOVICMv40Mode::CMV40_AUTO &&
+       m_appendCMv40AutoThresholdApplied == DOVICMv40AutoThreshold::CMV40_AUTO_SOURCE);
+  // HDMI can renegotiate without a Kodi mode change. Read EDID at most once a second
+  // during playback that uses the display peak.
+  const bool checkDisplay = usesDisplayPeak &&
+      m_hints.hdrType == StreamHdrType::HDR_TYPE_DOLBYVISION &&
+      m_cmv40DvTypeApplied == DV_TYPE_DISPLAY_LED &&
+      std::chrono::steady_clock::now() >= m_cmv40NextDisplayCheck;
+  if (!initialize && !outputChanged && !checkDisplay && gen == m_dvSettingsGenApplied &&
+      capsGen == m_cmv40DisplayCapsGenApplied)
+    return;
 
-  const auto mode = static_cast<DOVICMv40Mode>(m_appendCMv40ModeSetting.load());
-  const auto threshold = static_cast<DOVICMv40AutoThreshold>(m_appendCMv40AutoThresholdSetting.load());
-  const int auto2Threshold = m_appendCMv40Auto2ThresholdSetting.load();
-  const int displayMaxLum = m_cmv40DisplayMaxLumSetting.load();
-  const int dvType = m_cmv40DvTypeSetting.load();
-  const int videoProcessor = m_cmv40VideoProcessorSetting.load();
-  if (mode == m_appendCMv40ModeApplied && threshold == m_appendCMv40AutoThresholdApplied &&
+  const auto settings = CServiceBroker::GetSettingsComponent()->GetSettings();
+  const auto mode = static_cast<DOVICMv40Mode>(
+      settings->GetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_CMV40_APPEND));
+  const auto threshold = static_cast<DOVICMv40AutoThreshold>(
+      settings->GetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_CMV40_AUTO_TRIGGER));
+  const int auto2Threshold = settings->GetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_CMV40_AUTO2_THRESHOLD);
+  const int dvType = settings->GetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_TYPE);
+  const int displayMaxLum = mode != DOVICMv40Mode::CMV40_NONE ? aml_dv_effective_max_lum_nits(dvType) : 0;
+  const int videoProcessor = settings->GetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_VIDEO_PROCESSOR);
+  m_dvSettingsGenApplied = gen;
+  m_cmv40DisplayCapsGenApplied = capsGen;
+  m_cmv40NextDisplayCheck = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+  if (!initialize && !outputChanged && mode == m_appendCMv40ModeApplied &&
+      threshold == m_appendCMv40AutoThresholdApplied &&
       auto2Threshold == m_appendCMv40Auto2ThresholdApplied &&
       displayMaxLum == m_cmv40DisplayMaxLumApplied && dvType == m_cmv40DvTypeApplied &&
       videoProcessor == m_cmv40VideoProcessorApplied)
@@ -555,95 +557,78 @@ bool CDVDVideoCodecAmlogic::Open(CDVDStreamInfo &hints, CDVDCodecOptions &option
       m_bitstream->Open(true);
 
       // check for hevc-hvcC and convert to h265-annex-b - and DV is on.
-      if (m_hints.extradata && !m_hints.cryptoSession && m_bitstream && (aml_dv_mode() != DV_MODE_OFF))
+      if (!m_hints.cryptoSession && m_bitstream && (aml_dv_mode() != DV_MODE_OFF))
       {
         auto settings = CServiceBroker::GetSettingsComponent()->GetSettings();
 
         const int dualPriority = settings->GetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_DUAL_PRIORITY);
         const bool convertHdr10Plus =
             settings->GetBool(CSettings::SETTING_COREELEC_AMLOGIC_DV_HDR10PLUS_CONVERT);
-        if (dualPriority == 1)
-          m_bitstream->SetDualPriorityHdr10Plus(true);
 
-        if (m_hints.hdrType == StreamHdrType::HDR_TYPE_DOLBYVISION)
+        if (m_hints.extradata)
         {
-          const int cmv40DvType = settings->GetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_TYPE);
-          const int cmv40MaxLum = settings->GetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_VSVDB_MAX_LUM);
-          m_bitstream->SetCMv40DisplayParams(cmv40DvType, cmv40MaxLum);
-          const bool cmv40Vs10Converting = aml_dv_refresh_vs10_converting(m_hints.hdrType, m_hints.bitdepth);
-          m_bitstream->SetCMv40Vs10Converting(cmv40Vs10Converting);
-          m_cmv40Vs10ConvertingApplied = cmv40Vs10Converting;
-          auto cmv40Mode = static_cast<DOVICMv40Mode>(m_appendCMv40ModeSetting.load());
-          auto cmv40Threshold = static_cast<DOVICMv40AutoThreshold>(m_appendCMv40AutoThresholdSetting.load());
-          const int cmv40Auto2Threshold = m_appendCMv40Auto2ThresholdSetting.load();
-          if (cmv40Mode != DOVICMv40Mode::CMV40_NONE)
-          {
-            logM(LOGINFO, "DV HEVC bitstream - CMv4.0 append mode [{:d}] auto trigger [{:d}] auto2 headroom [{:d}%] display [{:d}nits]",
-                 static_cast<int>(cmv40Mode), static_cast<int>(cmv40Threshold), cmv40Auto2Threshold, cmv40MaxLum);
-            m_bitstream->SetAppendCMv40(EffectiveCMv40Mode(cmv40Mode));
-            m_bitstream->SetCMv40AutoThreshold(cmv40Threshold);
-            m_bitstream->SetCMv40Auto2ThresholdPct(cmv40Auto2Threshold);
-          }
-          m_appendCMv40ModeApplied = cmv40Mode;
-          m_appendCMv40AutoThresholdApplied = cmv40Threshold;
-          m_appendCMv40Auto2ThresholdApplied = cmv40Auto2Threshold;
-          m_cmv40DisplayMaxLumApplied = cmv40MaxLum;
-          m_cmv40DvTypeApplied = cmv40DvType;
-          m_cmv40VideoProcessorApplied =
-              settings->GetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_VIDEO_PROCESSOR);
+          if (dualPriority == 1)
+            m_bitstream->SetDualPriorityHdr10Plus(true);
 
-          if (m_hints.dovi.dv_profile == 7)
+          if (m_hints.hdrType == StreamHdrType::HDR_TYPE_DOLBYVISION)
           {
-            DOVIMode convertDovi = static_cast<DOVIMode>(settings->GetInt(CSettings::SETTING_VIDEOPLAYER_CONVERTDOVI));
-            if (convertDovi)
+            aml_dv_refresh_vs10_converting(m_hints.hdrType, m_hints.bitdepth);
+            ApplyDynamicDoViSettings(true);
+
+            if (m_hints.dovi.dv_profile == 7)
             {
-              CLog::Log(LOGINFO, "{}::{} - DV HEVC bitstream - user chooses to convert to mode [{:d}]",
-                        __MODULE_NAME__, __FUNCTION__, convertDovi);
-              m_bitstream->SetConvertDovi(convertDovi);
-              m_streamMeta.flags.push_back("converted");
+              DOVIMode convertDovi = static_cast<DOVIMode>(settings->GetInt(CSettings::SETTING_VIDEOPLAYER_CONVERTDOVI));
+              if (convertDovi)
+              {
+                CLog::Log(LOGINFO, "{}::{} - DV HEVC bitstream - user chooses to convert to mode [{:d}]",
+                          __MODULE_NAME__, __FUNCTION__, convertDovi);
+                m_bitstream->SetConvertDovi(convertDovi);
+                m_streamMeta.flags.push_back("converted");
+              }
             }
           }
-        }
 
-        // Apply HDR10+ priority for every HEVC stream that also carries dynamic metadata.
-        if (dualPriority == 1)
-        {
-          CLog::Log(LOGINFO, "{}::{} - HEVC bitstream - if stream also contains HDR10+, native HDR10+ has priority.",
-                    __MODULE_NAME__, __FUNCTION__);
-        }
-        else if (convertHdr10Plus)
-        {
-          bool preferConvertHdr10Plus = settings->GetBool(CSettings::SETTING_COREELEC_AMLOGIC_DV_HDR10PLUS_PREFER_CONVERT);
-          m_bitstream->SetPreferCovertHdr10Plus(preferConvertHdr10Plus);
-
-          if (preferConvertHdr10Plus)
-            CLog::Log(LOGINFO, "{}::{} - HEVC bitstream - if stream also contains HDR10+, conversion will be preferred over original Dolby Vision.",
+          // Apply HDR10+ priority for every HEVC stream that also carries dynamic metadata.
+          if (dualPriority == 1)
+          {
+            CLog::Log(LOGINFO, "{}::{} - HEVC bitstream - if stream also contains HDR10+, native HDR10+ has priority.",
                       __MODULE_NAME__, __FUNCTION__);
+          }
+          else if (convertHdr10Plus)
+          {
+            bool preferConvertHdr10Plus = settings->GetBool(CSettings::SETTING_COREELEC_AMLOGIC_DV_HDR10PLUS_PREFER_CONVERT);
+            m_bitstream->SetPreferCovertHdr10Plus(preferConvertHdr10Plus);
+
+            if (preferConvertHdr10Plus)
+              CLog::Log(LOGINFO, "{}::{} - HEVC bitstream - if stream also contains HDR10+, conversion will be preferred over original Dolby Vision.",
+                        __MODULE_NAME__, __FUNCTION__);
+          }
+
+          // Potential HDR10+ (Cannot tell at this point)
+          if (convertHdr10Plus && dualPriority != 1)
+          {
+            PeakBrightnessSource peakBrightnessSource = static_cast<PeakBrightnessSource>(settings->GetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_HDR10PLUS_PEAK_BRIGHTNESS_SOURCE));
+            CLog::Log(LOGDEBUG, "{}::{} - HDR10 HEVC bitstream - if HDR10+ then will be converted to Dolby Vision P8.1 with brightness source [{:d}]",
+              __MODULE_NAME__, __FUNCTION__, peakBrightnessSource);
+            m_bitstream->SetConvertHdr10Plus(true);
+            m_bitstream->SetConvertHdr10PlusPeakBrightnessSource(peakBrightnessSource);
+          }
+
+          if (settings->GetBool(CSettings::SETTING_COREELEC_AMLOGIC_DV_HDRVIVID_CONVERT))
+          {
+            CLog::Log(LOGDEBUG, "{}::{} - HEVC bitstream - if HDR Vivid then statistics will be converted to Dolby Vision P8.1",
+              __MODULE_NAME__, __FUNCTION__);
+            m_bitstream->SetConvertHdrVivid(true);
+          }
+          else if (aml_display_support_hdrvivid())
+          {
+            CLog::Log(LOGINFO, "{}::{} - HDR Vivid conversion disabled; keep native metadata for receiver output",
+                      __MODULE_NAME__, __FUNCTION__);
+          }
         }
 
-        // Potential HDR10+ (Cannot tell at this point)
-        if (convertHdr10Plus)
-        {
-          PeakBrightnessSource peakBrightnessSource = static_cast<PeakBrightnessSource>(settings->GetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_HDR10PLUS_PEAK_BRIGHTNESS_SOURCE));
-          CLog::Log(LOGDEBUG, "{}::{} - HDR10 HEVC bitstream - if HDR10+ then will be converted to Dolby Vision P8.1 with brightness source [{:d}]",
-            __MODULE_NAME__, __FUNCTION__, peakBrightnessSource);
-          m_bitstream->SetConvertHdr10Plus(true);
-          m_bitstream->SetConvertHdr10PlusPeakBrightnessSource(peakBrightnessSource);
-        }
-
-        if (settings->GetBool(CSettings::SETTING_COREELEC_AMLOGIC_DV_HDRVIVID_CONVERT))
-        {
-          CLog::Log(LOGDEBUG, "{}::{} - HEVC bitstream - if HDR Vivid then statistics will be converted to Dolby Vision P8.1",
-            __MODULE_NAME__, __FUNCTION__);
-          m_bitstream->SetConvertHdrVivid(true);
-        }
-        else if (aml_display_support_hdrvivid())
-        {
-          CLog::Log(LOGINFO, "{}::{} - HDR Vivid conversion disabled; keep native metadata for receiver output",
-                    __MODULE_NAME__, __FUNCTION__);
-        }
-
-        // HDR10+ can be signaled by disc metadata or detected later in an HDR10 stream.
+        // HDR10+ can be signaled by disc metadata or detected later in an HDR10 stream
+        // (including Annex-B streams with empty extradata).
         const bool hdr10BaseLayer = m_hints.hdrType == StreamHdrType::HDR_TYPE_HDR10 ||
                                     m_hints.hdrType == StreamHdrType::HDR_TYPE_HDR10PLUS;
         if ((dualPriority == 1 || (!convertHdr10Plus && hdr10BaseLayer)) &&

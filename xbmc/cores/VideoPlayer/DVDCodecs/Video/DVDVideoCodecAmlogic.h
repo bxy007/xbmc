@@ -19,6 +19,7 @@
 
 #include <cstddef>
 #include <atomic>
+#include <chrono>
 #include <memory>
 #include <set>
 #include <vector>
@@ -162,8 +163,7 @@ private:
   DLDemuxPacket AcquireDualLayerPacket(std::size_t requiredCapacity);
   void RecycleDualLayerPacket(DLDemuxPacket&& packet);
   void ResetDualLayerState();
-  void UpdateAppendCMv40SettingCache();
-  void ApplyDynamicDoViSettings();
+  void ApplyDynamicDoViSettings(bool initialize = false);
   DOVICMv40Mode EffectiveCMv40Mode(DOVICMv40Mode mode);
 
   std::shared_ptr<CAMLVideoBufferPool> m_videoBufferPool;
@@ -183,20 +183,17 @@ private:
   uint8_t  *m_last_pData = nullptr;
   uint32_t  m_last_iSize = 0;
 
-  std::atomic<int> m_appendCMv40ModeSetting{static_cast<int>(DOVICMv40Mode::CMV40_NONE)};
   DOVICMv40Mode m_appendCMv40ModeApplied{DOVICMv40Mode::CMV40_NONE};
-  std::atomic<int> m_appendCMv40AutoThresholdSetting{static_cast<int>(DOVICMv40AutoThreshold::CMV40_AUTO_SOURCE)};
   DOVICMv40AutoThreshold m_appendCMv40AutoThresholdApplied{DOVICMv40AutoThreshold::CMV40_AUTO_SOURCE};
-  std::atomic<int> m_appendCMv40Auto2ThresholdSetting{20};
   int m_appendCMv40Auto2ThresholdApplied{20};
-  std::atomic<int> m_cmv40DisplayMaxLumSetting{0};
   int m_cmv40DisplayMaxLumApplied{-1};
-  std::atomic<int> m_cmv40DvTypeSetting{0};
   int m_cmv40DvTypeApplied{-1};
-  std::atomic<int> m_cmv40VideoProcessorSetting{0};
   int m_cmv40VideoProcessorApplied{-1};
+  unsigned int m_cmv40ActiveVpApplied{0};
+  unsigned int m_cmv40DisplayCapsGenApplied{0};
+  std::chrono::steady_clock::time_point m_cmv40NextDisplayCheck{};
   bool m_cmv40Vs10ConvertingApplied{false};
-  std::atomic<unsigned int> m_dvSettingsGeneration{0};
+  std::atomic<unsigned int> m_dvSettingsGeneration{1};
   unsigned int m_dvSettingsGenApplied{0};
   bool m_cmv40Auto2PinnedLogged{false};
   bool m_cmv40VideoProcessorLogged{false};

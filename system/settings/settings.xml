@@ -4620,8 +4620,12 @@
             <dependency type="visible" setting="coreelec.amlogic.dolbyvision.mode" operator="!is">2</dependency>
             <dependency type="visible" setting="coreelec.amlogic.dolbyvision.video.processor" operator="is">0</dependency>
             <dependency type="visible" setting="coreelec.amlogic.dolbyvision.type" operator="!is">0</dependency>
-            <!-- <dependency type="visible" setting="coreelec.amlogic.dolbyvision.type" operator="!is">1</dependency> -->
-            <!-- <dependency type="visible" setting="coreelec.amlogic.dolbyvision.vsvdb.inject" operator="is">true</dependency> -->
+            <dependency type="enable">
+              <or>
+                <condition setting="coreelec.amlogic.dolbyvision.vsvdb.inject" operator="is">true</condition>
+                <condition on="property" name="amldisplaynodv" />
+              </or>
+            </dependency>
           </dependencies>
           <constraints>
             <options>
@@ -4644,13 +4648,17 @@
             <dependency type="visible" setting="coreelec.amlogic.dolbyvision.mode" operator="!is">2</dependency>
             <dependency type="visible" setting="coreelec.amlogic.dolbyvision.video.processor" operator="is">0</dependency>
             <dependency type="visible" setting="coreelec.amlogic.dolbyvision.type" operator="!is">0</dependency>
-            <!-- <dependency type="visible" setting="coreelec.amlogic.dolbyvision.type" operator="!is">1</dependency> -->
-            <!-- <dependency type="visible" setting="coreelec.amlogic.dolbyvision.vsvdb.inject" operator="is">true</dependency> -->
+            <dependency type="enable">
+              <or>
+                <condition setting="coreelec.amlogic.dolbyvision.vsvdb.inject" operator="is">true</condition>
+                <condition on="property" name="amldisplaynodv" />
+              </or>
+            </dependency>
           </dependencies>
-          <!-- <constraints>
-            <options>DolbyVisionVSVDBMaxLum</options>
+          <constraints>
+            <minimum>96</minimum>
+            <maximum>10000</maximum>
           </constraints>
-          <control type="list" format="string" /> -->
           <control type="edit" format="integer" />
         </setting>
         <setting id="coreelec.amlogic.dolbyvision.vsvdb.min.luminance" type="integer" label="60073" help="60074" parent="coreelec.amlogic.dolbyvision.vsvdb.inject">
@@ -4707,7 +4715,7 @@
           <requirement>HAVE_AMCODEC</requirement>
           <visible>false</visible>
           <level>2</level>
-          <default>0</default>
+          <default>false</default>
           <dependencies>
             <dependency type="visible" setting="coreelec.amlogic.dolbyvision.mode" operator="!is">2</dependency>
             <!-- <dependency type="visible" setting="coreelec.amlogic.dolbyvision.video.processor" operator="is">0</dependency> -->
@@ -4754,6 +4762,7 @@
           <default>5</default>
           <dependencies>
             <dependency type="visible" setting="coreelec.amlogic.dolbyvision.mode" operator="!is">2</dependency>
+            <dependency type="update" setting="coreelec.amlogic.dolbyvision.type" />
           </dependencies>
           <constraints>
             <options>DolbyVisionVS10SDR8</options>
@@ -4767,6 +4776,7 @@
           <default>5</default>
           <dependencies>
             <dependency type="visible" setting="coreelec.amlogic.dolbyvision.mode" operator="!is">2</dependency>
+            <dependency type="update" setting="coreelec.amlogic.dolbyvision.type" />
           </dependencies>
           <constraints>
             <options>DolbyVisionVS10SDR10</options>
@@ -4984,8 +4994,6 @@
           </constraints>
           <control type="edit" format="integer" />
         </setting>
-      </group>
-      <group id="3" label="60006">
       </group>
     </category>
     <category id="cache" label="439" help="36399">

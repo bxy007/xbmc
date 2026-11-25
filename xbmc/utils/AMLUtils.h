@@ -236,6 +236,9 @@ std::optional<double> aml_video_output_fps();
 bool aml_get_vsync_edge(int64_t& lastVsyncTs);
 bool aml_get_time_until_vsync_phase_us(int afterVsyncUs, int& timeUntilPhaseUs);
 unsigned int aml_dv_video_processor_mode();
+unsigned int aml_dv_active_video_processor_mode();
+unsigned int aml_dv_display_caps_generation();
+void aml_dv_notify_display_caps_changed();
 void aml_dv_set_disc_session(bool active);
 
 bool aml_dv_vs10_converting();
@@ -243,6 +246,10 @@ bool aml_dv_refresh_vs10_converting(StreamHdrType hdrType, unsigned int bitDepth
 bool aml_dv_vsvdb_v1_enabled();
 void aml_dv_write_vsvdb_policy();
 void set_vsvdb_payload_ver(enum DV_TYPE dv_type, int max_lum_nits_value, int source_max_pq);
+std::string aml_compute_vsvdb_payload(enum DV_TYPE dv_type, int max_lum_nits_value, int source_max_pq);
+int aml_dv_effective_max_lum_nits(int dvType);
+std::string aml_build_vsvdb_payload_v1(bool syncSettings);
+std::string aml_build_vsvdb_payload_v2(enum DV_TYPE dv_type, bool syncSettings);
 void CalculateVSVDBPayload();
 void CalculateVSVDBPayload_2(enum DV_TYPE dv_type);
 
@@ -255,28 +262,31 @@ void aml_reset_audio_from_play_from_beginning();
 void aml_reset_audio_from_play_from_resume();
 void aml_reset_from_subtitle_change();
 
-void aml_get_dv_cap();
+struct AmlDvCapSnapshot
+{
+  int dv_ver{0};
+  int dv_len{0};
+  int dv_max_v1{0};
+  int dv_max_v2{0};
+  bool has_max_v1{false};
+  bool has_max_v2{false};
+  int dv_rx{0};
+  int dv_ry{0};
+  int dv_gx{0};
+  int dv_gy{0};
+  int dv_bx{0};
+  int dv_by{0};
+  std::string dv_vsvdb;
+};
+
+bool aml_read_dv_cap(AmlDvCapSnapshot& out);
 /*!
  * \brief Read base-EDID chromaticity (bytes 0x19-0x22) from amhdmitx rawedid
- *        and quantize into xbmc_dv_cap Rx/Ry/Gx/Gy/Bx/By VSVDB codes.
+ *        and quantize into out Rx/Ry/Gx/Gy/Bx/By VSVDB codes.
  * \return true when primaries were filled and are within VSVDB bit ranges.
  */
-bool aml_fill_vsvdb_primaries_from_edid();
+bool aml_fill_vsvdb_primaries_from_edid(AmlDvCapSnapshot& out);
 /*!
  * \brief Prefer DV VSVDB primaries from dv_cap; if unavailable, use base EDID.
  */
-bool aml_ensure_display_vsvdb_primaries();
-struct xbmc_dv_cap
-{
-  static inline int dv_ver_i = 0;
-  static inline int dv_len_i = 0;
-  static inline int dv_max_v1_i = 0;
-  static inline int dv_max_v2_i = 0;
-  static inline int dv_rx_i = 0;
-  static inline int dv_ry_i = 0;
-  static inline int dv_gx_i = 0;
-  static inline int dv_gy_i = 0;
-  static inline int dv_bx_i = 0;
-  static inline int dv_by_i = 0;
-  static inline std::string dv_vsvdb_s = "";
-};
+bool aml_ensure_display_vsvdb_primaries(AmlDvCapSnapshot& out);

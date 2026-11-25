@@ -68,6 +68,8 @@
 #include <amcodec/codec.h>
 
 static std::atomic<bool> vs10_conversion{false};
+static std::atomic<unsigned int> s_activeDvVpMode{0};
+static std::atomic<unsigned int> s_dvDisplayCapsGen{0};
 static std::atomic<bool> aml_linux_force_422{false};
 static std::atomic<bool> aml_hdr10plus_attr_override{false};
 bool aml_linux_osd_sdr8 = true;
@@ -598,7 +600,10 @@ static bool aml_kodi_restore_cd_cs()
   return was_active;
 }
 
-bool aml_kodi_set_cd_cs(int cd_cs_type)
+static bool aml_kodi_set_cd_cs_impl(int cd_cs_type,
+                                    std::optional<DV_TYPE> effective_dv_type = std::nullopt,
+                                    std::optional<unsigned int> effective_dv_vp = std::nullopt,
+                                    bool dv_mode_is_ipt = true)
 {
   if (cd_cs_type == 2 && aml_hdr10plus_attr_override.load(std::memory_order_relaxed))
     return false;
@@ -628,14 +633,18 @@ bool aml_kodi_set_cd_cs(int cd_cs_type)
     {
       case 1:
       {
-        enum DV_TYPE dv_type(static_cast<DV_TYPE>(settings()->GetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_TYPE)));
-        unsigned int dv_vp(settings()->GetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_VIDEO_PROCESSOR));
+        enum DV_TYPE dv_type = effective_dv_type.value_or(
+            static_cast<DV_TYPE>(settings()->GetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_TYPE)));
+        unsigned int dv_vp = effective_dv_vp.value_or(
+            static_cast<unsigned int>(settings()->GetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_VIDEO_PROCESSOR)));
         dv_type_value = static_cast<int>(dv_type);
         dv_vp_value = static_cast<int>(dv_vp);
-        aml_linux_force_422 =
-            (dv_vp == 2) || (dv_vp == 3) ||
-            ((dv_vp == 0) && (dv_type == DV_TYPE_PLAYER_LED_HDR2)) ||
-            ((dv_vp == 0) && (dv_type == DV_TYPE_PLAYER_LED_LLDV));
+        // Only force YUV422 12-bit when the final output mode actually carries IPT/LLDV.
+        // Non-IPT VS10 targets (SDR10 / ordinary HDR10) keep regular color subsampling.
+        aml_linux_force_422 = dv_mode_is_ipt &&
+            ((dv_vp == 2) || (dv_vp == 3) ||
+             ((dv_vp == 0) && (dv_type == DV_TYPE_PLAYER_LED_HDR2)) ||
+             ((dv_vp == 0) && (dv_type == DV_TYPE_PLAYER_LED_LLDV)));
         break;
       }
       case 2:
@@ -698,6 +707,11 @@ bool aml_kodi_set_cd_cs(int cd_cs_type)
   }
 
   return false;
+}
+
+bool aml_kodi_set_cd_cs(int cd_cs_type)
+{
+  return aml_kodi_set_cd_cs_impl(cd_cs_type);
 }
 
 bool aml_is_force_422_override_active()
@@ -1437,6 +1451,16 @@ void aml_dv_write_vsvdb_policy()
     logM(LOGERROR, "aml_dv_write_vsvdb_policy: xbmc_dv_vsvdb_v1 is missing, the kernel VSVDB policy is unmanaged");
 }
 
+std::string aml_compute_vsvdb_payload(enum DV_TYPE dv_type, int max_lum_nits_value, int source_max_pq)
+{
+  if (!aml_dv_vsvdb_v1_enabled() ||
+      (dv_type == DV_TYPE_DISPLAY_LED) ||
+      (max_lum_nits_value < 400) ||
+      ((max_lum_nits_value > 6450) && (source_max_pq == 4095)))
+    return aml_build_vsvdb_payload_v2(dv_type, false);
+  return aml_build_vsvdb_payload_v1(false);
+}
+
 void set_vsvdb_payload_ver(enum DV_TYPE dv_type, int max_lum_nits_value, int source_max_pq)
 {
   static thread_local bool inRecompute = false;
@@ -1477,10 +1501,10 @@ unsigned int aml_dv_on(unsigned int mode, bool force)
   unsigned int xbmc_dv_vsvdb_source_lum_limit_num = 0;
   CSysfsPath("/sys/module/amdolby_vision/parameters/xbmc_dv_vsvdb_source_lum_limit_num", xbmc_dv_vsvdb_source_lum_limit_num);
 
-  xbmc_dv_cap::dv_ver_i = 0;
-  aml_get_dv_cap();
+  AmlDvCapSnapshot dv_cap_snap;
   enum DV_COLORIMETRY colorimetry = DV_COLORIMETRY_AMLOGIC;
-  if (xbmc_dv_cap::dv_ver_i == 2) colorimetry = DV_COLORIMETRY_REMOVE;
+  if (aml_read_dv_cap(dv_cap_snap) && dv_cap_snap.dv_ver == 2)
+    colorimetry = DV_COLORIMETRY_REMOVE;
   CSysfsPath("/sys/module/hdmitx20/parameters/dovi_tv_led_bt2020", (colorimetry == DV_COLORIMETRY_BT2020NC) ? 'Y' : 'N');
   CSysfsPath("/sys/module/hdmitx20/parameters/dovi_tv_led_no_colorimetry", (colorimetry == DV_COLORIMETRY_REMOVE) ? 'Y' : 'N');
 
@@ -1488,12 +1512,16 @@ unsigned int aml_dv_on(unsigned int mode, bool force)
   dovi_stream_metadata = CServiceBroker::GetDataCacheCore().GetVideoDoViStreamMetadata();
   int source_max_pq = static_cast<int>(dovi_stream_metadata.source_max_pq);
   enum DV_TYPE dv_type(static_cast<DV_TYPE>(settings()->GetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_TYPE)));
-  int max_lum_nits_value(settings()->GetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_VSVDB_MAX_LUM));
+  // Resolve effective luminance directly from live EDID / setting without mutating settings on playback thread.
+  int max_lum_nits_value = aml_dv_effective_max_lum_nits(dv_type);
+  aml_dv_notify_display_caps_changed();
 
+  const bool is_vs10_conversion = vs10_conversion.load(std::memory_order_relaxed);
   bool dv_type_vp_auto(settings()->GetBool(CSettings::SETTING_COREELEC_AMLOGIC_DV_TYPE_VP_AUTO));
   unsigned int dv_vp(settings()->GetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_VIDEO_PROCESSOR));
 
-  if (vs10_conversion || (dv_vp != 0) || (dv_type == DV_TYPE_DISPLAY_LED) || (max_lum_nits_value < max_pq_to_nits(source_max_pq)))
+  if (is_vs10_conversion || (dv_vp != 0) || (dv_type == DV_TYPE_DISPLAY_LED) ||
+      (source_max_pq <= 0) || (max_lum_nits_value < max_pq_to_nits(source_max_pq)))
     dv_type_vp_auto = false;
 
   if (dv_type_vp_auto)
@@ -1523,7 +1551,7 @@ unsigned int aml_dv_on(unsigned int mode, bool force)
     else if (dv_vp == 5) dv_vp = 7;
   }
 
-  if (vs10_conversion && (dv_vp != 0))
+  if (is_vs10_conversion && (dv_vp != 0))
   {
     switch (dv_vp)
     {
@@ -1546,9 +1574,9 @@ unsigned int aml_dv_on(unsigned int mode, bool force)
         break;
     }
     dv_vp = 0;
-    vs10_conversion = false;
   }
   CSysfsPath("/sys/module/amdolby_vision/parameters/xbmc_dv_vp", dv_vp);
+  s_activeDvVpMode.store(dv_vp, std::memory_order_release);
 
   unsigned int dv_vp_tm = 4;
   CSysfsPath dvprofile{"/sys/module/amdolby_vision/parameters/xbmc_dv_profile"};
@@ -1565,10 +1593,11 @@ unsigned int aml_dv_on(unsigned int mode, bool force)
   else if (dv_vp == 2) dv_type = DV_TYPE_PLAYER_LED_HDR2;
   CSysfsPath("/sys/module/amdolby_vision/parameters/xbmc_dv_type", static_cast<unsigned int>(dv_type));
 
-  const bool wire_reloaded_by_set_cd_cs = aml_kodi_set_cd_cs(1);
-
   const bool dv_mode_is_ipt = (mode == DOLBY_VISION_OUTPUT_MODE_IPT_TUNNEL ||
                                 mode == DOLBY_VISION_OUTPUT_MODE_IPT);
+  const bool wire_reloaded_by_set_cd_cs =
+      aml_kodi_set_cd_cs_impl(1, dv_type, dv_vp, dv_mode_is_ipt);
+
   bool dv_deep_color = settings()->GetBool(CSettings::SETTING_COREELEC_AMLOGIC_PREFER_12BIT)
                     && (dv_mode_is_ipt
                         || aml_display_support_12bit(
@@ -1589,11 +1618,10 @@ unsigned int aml_dv_on(unsigned int mode, bool force)
   unsigned int xbmc_dv_vsvdb_inject_num = 0;
   CSysfsPath("/sys/module/amdolby_vision/parameters/xbmc_dv_vsvdb_inject_num", xbmc_dv_vsvdb_inject_num);
 
-  set_vsvdb_payload_ver(dv_type, max_lum_nits_value, source_max_pq);
-
-  std::string dv_dolby_vsvdb_payload(settings()->GetString(CSettings::SETTING_COREELEC_AMLOGIC_DV_VSVDB_PAYLOAD));
-  if (dv_vp != 0)
-    dv_dolby_vsvdb_payload = "27FE012E5699AA";
+  // Compute payload purely read-only on the playback thread (no SetInt/SetString lock inversion).
+  const std::string dv_dolby_vsvdb_payload =
+      (dv_vp != 0) ? "27FE012E5699AA"
+                   : aml_compute_vsvdb_payload(dv_type, max_lum_nits_value, source_max_pq);
   CSysfsPath("/sys/module/amdolby_vision/parameters/xbmc_dv_vsvdb_payload", dv_dolby_vsvdb_payload);
 
   // setup display led or player led
@@ -1757,6 +1785,8 @@ void aml_dv_off(bool restoreFollows)
   CSysfsPath amdolby_vision_debug{"/sys/class/amdolby_vision/debug"};
   if (amdolby_vision_debug.Exists()) CSysfsPath("/sys/class/amdolby_vision/debug", "enable_fel 0");
   CSysfsPath("/sys/module/amdolby_vision/parameters/xbmc_dv_vp", 0);
+  s_activeDvVpMode.store(0, std::memory_order_release);
+  vs10_conversion.store(false, std::memory_order_relaxed);
   CSysfsPath("/sys/module/amdolby_vision/parameters/xbmc_dv_vp_tm", 0);
   CSysfsPath("/sys/module/amdolby_vision/parameters/xbmc_dv_hdr10_for_dv_ll", 'N');
   CSysfsPath("/sys/module/amdolby_vision/parameters/xbmc_dv_hdr10_for_dv_ll_inject_num", 0);
@@ -2279,15 +2309,49 @@ enum DV_TYPE aml_dv_type()
   return static_cast<DV_TYPE>(settings()->GetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_TYPE));
 }
 
+static bool aml_display_edid_ready()
+{
+  return aml_display_connected() &&
+         CSysfsPath("/sys/class/amhdmitx/amhdmitx0/edid_parsing")
+                 .Get<std::string>()
+                 .value_or("") == "ok";
+}
+
 unsigned int aml_vs10_by_setting(const std::string setting)
 {
+  const enum DV_TYPE dv_type = aml_dv_type();
+  const bool isSdrSetting =
+      (setting == CSettings::SETTING_COREELEC_AMLOGIC_DV_VS10_SDR8 ||
+       setting == CSettings::SETTING_COREELEC_AMLOGIC_DV_VS10_SDR10);
+
   // VS10 Only forces SDR for HDR/DV sources without changing the saved mapping.
-  if (aml_dv_type() == DV_TYPE_VS10_ONLY &&
-      setting != CSettings::SETTING_COREELEC_AMLOGIC_DV_VS10_SDR8 &&
-      setting != CSettings::SETTING_COREELEC_AMLOGIC_DV_VS10_SDR10)
+  if (dv_type == DV_TYPE_VS10_ONLY && !isSdrSetting)
     return DOLBY_VISION_OUTPUT_MODE_SDR10;
 
-  return static_cast<unsigned int>(settings()->GetInt(setting));
+  const unsigned int mode = static_cast<unsigned int>(settings()->GetInt(setting));
+  if (mode == DOLBY_VISION_OUTPUT_MODE_IPT || mode == DOLBY_VISION_OUTPUT_MODE_IPT_TUNNEL)
+  {
+    if (dv_type == DV_TYPE_VS10_ONLY)
+      return isSdrSetting ? DOLBY_VISION_OUTPUT_MODE_BYPASS : DOLBY_VISION_OUTPUT_MODE_SDR10;
+
+    if (aml_display_edid_ready())
+    {
+      const bool iptSupported =
+          (dv_type == DV_TYPE_DISPLAY_LED && aml_display_support_dv_std()) ||
+          (dv_type == DV_TYPE_PLAYER_LED_LLDV && aml_display_support_dv_ll()) ||
+          ((dv_type == DV_TYPE_PLAYER_LED_HDR || dv_type == DV_TYPE_PLAYER_LED_HDR2) &&
+           aml_display_support_hdr_pq());
+      if (!iptSupported)
+        return isSdrSetting ? DOLBY_VISION_OUTPUT_MODE_BYPASS : DOLBY_VISION_OUTPUT_MODE_SDR10;
+    }
+  }
+  else if (mode == DOLBY_VISION_OUTPUT_MODE_HDR10 && aml_display_edid_ready() &&
+           !aml_display_support_hdr_pq())
+  {
+    return isSdrSetting ? DOLBY_VISION_OUTPUT_MODE_BYPASS : DOLBY_VISION_OUTPUT_MODE_SDR10;
+  }
+
+  return mode;
 }
 
 void aml_dv_enable_fel() 
@@ -3421,6 +3485,21 @@ unsigned int aml_dv_video_processor_mode()
   return 0;
 }
 
+unsigned int aml_dv_active_video_processor_mode()
+{
+  return s_activeDvVpMode.load(std::memory_order_acquire);
+}
+
+unsigned int aml_dv_display_caps_generation()
+{
+  return s_dvDisplayCapsGen.load(std::memory_order_acquire);
+}
+
+void aml_dv_notify_display_caps_changed()
+{
+  s_dvDisplayCapsGen.fetch_add(1, std::memory_order_release);
+}
+
 void aml_dv_send_md_levels() {
   DOVIStreamMetadata dovi_stream_metadata;
   dovi_stream_metadata = CServiceBroker::GetDataCacheCore().GetVideoDoViStreamMetadata();
@@ -3514,62 +3593,88 @@ void aml_reset_from_subtitle_change()
   advancedSettings->SetAlgoForResetSub(99);
 }
 
-void aml_get_dv_cap()
+bool aml_read_dv_cap(AmlDvCapSnapshot& out)
 {
+  out = {};
+
   if (!aml_display_support_dv())
-    return;
+    return false;
 
   CSysfsPath dv_cap{"/sys/devices/virtual/amhdmitx/amhdmitx0/dv_cap"};
   if (!dv_cap.Exists())
-    return;
+    return false;
 
-  const std::string valstr = dv_cap.Get<std::string>().value();
+  const auto valOpt = dv_cap.Get<std::string>();
+  if (!valOpt.has_value())
+    return false;
+  const std::string& valstr = *valOpt;
   if (valstr.find("Rx: ") == std::string::npos)
-    return;
+    return false;
 
-  auto field = [&valstr](const std::string& key, const std::string& suffix, int& out) {
+  auto parseInt = [](const std::string& token, int& outVal) -> bool {
+    try
+    {
+      outVal = std::stoi(token);
+      return true;
+    }
+    catch (...)
+    {
+      return false;
+    }
+  };
+
+  auto field = [&valstr, &parseInt](const std::string& key, const std::string& suffix, int& outVal) -> bool {
     const size_t start = valstr.find(key);
     if (start == std::string::npos)
-      return;
+      return false;
     const size_t from = start + key.length();
     const size_t end = valstr.find(suffix, from);
     if ((end == std::string::npos) || (end <= from))
-      return;
-    out = std::stoi(valstr.substr(from, end - from));
+      return false;
+    return parseInt(valstr.substr(from, end - from), outVal);
   };
 
+  AmlDvCapSnapshot snap;
   const std::string ver_key = "VSVDB Version: V";
   const size_t ver_pos = valstr.find(ver_key);
-  if (ver_pos != std::string::npos)
-    xbmc_dv_cap::dv_ver_i = std::stoi(valstr.substr(ver_pos + ver_key.length(), 1));
+  if (ver_pos == std::string::npos || ver_pos + ver_key.length() >= valstr.size() ||
+      !parseInt(valstr.substr(ver_pos + ver_key.length(), 1), snap.dv_ver) ||
+      snap.dv_ver < 0 || snap.dv_ver > 2)
+    return false;
 
   int vsvdb_length = 0;
   field("Length: ", "\n", vsvdb_length);
-  xbmc_dv_cap::dv_len_i = vsvdb_length + 1;
+  snap.dv_len = vsvdb_length > 0 ? (vsvdb_length + 1) : 0;
 
   const std::string vsvdb_key = "VSVDB: ";
   const size_t vsvdb_pos = valstr.find(vsvdb_key);
-  if (vsvdb_pos != std::string::npos)
-    xbmc_dv_cap::dv_vsvdb_s = valstr.substr(vsvdb_pos + vsvdb_key.length(), xbmc_dv_cap::dv_len_i * 2);
+  if (vsvdb_pos != std::string::npos && snap.dv_len > 0)
+    snap.dv_vsvdb = valstr.substr(vsvdb_pos + vsvdb_key.length(), static_cast<size_t>(snap.dv_len) * 2);
 
-  field("tmaxLUM: ", "nti", xbmc_dv_cap::dv_max_v1_i);
-  field("tmaxPQ: ", "pqi", xbmc_dv_cap::dv_max_v2_i);
-  field("Rx: ", "rxi", xbmc_dv_cap::dv_rx_i);
-  field("Ry: ", "ryi", xbmc_dv_cap::dv_ry_i);
-  field("Gx: ", "gxi", xbmc_dv_cap::dv_gx_i);
-  field("Gy: ", "gyi", xbmc_dv_cap::dv_gy_i);
-  field("Bx: ", "bxi", xbmc_dv_cap::dv_bx_i);
-  field("By: ", "byi", xbmc_dv_cap::dv_by_i);
+  snap.has_max_v1 = field("tmaxLUM: ", "nti", snap.dv_max_v1);
+  snap.has_max_v2 = field("tmaxPQ: ", "pqi", snap.dv_max_v2);
+  const bool primariesOk =
+      field("Rx: ", "rxi", snap.dv_rx) &&
+      field("Ry: ", "ryi", snap.dv_ry) &&
+      field("Gx: ", "gxi", snap.dv_gx) &&
+      field("Gy: ", "gyi", snap.dv_gy) &&
+      field("Bx: ", "bxi", snap.dv_bx) &&
+      field("By: ", "byi", snap.dv_by);
+  if (!primariesOk)
+    return false;
 
-  if (xbmc_dv_cap::dv_ver_i == 0)
+  if (snap.dv_ver == 0)
   {
-    xbmc_dv_cap::dv_rx_i = xbmc_dv_cap::dv_rx_i >> 4;
-    xbmc_dv_cap::dv_ry_i = xbmc_dv_cap::dv_ry_i >> 4;
-    xbmc_dv_cap::dv_gx_i = xbmc_dv_cap::dv_gx_i >> 4;
-    xbmc_dv_cap::dv_gy_i = xbmc_dv_cap::dv_gy_i >> 4;
-    xbmc_dv_cap::dv_bx_i = xbmc_dv_cap::dv_bx_i >> 4;
-    xbmc_dv_cap::dv_by_i = xbmc_dv_cap::dv_by_i >> 4;
+    snap.dv_rx >>= 4;
+    snap.dv_ry >>= 4;
+    snap.dv_gx >>= 4;
+    snap.dv_gy >>= 4;
+    snap.dv_bx >>= 4;
+    snap.dv_by >>= 4;
   }
+
+  out = std::move(snap);
+  return true;
 }
 
 namespace
@@ -3630,7 +3735,7 @@ bool aml_quantize_vsvdb_primary(double value, double offset, int bits, int& code
 }
 } // namespace
 
-bool aml_fill_vsvdb_primaries_from_edid()
+bool aml_fill_vsvdb_primaries_from_edid(AmlDvCapSnapshot& out)
 {
   std::vector<uint8_t> edid;
   if (!aml_read_rawedid_bytes(edid))
@@ -3667,12 +3772,12 @@ bool aml_fill_vsvdb_primaries_from_edid()
     return false;
   }
 
-  xbmc_dv_cap::dv_rx_i = rx_i;
-  xbmc_dv_cap::dv_ry_i = ry_i;
-  xbmc_dv_cap::dv_gx_i = gx_i;
-  xbmc_dv_cap::dv_gy_i = gy_i;
-  xbmc_dv_cap::dv_bx_i = bx_i;
-  xbmc_dv_cap::dv_by_i = by_i;
+  out.dv_rx = rx_i;
+  out.dv_ry = ry_i;
+  out.dv_gx = gx_i;
+  out.dv_gy = gy_i;
+  out.dv_bx = bx_i;
+  out.dv_by = by_i;
 
   CLog::Log(LOGDEBUG,
             "aml_fill_vsvdb_primaries_from_edid: R({:.4f},{:.4f}) G({:.4f},{:.4f}) "
@@ -3681,16 +3786,15 @@ bool aml_fill_vsvdb_primaries_from_edid()
   return true;
 }
 
-bool aml_ensure_display_vsvdb_primaries()
+bool aml_ensure_display_vsvdb_primaries(AmlDvCapSnapshot& out)
 {
-  if (aml_display_support_dv())
+  if (aml_display_support_dv() && aml_read_dv_cap(out))
   {
-    aml_get_dv_cap();
-    if (xbmc_dv_cap::dv_rx_i != 0 || xbmc_dv_cap::dv_ry_i != 0 || xbmc_dv_cap::dv_gx_i != 0 ||
-        xbmc_dv_cap::dv_gy_i != 0 || xbmc_dv_cap::dv_bx_i != 0 || xbmc_dv_cap::dv_by_i != 0)
+    if (out.dv_rx != 0 || out.dv_ry != 0 || out.dv_gx != 0 ||
+        out.dv_gy != 0 || out.dv_bx != 0 || out.dv_by != 0)
       return true;
   }
-  return aml_fill_vsvdb_primaries_from_edid();
+  return aml_fill_vsvdb_primaries_from_edid(out);
 }
 
 namespace
