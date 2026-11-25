@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include "platform/posix/utils/FileHandle.h"
 #include "utils/EGLUtils.h"
 #include "rendering/gles/RenderSystemGLES.h"
 #include "utils/GlobalsHandling.h"
@@ -67,6 +68,7 @@ public:
 protected:
   void SetVSyncImpl(bool enable) override;
   void PresentRenderImpl(bool rendered) override;
+  bool PremultiplyClearColor() const override;
 
 private:
   CEGLContextUtils m_pGLContext;
@@ -74,6 +76,7 @@ private:
   bool m_failedSwap{false};
   int m_vsyncFd{-1};
   bool m_vsyncAlignFailed{false};
+  UTILS::POSIX::CFileHandle m_singleLayerPremult;
 };
 
 }

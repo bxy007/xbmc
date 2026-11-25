@@ -773,6 +773,13 @@ bool CRenderSystemGLES::ClearBuffers(UTILS::COLOR::Color color)
   float b = KODI::UTILS::GL::GetChannelFromARGB(KODI::UTILS::GL::ColorChannel::B, color) / 255.0f;
   float a = KODI::UTILS::GL::GetChannelFromARGB(KODI::UTILS::GL::ColorChannel::A, color) / 255.0f;
 
+  if (a < 1.0f && (r != 0.0f || g != 0.0f || b != 0.0f) && PremultiplyClearColor())
+  {
+    r *= a;
+    g *= a;
+    b *= a;
+  }
+
   glClearColor(r, g, b, a);
 
   GLbitfield flags = GL_COLOR_BUFFER_BIT;

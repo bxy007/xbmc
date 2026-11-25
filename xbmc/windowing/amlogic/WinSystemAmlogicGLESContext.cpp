@@ -78,6 +78,8 @@ bool CWinSystemAmlogicGLESContext::InitWindowSystem()
 
 bool CWinSystemAmlogicGLESContext::DestroyWindowSystem()
 {
+  m_singleLayerPremult.reset();
+
   if (m_vsyncFd >= 0)
   {
     close(m_vsyncFd);
@@ -236,6 +238,17 @@ bool CWinSystemAmlogicGLESContext::CreateNewWindow(const std::string& name,
     return false;
   }
 
+  if (m_framebuffer_name == "fb0" && !m_singleLayerPremult)
+  {
+    m_singleLayerPremult.attach(open("/dev/osd1-premult", O_RDONLY | O_CLOEXEC));
+    if (m_singleLayerPremult)
+    {
+      CLog::Log(LOGINFO,
+                "CWinSystemAmlogicGLESContext::{}: enabled OSD1 single-layer premultiplied alpha handoff",
+                __FUNCTION__);
+    }
+  }
+
   if (!m_delayDispReset)
   {
     std::lock_guard lock(m_resourceSection);
@@ -256,6 +269,13 @@ bool CWinSystemAmlogicGLESContext::DestroyWindow()
 {
   m_pGLContext.DestroySurface();
   return CWinSystemAmlogic::DestroyWindow();
+}
+
+bool CWinSystemAmlogicGLESContext::PremultiplyClearColor() const
+{
+  char active;
+  return m_singleLayerPremult && pread(m_singleLayerPremult, &active, sizeof(active), 0) == 1 &&
+         active == 'Y';
 }
 
 bool CWinSystemAmlogicGLESContext::ResizeWindow(int newWidth, int newHeight, int newLeft, int newTop)

@@ -207,6 +207,7 @@ protected:
   GLint      m_viewPort[4];
   GuiHdr m_guiHdr{GuiHdr::SDR};
   bool m_srgbCompositeEnabled{true};
+  virtual bool PremultiplyClearColor() const { return false; }
 };
 
 namespace KODI::GLES
