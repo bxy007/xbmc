@@ -9,9 +9,14 @@
 #include "InputStreamMultiSource.h"
 
 #include "DVDFactoryInputStream.h"
+#ifdef HAVE_LIBBLURAY
+#include "DVDInputStreamBluray.h"
+#endif
+#include "DVDInputStreamNavigator.h"
 #include "utils/log.h"
 
 #include <map>
+#include <utility>
 
 using namespace XFILE;
 
@@ -35,7 +40,42 @@ void CInputStreamMultiSource::Abort()
 void CInputStreamMultiSource::Close()
 {
   m_InputStreams.clear();
+  m_resumeOptionsSet = false;
+  m_hasResumeStartPosition = false;
+  m_resumeState.clear();
   CDVDInputStream::Close();
+}
+
+void CInputStreamMultiSource::SetResumeOptions(bool hasStartPosition, std::string state)
+{
+  m_resumeOptionsSet = true;
+  m_hasResumeStartPosition = hasStartPosition;
+  m_resumeState = std::move(state);
+}
+
+CDVDInputStream::IDisplayTime* CInputStreamMultiSource::GetIDisplayTime()
+{
+  if (!m_InputStreams.empty() && m_InputStreams.front())
+    return m_InputStreams.front()->GetIDisplayTime();
+  return nullptr;
+}
+
+CDVDInputStream::IPosTime* CInputStreamMultiSource::GetIPosTime()
+{
+  if (!m_InputStreams.empty())
+    return m_InputStreams.front()->GetIPosTime();
+  return nullptr;
+}
+
+bool CInputStreamMultiSource::GetPrimaryState(std::string& xmlstate)
+{
+  if (!m_InputStreams.empty() && m_InputStreams.front())
+  {
+    if (const auto menus =
+            std::dynamic_pointer_cast<CDVDInputStream::IMenus>(m_InputStreams.front()))
+      return menus->GetState(xmlstate);
+  }
+  return false;
 }
 
 BitstreamStats CInputStreamMultiSource::GetBitstreamStats() const
@@ -103,22 +143,45 @@ bool CInputStreamMultiSource::Open()
 
   for (unsigned int i = 0; i < m_filenames.size(); i++)
   {
-    auto fileitem = CFileItem(m_filenames[i], false);
-    fileitem.SetMimeTypeForInternetFile();
+    const bool isPrimary = i == 0;
+    CFileItem fileitem = isPrimary ? m_item : CFileItem(m_filenames[i], false);
+    if (!isPrimary)
+      fileitem.SetMimeTypeForInternetFile();
     InputStreamPtr inputstream(CDVDFactoryInputStream::CreateInputStream(m_pPlayer, fileitem));
     if (!inputstream)
     {
       CLog::Log(LOGERROR,
                 "CDVDPlayer::OpenInputStream - unable to create input stream for file [{}]",
                 m_filenames[i]);
+      if (isPrimary)
+        return false;
       continue;
     }
+
+#ifdef HAVE_LIBBLURAY
+    if (isPrimary && m_resumeOptionsSet && inputstream->IsStreamType(DVDSTREAM_TYPE_BLURAY))
+    {
+      static_cast<CDVDInputStreamBluray*>(inputstream.get())
+          ->SetResumeOptions(m_hasResumeStartPosition, m_resumeState);
+    }
+#endif
 
     if (!inputstream->Open())
     {
       CLog::Log(LOGERROR, "CDVDPlayer::OpenInputStream - error opening file [{}]", m_filenames[i]);
+      if (isPrimary)
+        return false;
       continue;
     }
+
+    if (isPrimary && m_resumeOptionsSet && inputstream->IsStreamType(DVDSTREAM_TYPE_DVD))
+    {
+      auto* nav = static_cast<CDVDInputStreamNavigator*>(inputstream.get());
+      const bool restored = !m_resumeState.empty() && nav->SetState(m_resumeState);
+      if (!restored && m_hasResumeStartPosition)
+        nav->SelectMainTitle();
+    }
+
     m_InputStreams.push_back(inputstream);
   }
   return !m_InputStreams.empty();

@@ -110,6 +110,7 @@ public:
 
   bool GetState(std::string &xmlstate) override;
   bool SetState(const std::string &xmlstate) override;
+  bool SelectMainTitle();
 
   int GetChapter() override { return m_iPart; } // the current part in the current title
   int GetChapterCount() override { return m_iPartCount; } // the number of parts in the current title

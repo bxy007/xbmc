@@ -130,6 +130,9 @@ bool CDemuxMultiSource::Open(const std::shared_ptr<CDVDInputStream>& pInput)
     auto demuxer = DemuxPtr(CDVDFactoryDemuxer::CreateDemuxer((*iter)));
     if (!demuxer)
     {
+      // The player can retry opening the primary input after a disc navigation event.
+      if (iter == m_pInput->m_InputStreams.begin())
+        return false;
       iter = m_pInput->m_InputStreams.erase(iter);
     }
     else
@@ -199,11 +202,48 @@ bool CDemuxMultiSource::SeekTime(double time, bool backwards, double* startpts)
 {
   auto demuxerQueue = DemuxQueue();
   bool ret = false;
+  const auto primaryInput =
+      (m_pInput && !m_pInput->m_InputStreams.empty()) ? m_pInput->m_InputStreams.front() : nullptr;
+
+  DemuxPtr primaryDemuxer;
+  if (primaryInput)
+  {
+    for (auto& iter : m_demuxerMap)
+    {
+      const auto inIt = m_DemuxerToInputStreamMap.find(iter.second);
+      if (inIt != m_DemuxerToInputStreamMap.end() && inIt->second == primaryInput)
+      {
+        primaryDemuxer = iter.second;
+        break;
+      }
+    }
+  }
+
+  if (primaryDemuxer)
+  {
+    double localStartPts = DVD_NOPTS_VALUE;
+    double* ptsOut = startpts ? startpts : &localStartPts;
+    if (!primaryDemuxer->SeekTime(time, false, ptsOut))
+    {
+      CLog::Log(LOGDEBUG, "{} - failed to start primary demuxer from: {:f}", __FUNCTION__, time);
+      return false;
+    }
+    const double queuePts = (*ptsOut != DVD_NOPTS_VALUE) ? *ptsOut : -1.0;
+    demuxerQueue.emplace(queuePts, primaryDemuxer);
+    CLog::Log(LOGDEBUG, "{} - starting demuxer from: {:f}", __FUNCTION__, time);
+    ret = true;
+  }
+
   for (auto& iter : m_demuxerMap)
   {
-    if (iter.second->SeekTime(time, false, startpts))
+    if (iter.second == primaryDemuxer)
+      continue;
+    double localStartPts = DVD_NOPTS_VALUE;
+    double* ptsOut = (!primaryDemuxer && startpts) ? startpts : &localStartPts;
+    if (iter.second->SeekTime(time, false, ptsOut))
     {
-      demuxerQueue.emplace(*startpts, iter.second);
+      const double queuePts = (*ptsOut != DVD_NOPTS_VALUE) ? *ptsOut : -1.0;
+      demuxerQueue.emplace(queuePts, iter.second);
       CLog::Log(LOGDEBUG, "{} - starting demuxer from: {:f}", __FUNCTION__, time);
       ret = true;
     }

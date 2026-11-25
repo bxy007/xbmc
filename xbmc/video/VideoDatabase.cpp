@@ -2355,6 +2355,9 @@ bool CVideoDatabase::GetMovieInfo(const std::string& strFilenameAndPath,
       return false;
 
     details = GetDetailsForMovie(m_pDS, getDetails);
+    m_pDS->close();
+    if (!details.IsEmpty() && URIUtils::IsDiscImageStack(details.m_strFileNameAndPath))
+      GetResumePoint(details);
     return !details.IsEmpty();
   }
   catch (...)
@@ -2557,6 +2560,9 @@ bool CVideoDatabase::GetEpisodeInfo(const std::string& strFilenameAndPath, CVide
     if (!m_pDS->query(sql))
       return false;
     details = GetDetailsForEpisode(m_pDS, getDetails);
+    m_pDS->close();
+    if (!details.IsEmpty() && URIUtils::IsDiscImageStack(details.m_strFileNameAndPath))
+      GetResumePoint(details);
     return !details.IsEmpty();
   }
   catch (...)
@@ -2581,6 +2587,9 @@ bool CVideoDatabase::GetMusicVideoInfo(const std::string& strFilenameAndPath, CV
     if (!m_pDS->query(sql))
       return false;
     details = GetDetailsForMusicVideo(m_pDS, getDetails);
+    m_pDS->close();
+    if (!details.IsEmpty() && URIUtils::IsDiscImageStack(details.m_strFileNameAndPath))
+      GetResumePoint(details);
     return !details.IsEmpty();
   }
   catch (...)
@@ -2654,6 +2663,9 @@ bool CVideoDatabase::GetFileInfo(const std::string& strFilenameAndPath, CVideoIn
 
     // get streamdetails
     GetStreamDetails(details);
+    m_pDS->close();
+    if (URIUtils::IsDiscImageStack(details.m_strFileNameAndPath))
+      GetResumePoint(details);
 
     return !details.IsEmpty();
   }
@@ -8703,6 +8715,13 @@ bool CVideoDatabase::GetMoviesByWhere(const std::string& strBaseDir, const Filte
 
     // cleanup
     m_pDS->close();
+
+    for (int i = 0; i < items.Size(); ++i)
+    {
+      CVideoInfoTag* tag = items[i]->GetVideoInfoTag();
+      if (tag && URIUtils::IsDiscImageStack(tag->m_strFileNameAndPath))
+        GetResumePoint(*tag);
+    }
     return true;
   }
   catch (...)
@@ -8953,6 +8972,13 @@ bool CVideoDatabase::GetEpisodesByWhere(const std::string& strBaseDir, const Fil
 
     // cleanup
     m_pDS->close();
+
+    for (int i = 0; i < items.Size(); ++i)
+    {
+      CVideoInfoTag* tag = items[i]->GetVideoInfoTag();
+      if (tag && URIUtils::IsDiscImageStack(tag->m_strFileNameAndPath))
+        GetResumePoint(*tag);
+    }
     return true;
   }
   catch (...)
@@ -9840,6 +9866,13 @@ bool CVideoDatabase::GetMusicVideosByWhere(const std::string &baseDir, const Fil
 
     // cleanup
     m_pDS->close();
+
+    for (int i = 0; i < items.Size(); ++i)
+    {
+      CVideoInfoTag* tag = items[i]->GetVideoInfoTag();
+      if (tag && URIUtils::IsDiscImageStack(tag->m_strFileNameAndPath))
+        GetResumePoint(*tag);
+    }
     if (!strArtist.empty())
       items.SetProperty("customtitle", strArtist);
     return true;

@@ -151,6 +151,7 @@ public:
   }
   bool GetState(std::string& xmlstate) override;
   bool SetState(const std::string& xmlstate) override;
+  void SetResumeOptions(bool hasStartPosition, std::string state);
   bool CanSeek() override;
 
 
@@ -493,4 +494,7 @@ protected:
 
     /*! Bluray state serializer handler */
     CBlurayStateSerializer m_blurayStateSerializer;
+    bool m_resumeOptionsSet{false};
+    bool m_hasResumeStartPosition{false};
+    std::string m_resumeState;
 };

@@ -449,20 +449,33 @@ bool CDVDInputStreamBluray::IsEOF()
   return false;
 }
 
+void CDVDInputStreamBluray::SetResumeOptions(bool hasStartPosition, std::string state)
+{
+  m_resumeOptionsSet = true;
+  m_hasResumeStartPosition = hasStartPosition;
+  m_resumeState = std::move(state);
+}
+
 BLURAY_TITLE_INFO* CDVDInputStreamBluray::GetTitleFromState(const std::string& xmlstate) const
 {
+  if (xmlstate.empty())
+    return nullptr;
+
   BlurayState blurayState;
-  if (!m_blurayStateSerializer.XMLToBlurayState(blurayState, xmlstate))
+  if (!m_blurayStateSerializer.XMLToBlurayState(blurayState, xmlstate) ||
+      blurayState.playlistId < 0)
   {
     CLog::LogF(LOGWARNING, "Failed to deserialize Bluray state");
     return nullptr;
   }
-  return bd_get_playlist_info(m_bd, blurayState.playlistId, 0);
+  return bd_get_playlist_info(m_bd, static_cast<uint32_t>(blurayState.playlistId), 0);
 }
 
 BLURAY_TITLE_INFO* CDVDInputStreamBluray::GetMainTitle() const
 {
   int titles = bd_get_titles(m_bd, TITLES_RELEVANT, 0);
+  if (titles <= 0)
+    titles = bd_get_titles(m_bd, TITLES_ALL, 0);
   if (titles <= 0)
     return nullptr;
 
@@ -819,15 +832,41 @@ bool CDVDInputStreamBluray::Open()
 
   int mode = CServiceBroker::GetSettingsComponent()->GetSettings()->GetInt(CSettings::SETTING_DISC_PLAYBACK);
 
+  const bool itemResuming =
+      (m_item.GetStartOffset() == STARTOFFSET_RESUME && m_item.IsResumable()) ||
+      m_item.GetStartOffset() > 0;
+  const bool isResuming =
+      resumable && (m_resumeOptionsSet ? m_hasResumeStartPosition : itemResuming);
+  bool selectedFromSavedState = false;
+
   if (URIUtils::HasExtension(filename, ".mpls"))
   {
     m_navmode = false;
     ReplaceTitleInfo(GetTitleFile(filename));
   }
-  else if (resumable && m_item.GetStartOffset() == STARTOFFSET_RESUME && m_item.IsResumable())
+  else if (isResuming)
   {
     m_navmode = false;
-    ReplaceTitleInfo(GetTitleFromState(m_item.GetVideoInfoTag()->GetResumePoint().playerState));
+    const std::string resumeState =
+        m_resumeOptionsSet
+            ? m_resumeState
+            : (m_item.HasVideoInfoTag() ? m_item.GetVideoInfoTag()->GetResumePoint().playerState
+                                        : std::string{});
+    if (!resumeState.empty())
+    {
+      ReplaceTitleInfo(GetTitleFromState(resumeState));
+      selectedFromSavedState = (m_titleInfo != nullptr);
+    }
+
+    if (!m_titleInfo)
+    {
+      ReplaceTitleInfo(GetMainTitle());
+      CLog::Log(LOGINFO,
+                "CDVDInputStreamBluray::Open - {} saved playlist state for resume, fallback main "
+                "title playlist={}",
+                resumeState.empty() ? "no" : "invalid/missing",
+                m_titleInfo ? static_cast<int>(m_titleInfo->playlist) : -1);
+    }
   }
   else if (mode == BD_PLAYBACK_MAIN_TITLE)
   {
@@ -885,9 +924,26 @@ bool CDVDInputStreamBluray::Open()
 
     if(!bd_select_playlist(m_bd, m_titleInfo->playlist))
     {
-      CLog::Log(LOGERROR, "CDVDInputStreamBluray::Open - failed to select playlist {}",
-                m_titleInfo->idx);
-      return false;
+      if (selectedFromSavedState)
+      {
+        CLog::Log(LOGWARNING,
+                  "CDVDInputStreamBluray::Open - failed to select saved playlist {}, falling "
+                  "back to main title",
+                  m_titleInfo->playlist);
+        ReplaceTitleInfo(GetMainTitle());
+        if (!m_titleInfo || !bd_select_playlist(m_bd, m_titleInfo->playlist))
+        {
+          CLog::Log(LOGERROR,
+                    "CDVDInputStreamBluray::Open - failed to select main title playlist");
+          return false;
+        }
+      }
+      else
+      {
+        CLog::Log(LOGERROR, "CDVDInputStreamBluray::Open - failed to select playlist {}",
+                  m_titleInfo->idx);
+        return false;
+      }
     }
   }
 
@@ -963,6 +1019,9 @@ void CDVDInputStreamBluray::Close()
   m_crossPlaylistPending = false;
   m_videoCompatBoundary = false;
   m_naturalChainBoundary = false;
+  m_resumeOptionsSet = false;
+  m_hasResumeStartPosition = false;
+  m_resumeState.clear();
   {
     std::lock_guard lock(m_clipTableMutex);
     m_secondaryVideoStream = 0;

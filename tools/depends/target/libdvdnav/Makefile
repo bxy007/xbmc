@@ -1,6 +1,7 @@
 -include ../../Makefile.include
 include LIBDVDNAV-VERSION
-DEPS = LIBDVDNAV-VERSION Makefile ../../download-files.include
+PATCHES = 001-count-final-program-cells.patch
+DEPS = LIBDVDNAV-VERSION Makefile ../../download-files.include $(PATCHES)
 
 # configuration settings
 config = --prefix=$(PREFIX) --disable-shared --enable-static --with-pic
@@ -39,6 +40,7 @@ all: .installed-$(PLATFORM)
 $(PLATFORM): $(DEPS) | $(TARBALLS_LOCATION)/$(ARCHIVE).$(HASH_TYPE)
 	rm -rf $(PLATFORM); mkdir -p $(PLATFORM)
 	cd $(PLATFORM); $(ARCHIVE_TOOL) $(ARCHIVE_TOOL_FLAGS) $(TARBALLS_LOCATION)/$(ARCHIVE)
+	cd $(PLATFORM) && patch -p1 -i ../001-count-final-program-cells.patch
 	cd $(PLATFORM); $(AUTORECONF) -vif && $(PKGCONFIGPATH) CFLAGS="$(CFLAGS) $(EXTRA_CFLAGS)" ac_cv_path_GIT= ./configure $(config)
 
 $(PLATFORM)/.libs/$(LIBNAME).a: $(PLATFORM)

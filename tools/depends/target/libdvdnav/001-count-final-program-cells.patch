@@ -1,0 +1,29 @@
+--- a/src/searching.c
++++ b/src/searching.c
+@@ -731,9 +731,13 @@ uint32_t dvdnav_describe_title_chapters(dvdnav_t *this, int32_t title, uint64_t **t
+     if(ptt[i].pgn < pgc->nr_of_programs)
+       endcellnr = pgc->program_map[ptt[i].pgn];
+     else
+-      endcellnr = 0;
++      endcellnr = pgc->nr_of_cells + 1;
+-
++
+-    do {
++    if (endcellnr <= cellnr || endcellnr > (uint32_t)pgc->nr_of_cells + 1) {
++      printerr("Invalid program cell range.");
++      continue;
++    }
++    for (; cellnr < endcellnr; cellnr++) {
+       cell = &pgc->cell_playback[cellnr-1];
+       if(!(cell->block_type == BLOCK_TYPE_ANGLE_BLOCK &&
+            cell->block_mode != BLOCK_MODE_FIRST_CELL
+@@ -742,8 +746,7 @@ uint32_t dvdnav_describe_title_chapters(dvdnav_t *this, int32_t title, uint64_t **t
+         tmp[i] = length + dvdnav_convert_time(&cell->playback_time);
+         length = tmp[i];
+       }
+-      cellnr++;
+-    } while(cellnr < endcellnr);
++    }
+   }
+   *duration = length;
+   vm_ifo_close(ifo);

@@ -98,6 +98,8 @@ if(NOT TARGET LibDvdNav::LibDvdNav)
     set(BUILD_IN_SOURCE 1)
   endif()
 
+  set(patches "${CMAKE_SOURCE_DIR}/tools/depends/target/${MODULE_LC}/001-count-final-program-cells.patch")
+  generate_patchcommand("${patches}")
   BUILD_DEP_TARGET()
 
   if(TARGET LibDvdRead::LibDvdRead)

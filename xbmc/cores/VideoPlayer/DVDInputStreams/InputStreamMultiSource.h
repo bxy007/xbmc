@@ -35,8 +35,15 @@ public:
   int Read(uint8_t* buf, int buf_size) override;
   int64_t Seek(int64_t offset, int whence) override;
   void SetReadRate(uint32_t rate) override;
+  CDVDInputStream::IDisplayTime* GetIDisplayTime() override;
+  CDVDInputStream::IPosTime* GetIPosTime() override;
+  bool GetPrimaryState(std::string& xmlstate);
+  void SetResumeOptions(bool hasStartPosition, std::string state);
 
 protected:
   IVideoPlayer* m_pPlayer;
   std::vector<std::string> m_filenames;
+  bool m_resumeOptionsSet{false};
+  bool m_hasResumeStartPosition{false};
+  std::string m_resumeState;
 };

@@ -31,6 +31,8 @@
 #include "platform/darwin/osx/CocoaInterface.h"
 #endif
 
+#include <algorithm>
+#include <limits>
 #include <memory>
 
 namespace
@@ -1392,11 +1394,75 @@ bool CDVDInputStreamNavigator::SetState(const std::string& xmlstate)
     return false;
   }
 
-  m_dll.dvdnav_program_play(m_dvdnav, dvdState.title, dvdState.pgcn, dvdState.pgn);
+  if (m_dll.dvdnav_program_play(m_dvdnav, dvdState.title, dvdState.pgcn, dvdState.pgn) !=
+      DVDNAV_STATUS_OK)
+  {
+    CLog::LogF(LOGWARNING, "Failed to restore DVD title {} pgcn {} pgn {}: {}", dvdState.title,
+               dvdState.pgcn, dvdState.pgn, m_dll.dvdnav_err_to_string(m_dvdnav));
+    return false;
+  }
+  if (m_iTotalTime <= 0 && dvdState.title > 0)
+  {
+    uint64_t* times = nullptr;
+    uint64_t duration = 0;
+    if (m_dll.dvdnav_describe_title_chapters(m_dvdnav, dvdState.title, &times, &duration) > 0 &&
+        duration > 0)
+    {
+      m_iTotalTime = static_cast<int>(std::min<uint64_t>(
+          duration / 90, static_cast<uint64_t>(std::numeric_limits<int>::max())));
+    }
+    if (times)
+      free(times);
+  }
   m_dll.dvdnav_angle_change(m_dvdnav, dvdState.current_angle);
   SetActiveSubtitleStream(dvdState.subp_num);
   SetActiveAudioStream(dvdState.audio_num);
   EnableSubtitleStream(dvdState.sub_enabled);
+  return true;
+}
+
+bool CDVDInputStreamNavigator::SelectMainTitle()
+{
+  if (!m_dvdnav)
+    return false;
+
+  int32_t titleCount = 0;
+  if (m_dll.dvdnav_get_number_of_titles(m_dvdnav, &titleCount) != DVDNAV_STATUS_OK ||
+      titleCount <= 0)
+    return false;
+
+  int32_t bestTitle = 0;
+  uint64_t bestDuration = 0;
+  for (int32_t title = 1; title <= titleCount; ++title)
+  {
+    uint64_t* times = nullptr;
+    uint64_t duration = 0;
+    const uint32_t entries =
+        m_dll.dvdnav_describe_title_chapters(m_dvdnav, title, &times, &duration);
+    if (times)
+      free(times);
+    if (entries > 0 && duration > bestDuration)
+    {
+      bestDuration = duration;
+      bestTitle = title;
+    }
+  }
+
+  if (bestTitle <= 0)
+    return false;
+
+  if (m_dll.dvdnav_title_play(m_dvdnav, bestTitle) != DVDNAV_STATUS_OK)
+  {
+    CLog::LogF(LOGWARNING, "Failed to select DVD main title {}: {}", bestTitle,
+               m_dll.dvdnav_err_to_string(m_dvdnav));
+    return false;
+  }
+
+  m_iTotalTime = static_cast<int>(std::min<uint64_t>(
+      bestDuration / 90, static_cast<uint64_t>(std::numeric_limits<int>::max())));
+
+  CLog::LogF(LOGINFO, "Selected DVD main title {} (duration {}s) for resume", bestTitle,
+             bestDuration / 90000);
   return true;
 }
 

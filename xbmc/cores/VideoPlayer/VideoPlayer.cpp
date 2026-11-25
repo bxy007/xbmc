@@ -25,6 +25,7 @@
 #include "VideoPlayerSubtitle.h"
 #endif
 #include "DVDInputStreams/DVDInputStreamNavigator.h"
+#include "DVDInputStreams/InputStreamMultiSource.h"
 #include "DVDInputStreams/InputStreamPVRBase.h"
 #include "DVDMessage.h"
 #include "DVDSubtitles/DVDMenuPlane.h"
@@ -1069,6 +1070,21 @@ bool CVideoPlayer::OpenInputStream()
   }
   m_menus = std::dynamic_pointer_cast<CDVDInputStream::IMenus>(m_pInputStream);
 
+  const bool hasResumePos =
+      m_playerOptions.starttime > 0.0 || m_playerOptions.startpercent > 0.0;
+#if defined(HAVE_LIBBLURAY)
+  if (const auto bluray = GetBlurayInputStream())
+  {
+    bluray->SetResumeOptions(hasResumePos, m_playerOptions.state);
+  }
+  else
+#endif
+  if (m_pInputStream->IsStreamType(DVDSTREAM_TYPE_MULTIFILES))
+  {
+    if (const auto multi = std::dynamic_pointer_cast<CInputStreamMultiSource>(m_pInputStream))
+      multi->SetResumeOptions(hasResumePos, m_playerOptions.state);
+  }
+
   if (!m_pInputStream->Open())
   {
     CLog::Log(LOGERROR, "CVideoPlayer::OpenInputStream - error opening [{}]",
@@ -1934,10 +1950,15 @@ void CVideoPlayer::Prepare()
     {
       discStateRestored = ptr->SetState(m_playerOptions.state);
     }
-    else if (std::shared_ptr<CDVDInputStreamNavigator> nav =
-                 std::dynamic_pointer_cast<CDVDInputStreamNavigator>(m_pInputStream))
+    if (!discStateRestored)
     {
-      nav->EnableSubtitleStream(m_processInfo->GetVideoSettings().m_SubtitleOn);
+      if (std::shared_ptr<CDVDInputStreamNavigator> nav =
+              std::dynamic_pointer_cast<CDVDInputStreamNavigator>(m_pInputStream))
+      {
+        if (m_playerOptions.starttime > 0.0 || m_playerOptions.startpercent > 0.0)
+          nav->SelectMainTitle();
+        nav->EnableSubtitleStream(m_processInfo->GetVideoSettings().m_SubtitleOn);
+      }
     }
   }
   {
@@ -2006,8 +2027,16 @@ void CVideoPlayer::Prepare()
   {
     if (m_playerOptions.startpercent > 0 && m_pDemuxer)
     {
-      int playerStartTime = static_cast<int>((static_cast<double>(
-          m_pDemuxer->GetStreamLength() * (m_playerOptions.startpercent / 100.0))));
+      int totalTime = 0;
+      if (m_pInputStream)
+      {
+        if (CDVDInputStream::IDisplayTime* pDisplayTime = m_pInputStream->GetIDisplayTime())
+          totalTime = pDisplayTime->GetTotalTime();
+      }
+      if (totalTime <= 0)
+        totalTime = m_pDemuxer->GetStreamLength();
+      int playerStartTime = static_cast<int>(
+          static_cast<double>(totalTime) * (m_playerOptions.startpercent / 100.0));
       starttime = m_Edl.GetTimeAfterRestoringCuts(playerStartTime);
     }
     else
@@ -2053,25 +2082,30 @@ void CVideoPlayer::Prepare()
   if (starttime > 0)
   {
     double startpts = DVD_NOPTS_VALUE;
+    bool demuxSeekSucceeded = true;
     if (m_pDemuxer)
     {
-      if (m_pDemuxer->SeekTime(starttime, true, &startpts))
+      demuxSeekSucceeded = m_pDemuxer->SeekTime(starttime, true, &startpts);
+      if (demuxSeekSucceeded)
         CLog::Log(LOGDEBUG, "{} - starting demuxer from: {}", __FUNCTION__, starttime);
       else
         CLog::Log(LOGDEBUG, "{} - failed to start demuxing from: {}", __FUNCTION__, starttime);
     }
 
-    if (m_pSubtitleDemuxer)
+    if (demuxSeekSucceeded)
     {
-      m_subtitleDemuxerEof = false;
-      if (m_pSubtitleDemuxer->SeekTime(starttime, true, &startpts))
-        CLog::Log(LOGDEBUG, "{} - starting subtitle demuxer from: {}", __FUNCTION__, starttime);
-      else
-        CLog::Log(LOGDEBUG, "{} - failed to start subtitle demuxing from: {}", __FUNCTION__,
-                  starttime);
-    }
+      if (m_pSubtitleDemuxer)
+      {
+        m_subtitleDemuxerEof = false;
+        if (m_pSubtitleDemuxer->SeekTime(starttime, true, &startpts))
+          CLog::Log(LOGDEBUG, "{} - starting subtitle demuxer from: {}", __FUNCTION__, starttime);
+        else
+          CLog::Log(LOGDEBUG, "{} - failed to start subtitle demuxing from: {}", __FUNCTION__,
+                    starttime);
+      }
 
-    m_clock.Discontinuity(DVD_MSEC_TO_TIME(starttime));
+      m_clock.Discontinuity(DVD_MSEC_TO_TIME(starttime));
+    }
   }
 
   UpdatePlayState(0);
@@ -7906,6 +7940,14 @@ void CVideoPlayer::UpdatePlayState(double timeout)
           state.time_offset = 0;
       }
       state.menuType = pMenu->GetSupportedMenuType();
+    }
+    else if (m_pInputStream->IsStreamType(DVDSTREAM_TYPE_MULTIFILES))
+    {
+      if (const auto multi = std::dynamic_pointer_cast<CInputStreamMultiSource>(m_pInputStream))
+      {
+        if (!multi->GetPrimaryState(state.player_state))
+          state.player_state.clear();
+      }
     }
 
     state.canpause = m_pInputStream->CanPause();

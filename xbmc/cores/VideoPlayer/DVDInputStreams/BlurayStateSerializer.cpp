@@ -51,6 +51,10 @@ bool CBlurayStateSerializer::BlurayStateToXML(std::string& xmlstate, const Blura
 
 bool CBlurayStateSerializer::XMLToBlurayState(BlurayState& state, const std::string& xmlstate) const
 {
+  state.playlistId = -1;
+  if (xmlstate.empty())
+    return false;
+
   CXBMCTinyXML2 xmlDoc;
 
   if (!xmlDoc.Parse(xmlstate))
@@ -72,15 +76,30 @@ bool CBlurayStateSerializer::XMLToBlurayState(BlurayState& state, const std::str
     return false;
   }
 
+  auto isSpace = [](char ch) { return ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n'; };
+
+  bool hasPlaylistId = false;
   const auto* childElement = hRoot.ToElement()->FirstChildElement();
   while (childElement != nullptr)
   {
     const std::string property = childElement->Value();
     if (property == "playlistId")
     {
-      std::from_chars(childElement->GetText(),
-                      childElement->GetText() + std::strlen(childElement->GetText()),
-                      state.playlistId);
+      const char* text = childElement->GetText();
+      if (!text)
+        return false;
+      const char* begin = text;
+      const char* end = text + std::strlen(text);
+      while (begin < end && isSpace(*begin))
+        ++begin;
+      while (end > begin && isSpace(*(end - 1)))
+        --end;
+      int32_t parsedId = -1;
+      const auto [ptr, ec] = std::from_chars(begin, end, parsedId);
+      if (ec != std::errc{} || ptr != end || parsedId < 0)
+        return false;
+      state.playlistId = parsedId;
+      hasPlaylistId = true;
     }
     else
     {
@@ -88,5 +107,5 @@ bool CBlurayStateSerializer::XMLToBlurayState(BlurayState& state, const std::str
     }
     childElement = childElement->NextSiblingElement();
   }
-  return true;
+  return hasPlaylistId;
 }

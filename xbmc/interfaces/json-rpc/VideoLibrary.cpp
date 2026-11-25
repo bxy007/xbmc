@@ -12,7 +12,9 @@
 #include "PVROperations.h"
 #include "ServiceBroker.h"
 #include "TextureDatabase.h"
+#include "URL.h"
 #include "Util.h"
+#include "filesystem/StackDirectory.h"
 #include "messaging/ApplicationMessenger.h"
 #include "utils/SortUtils.h"
 #include "utils/StringUtils.h"
@@ -1177,20 +1179,48 @@ void CVideoLibrary::UpdateResumePoint(const CVariant &parameterObject, CVideoInf
 {
   if (!parameterObject["resume"].isNull())
   {
+    const std::string& filePath = details.m_strFileNameAndPath;
+    const bool isDiscStack = URIUtils::IsDiscImageStack(filePath);
+    CFileItemList stackParts;
+    if (isDiscStack)
+    {
+      XFILE::CStackDirectory dir;
+      dir.GetDirectory(CURL(filePath), stackParts);
+    }
+
     double position = (double)parameterObject["resume"]["position"].asDouble();
     if (position == 0.0)
-      videodatabase.ClearBookMarksOfFile(details.m_strFileNameAndPath, CBookmark::RESUME);
+    {
+      if (isDiscStack)
+      {
+        for (const auto& part : stackParts)
+          videodatabase.ClearBookMarksOfFile(part->GetPath(), CBookmark::RESUME);
+      }
+      videodatabase.ClearBookMarksOfFile(filePath, CBookmark::RESUME);
+    }
     else
     {
       CBookmark bookmark;
+      const bool hasExisting = videodatabase.GetResumeBookMark(filePath, bookmark);
+      std::string targetPath = filePath;
+      if (isDiscStack && !stackParts.IsEmpty())
+      {
+        if (hasExisting && bookmark.partNumber >= 1 && bookmark.partNumber <= stackParts.Size())
+          targetPath = stackParts[static_cast<int>(bookmark.partNumber - 1)]->GetPath();
+        else
+          targetPath = stackParts[0]->GetPath();
+      }
+
       double total = (double)parameterObject["resume"]["total"].asDouble();
-      if (total <= 0.0 && !videodatabase.GetResumeBookMark(details.m_strFileNameAndPath, bookmark))
-        bookmark.totalTimeInSeconds = details.m_streamDetails.GetVideoDuration();
-      else
+      if (total > 0.0)
         bookmark.totalTimeInSeconds = total;
+      else if (!hasExisting || bookmark.totalTimeInSeconds <= 0.0)
+        bookmark.totalTimeInSeconds = details.m_streamDetails.GetVideoDuration();
 
       bookmark.timeInSeconds = position;
-      videodatabase.AddBookMarkToFile(details.m_strFileNameAndPath, bookmark, CBookmark::RESUME);
+      if (videodatabase.AddBookMarkToFile(targetPath, bookmark, CBookmark::RESUME) &&
+          targetPath != filePath)
+        videodatabase.ClearBookMarksOfFile(filePath, CBookmark::RESUME);
     }
   }
 }

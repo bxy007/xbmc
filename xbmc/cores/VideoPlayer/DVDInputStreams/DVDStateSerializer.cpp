@@ -14,12 +14,21 @@
 
 #include <charconv>
 #include <cstring>
-#include <sstream>
 
 namespace
 {
 // Serializer version - used to avoid processing deprecated/legacy schemas
 constexpr int DVDSTATESERIALIZER_VERSION = 2;
+
+template<typename T>
+bool ParseNumber(const char* text, T& value)
+{
+  if (!text)
+    return false;
+  const char* end = text + std::strlen(text);
+  const auto [ptr, error] = std::from_chars(text, end, value);
+  return error == std::errc{} && ptr == end;
+}
 }
 
 bool CDVDStateSerializer::DVDStateToXML(std::string& xmlstate, const DVDState& state)
@@ -49,10 +58,10 @@ bool CDVDStateSerializer::DVDStateToXML(std::string& xmlstate, const DVDState& s
 
 bool CDVDStateSerializer::XMLToDVDState(DVDState& state, const std::string& xmlstate)
 {
+  state = {};
   CXBMCTinyXML2 xmlDoc;
 
-  xmlDoc.Parse(xmlstate);
-  if (xmlDoc.Error())
+  if (!xmlDoc.Parse(xmlstate))
     return false;
 
   tinyxml2::XMLHandle hRoot(xmlDoc.RootElement());
@@ -73,50 +82,29 @@ bool CDVDStateSerializer::XMLToDVDState(DVDState& state, const std::string& xmls
   while (childElement != nullptr)
   {
     const std::string property = childElement->Value();
+    const char* text = childElement->GetText();
+    bool valid = true;
     if (property == "title")
-    {
-      std::from_chars(childElement->GetText(),
-                      childElement->GetText() + std::strlen(childElement->GetText()), state.title);
-    }
+      valid = ParseNumber(text, state.title);
     else if (property == "pgn")
-    {
-      std::from_chars(childElement->GetText(),
-                      childElement->GetText() + std::strlen(childElement->GetText()), state.pgn);
-    }
+      valid = ParseNumber(text, state.pgn);
     else if (property == "pgcn")
-    {
-      std::from_chars(childElement->GetText(),
-                      childElement->GetText() + std::strlen(childElement->GetText()), state.pgcn);
-    }
+      valid = ParseNumber(text, state.pgcn);
     else if (property == "current_angle")
-    {
-      std::from_chars(childElement->GetText(),
-                      childElement->GetText() + std::strlen(childElement->GetText()),
-                      state.current_angle);
-    }
+      valid = ParseNumber(text, state.current_angle);
     else if (property == "subp_num")
-    {
-      std::from_chars(childElement->GetText(),
-                      childElement->GetText() + std::strlen(childElement->GetText()),
-                      state.subp_num);
-    }
+      valid = ParseNumber(text, state.subp_num);
     else if (property == "audio_num")
-    {
-      std::from_chars(childElement->GetText(),
-                      childElement->GetText() + std::strlen(childElement->GetText()),
-                      state.audio_num);
-    }
+      valid = ParseNumber(text, state.audio_num);
     else if (property == "sub_enabled")
-    {
-      state.sub_enabled = StringUtils::EqualsNoCase(childElement->GetText(), "true");
-    }
+      state.sub_enabled = text && StringUtils::EqualsNoCase(text, "true");
     else
-    {
       CLog::LogF(LOGWARNING, "Unmapped dvd state property {}, ignored.", childElement->Value());
-    }
+    if (!valid)
+      return false;
     childElement = childElement->NextSiblingElement();
   }
-  return true;
+  return state.title > 0 && state.pgn > 0 && state.pgcn > 0;
 }
 
 void CDVDStateSerializer::AddXMLElement(tinyxml2::XMLElement& root,
