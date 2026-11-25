@@ -144,6 +144,7 @@ public:
   AVColorRange colorRange;
   AVColorPrimaries colorPrimaries;
   AVColorTransferCharacteristic colorTransferCharacteristic;
+  bool transferInferred = false;
   std::shared_ptr<AVMasteringDisplayMetadata> masteringMetadata;
   std::shared_ptr<AVContentLightMetadata> contentLightMetadata;
   std::string stereo_mode; // stereoscopic 3d mode

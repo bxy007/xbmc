@@ -13,7 +13,9 @@
 #include "utils/LogThrottle.h"
 #include "utils/log.h"
 
+#include <algorithm>
 #include <cstdint>
+#include <limits>
 
 namespace
 {
@@ -61,6 +63,19 @@ VdrDmData lastVdr{};
 bool lastValid = false;
 } // namespace
 
+HdrVividStats create_neutral_vivid_stats(
+    const HDRStaticMetadataInfo& hdrStaticMetadataInfo)
+{
+  const uint16_t maxPq = std::min<uint16_t>(SourceMaxPq(hdrStaticMetadataInfo.max_lum), 4095);
+  const uint16_t minPq = std::min<uint16_t>(SourceMinPq(hdrStaticMetadataInfo.min_lum), maxPq);
+
+  HdrVividStats stats{};
+  stats.minimum_maxrgb = minPq;
+  stats.maximum_maxrgb = maxPq;
+  stats.average_maxrgb = static_cast<uint16_t>(minPq + (maxPq - minPq) / 2);
+  return stats;
+}
+
 std::vector<uint8_t> create_dovi_rpu_nalu_from_vivid(
     const HdrVividStats& stats,
     const HDRStaticMetadataInfo& hdrStaticMetadataInfo)
@@ -72,15 +87,20 @@ std::vector<uint8_t> create_dovi_rpu_nalu_from_vivid(
 
   VdrDmData vdr{};
   vdr.source_min_pq = SourceMinPq(hdrStaticMetadataInfo.min_lum);
-  vdr.source_max_pq = SourceMaxPq(hdrStaticMetadataInfo.max_lum);
+  vdr.source_max_pq = std::min<uint16_t>(SourceMaxPq(hdrStaticMetadataInfo.max_lum), 4095);
   vdr.min_pq = stats.minimum_maxrgb;
   vdr.max_pq = stats.maximum_maxrgb;
   vdr.avg_pq = stats.average_maxrgb;
   vdr.max_display_mastering_luminance =
-      hdrStaticMetadataInfo.max_lum ? static_cast<uint16_t>(hdrStaticMetadataInfo.max_lum)
-                                    : 4000;
+      hdrStaticMetadataInfo.max_lum
+          ? static_cast<uint16_t>(std::min<uint32_t>(
+                hdrStaticMetadataInfo.max_lum, std::numeric_limits<uint16_t>::max()))
+          : 4000;
   vdr.min_display_mastering_luminance =
-      hdrStaticMetadataInfo.min_lum ? static_cast<uint16_t>(hdrStaticMetadataInfo.min_lum) : 1;
+      hdrStaticMetadataInfo.min_lum
+          ? static_cast<uint16_t>(std::min<uint32_t>(
+                hdrStaticMetadataInfo.min_lum, std::numeric_limits<uint16_t>::max()))
+          : 1;
   vdr.max_content_light_level = hdrStaticMetadataInfo.max_cll;
   vdr.max_frame_average_light_level = hdrStaticMetadataInfo.max_fall;
 

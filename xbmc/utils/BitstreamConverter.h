@@ -282,6 +282,8 @@ protected:
   void ApplyMasteringDisplayColourVolume(const MasteringDisplayColourVolume& metadata, bool& update);
   void ApplyContentLightLevel(const ContentLightLevel& metadata, bool& update);
   void ApplyAlternativeTransferCharacteristics(uint8_t transfer);
+  bool IsPqHdrBaseLayer() const;
+  void InitHdrStaticMetadataFromHints();
   void UpdateHdrStaticMetadata() const;
 
   void AddDoViRpuNaluWrap(const Hdr10PlusMetadata& meta, uint8_t **poutbuf, uint32_t& poutbuf_size, double pts);
@@ -355,11 +357,16 @@ protected:
   bool m_lastHdr10PlusMetaValid{false};
   HdrVividStats m_lastVividStats{};
   bool m_lastVividStatsValid{false};
+  bool m_seenHdrVivid{false};
+  bool m_seenHlgAtc{false};
+  bool m_nativeHdr10PlusActive{false};
   enum PeakBrightnessSource m_convert_Hdr10Plus_peak_brightness_source;
   bool m_first_frame;
   std::chrono::steady_clock::time_point m_gateFirstReject{};
   HDRStaticMetadataInfo m_hdrStaticMetadataInfo;
   bool m_annexbHdrStaticDone{false};
+  bool m_annexbSeenMdcvSei{false};
+  bool m_annexbSeenCllSei{false};
   uint32_t m_annexbHdrStaticScanCount{0};
 
   std::vector<uint8_t> m_cached_dovi_rpu_in_nal;

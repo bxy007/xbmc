@@ -158,6 +158,7 @@ protected:
 
   bool IsDoViP7DualLayer() const;
   StreamHdrType DetermineHdrType(AVStream* pStream);
+  void ProbeInitialHevcHdrMetadata();
   void ComputePreferredVideoStream();
 
   CCriticalSection m_critSection;

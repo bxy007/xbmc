@@ -742,8 +742,34 @@ bool CBitstreamConverter::Open(bool to_annexb)
   m_to_annexb = to_annexb;
   m_codec = m_hints.codec;
   m_initial_hdrType = m_hints.hdrType;
+  InitHdrStaticMetadataFromHints();
   uint8_t *in_extradata = m_hints.extradata.GetData();
   int in_extrasize = m_hints.extradata.GetSize();
+
+  if (m_codec == AV_CODEC_ID_HEVC && in_extradata && in_extrasize > 0 &&
+      (m_hints.colorTransferCharacteristic == AVCOL_TRC_UNSPECIFIED ||
+       m_hints.transferInferred))
+  {
+    if (const auto vuiTransfer = hevc_extract_sps_vui_transfer(
+            in_extradata, static_cast<size_t>(in_extrasize)))
+    {
+      if (*vuiTransfer == AVCOL_TRC_SMPTE2084 &&
+          m_initial_hdrType != StreamHdrType::HDR_TYPE_HLG)
+      {
+        m_hints.colorTransferCharacteristic = AVCOL_TRC_SMPTE2084;
+        m_hints.transferInferred = false;
+        m_dataCacheCore.SetVideoColorTransferCharacteristic(AVCOL_TRC_SMPTE2084);
+      }
+      else if (*vuiTransfer == AVCOL_TRC_ARIB_STD_B67 &&
+               m_initial_hdrType != StreamHdrType::HDR_TYPE_DOLBYVISION &&
+               m_initial_hdrType != StreamHdrType::HDR_TYPE_HDR10PLUS)
+      {
+        m_hints.colorTransferCharacteristic = AVCOL_TRC_ARIB_STD_B67;
+        m_hints.transferInferred = false;
+        m_dataCacheCore.SetVideoColorTransferCharacteristic(AVCOL_TRC_ARIB_STD_B67);
+      }
+    }
+  }
 
   switch (m_codec)
   {
@@ -913,6 +939,17 @@ void CBitstreamConverter::Close()
   m_convert_bytestream = false;
   m_convert_3byteTo4byteNALSize = false;
   m_combine = false;
+  m_lastHdr10PlusMetaValid = false;
+  m_lastVividStatsValid = false;
+  m_seenHdrVivid = false;
+  m_seenHlgAtc = false;
+  m_nativeHdr10PlusActive = false;
+  m_first_frame = true;
+  m_hdrStaticMetadataInfo = {};
+  m_annexbHdrStaticDone = false;
+  m_annexbSeenMdcvSei = false;
+  m_annexbSeenCllSei = false;
+  m_annexbHdrStaticScanCount = 0;
 }
 
 bool CBitstreamConverter::Convert(uint8_t* pData, int iSize, double pts)
@@ -1262,6 +1299,9 @@ bool CBitstreamConverter::Convert(uint8_t *pData_bl, int iSize_bl, uint8_t *pDat
       buf += size;
     }
 
+    const bool preserveNativeHdr10Plus =
+        m_nativeHdr10PlusActive || m_hints.hdrType == StreamHdrType::HDR_TYPE_HDR10PLUS;
+
     // If converting hdr10plus - add the DoVi RPU as the last NALU in the access unit.
     if (convert_hdr10plus_meta)
     {
@@ -1271,14 +1311,23 @@ bool CBitstreamConverter::Convert(uint8_t *pData_bl, int iSize_bl, uint8_t *pDat
     }
     else if (m_lastHdr10PlusMetaValid && !au_has_rpu)
       AddDoViRpuNaluWrap(m_lastHdr10PlusMeta, &m_convertBuffer, offset, pts);
-    else if (convert_vivid_meta)
+    else if (convert_vivid_meta && IsPqHdrBaseLayer() && !preserveNativeHdr10Plus)
     {
       AddDoViRpuNaluFromVividWrap(vivid_stats, &m_convertBuffer, offset, pts);
       m_lastVividStats = vivid_stats;
       m_lastVividStatsValid = true;
+      m_seenHdrVivid = true;
     }
-    else if (m_convert_HdrVivid && m_lastVividStatsValid && !au_has_rpu)
-      AddDoViRpuNaluFromVividWrap(m_lastVividStats, &m_convertBuffer, offset, pts);
+    else if (m_convert_HdrVivid && !au_has_rpu && IsPqHdrBaseLayer() &&
+             !preserveNativeHdr10Plus &&
+             (m_lastVividStatsValid || m_seenHdrVivid ||
+              m_initial_hdrType == StreamHdrType::HDR_TYPE_HDR_VIVID))
+    {
+      const HdrVividStats stats = m_lastVividStatsValid
+                                      ? m_lastVividStats
+                                      : create_neutral_vivid_stats(m_hdrStaticMetadataInfo);
+      AddDoViRpuNaluFromVividWrap(stats, &m_convertBuffer, offset, pts);
+    }
 
     m_convertSize = offset;
     m_combine = true;
@@ -1334,6 +1383,7 @@ void CBitstreamConverter::ResetStartDecode()
   m_elSpsReady = m_elPpsReady = false;
   m_annexbStartScanCount = 0;
   m_gateFirstReject = {};
+  m_lastVividStatsValid = false;
 }
 
 bool CBitstreamConverter::CanStartDecode() const
@@ -1610,42 +1660,62 @@ bool CBitstreamConverter::IsSlice(uint8_t unit_type)
 
 void CBitstreamConverter::ApplyMasteringDisplayColourVolume(const MasteringDisplayColourVolume& metadata, bool& update) {
 
+  const std::string primaries = MasteringDisplayColourVolumeText(metadata);
+
   if ((m_hdrStaticMetadataInfo.max_lum != metadata.maxLuminance) ||
       (m_hdrStaticMetadataInfo.min_lum != metadata.minLuminance) ||
+      (m_hdrStaticMetadataInfo.colour_primaries != primaries) ||
       !m_hdrStaticMetadataInfo.has_mdcv_metadata)
   {
     m_hdrStaticMetadataInfo.has_mdcv_metadata = true;
     m_hdrStaticMetadataInfo.max_lum = metadata.maxLuminance;
     m_hdrStaticMetadataInfo.min_lum = metadata.minLuminance;
-    m_hdrStaticMetadataInfo.colour_primaries = MasteringDisplayColourVolumeText(metadata);
+    m_hdrStaticMetadataInfo.colour_primaries = primaries;
     update = true;
 
-    logM(LOGDEBUG, "[{}] [{}]", m_hdrStaticMetadataInfo.max_lum, m_hdrStaticMetadataInfo.min_lum);
+    logM(LOGDEBUG, "[{}] [{}] [{}]", m_hdrStaticMetadataInfo.max_lum,
+         m_hdrStaticMetadataInfo.min_lum, m_hdrStaticMetadataInfo.colour_primaries);
   }
 }
 
 void CBitstreamConverter::ApplyContentLightLevel(const ContentLightLevel& metadata, bool& update) {
 
-  if ((m_hdrStaticMetadataInfo.max_cll != metadata.maxContentLightLevel) ||
-      (m_hdrStaticMetadataInfo.max_fall != metadata.maxFrameAverageLightLevel) ||
-      !m_hdrStaticMetadataInfo.has_cll_metadata)
+  const uint16_t maxCll =
+      (metadata.maxContentLightLevel > 0) ? metadata.maxContentLightLevel
+                                          : m_hdrStaticMetadataInfo.max_cll;
+  const uint16_t maxFall =
+      (metadata.maxFrameAverageLightLevel > 0) ? metadata.maxFrameAverageLightLevel
+                                               : m_hdrStaticMetadataInfo.max_fall;
+
+  if ((m_hdrStaticMetadataInfo.max_cll != maxCll) ||
+      (m_hdrStaticMetadataInfo.max_fall != maxFall) ||
+      (!m_hdrStaticMetadataInfo.has_cll_metadata && (maxCll > 0 || maxFall > 0)))
   {
     m_hdrStaticMetadataInfo.has_cll_metadata = true;
-    m_hdrStaticMetadataInfo.max_cll = metadata.maxContentLightLevel;
-    m_hdrStaticMetadataInfo.max_fall = metadata.maxFrameAverageLightLevel;
+    m_hdrStaticMetadataInfo.max_cll = maxCll;
+    m_hdrStaticMetadataInfo.max_fall = maxFall;
     update = true;
 
     logM(LOGDEBUG, "[{}] [{}]", m_hdrStaticMetadataInfo.max_cll, m_hdrStaticMetadataInfo.max_fall);
   }
 }
 
-void CBitstreamConverter::ApplyAlternativeTransferCharacteristics(uint8_t transfer) {
+void CBitstreamConverter::ApplyAlternativeTransferCharacteristics(uint8_t transfer)
+{
+  if (transfer != AVCOL_TRC_ARIB_STD_B67)
+    return;
 
-  if ((transfer == AVCOL_TRC_ARIB_STD_B67) &&
-      m_hints.hdrType != StreamHdrType::HDR_TYPE_HLG &&
-      m_hints.hdrType != StreamHdrType::HDR_TYPE_DOLBYVISION &&
-      m_hints.hdrType != StreamHdrType::HDR_TYPE_HDR10PLUS &&
-      m_hints.hdrType != StreamHdrType::HDR_TYPE_HDR_VIVID)
+  if (m_hints.hdrType == StreamHdrType::HDR_TYPE_DOLBYVISION ||
+      m_hints.hdrType == StreamHdrType::HDR_TYPE_HDR10PLUS)
+    return;
+
+  m_seenHlgAtc = true;
+  m_hints.colorTransferCharacteristic = AVCOL_TRC_ARIB_STD_B67;
+  m_hints.transferInferred = false;
+  m_dataCacheCore.SetVideoColorTransferCharacteristic(AVCOL_TRC_ARIB_STD_B67);
+
+  if (m_hints.hdrType != StreamHdrType::HDR_TYPE_HLG &&
+      (m_hints.hdrType != StreamHdrType::HDR_TYPE_HDR_VIVID || m_convert_HdrVivid))
   {
     m_hints.hdrType = StreamHdrType::HDR_TYPE_HLG;
     m_dataCacheCore.SetVideoSourceHdrType(StreamHdrType::HDR_TYPE_HLG);
@@ -1682,10 +1752,16 @@ void CBitstreamConverter::ScanAnnexbHdrStaticMetadata(const uint8_t* pData, int 
                                                       m_seiBuf, m_seiMessages);
 
       if (metadata.masteringDisplayColourVolume)
+      {
+        m_annexbSeenMdcvSei = true;
         ApplyMasteringDisplayColourVolume(*metadata.masteringDisplayColourVolume, updateMetadata);
+      }
 
       if (metadata.contentLightLevel)
+      {
+        m_annexbSeenCllSei = true;
         ApplyContentLightLevel(*metadata.contentLightLevel, updateMetadata);
+      }
     }
 
     if (nal_end <= buf)
@@ -1697,7 +1773,7 @@ void CBitstreamConverter::ScanAnnexbHdrStaticMetadata(const uint8_t* pData, int 
   if (updateMetadata)
     UpdateHdrStaticMetadata();
 
-  if (m_hdrStaticMetadataInfo.has_mdcv_metadata && m_hdrStaticMetadataInfo.has_cll_metadata)
+  if (m_annexbSeenMdcvSei && m_annexbSeenCllSei)
     m_annexbHdrStaticDone = true;
   else if (++m_annexbHdrStaticScanCount >= HDR_STATIC_SCAN_FRAME_LIMIT)
     m_annexbHdrStaticDone = true;
@@ -1745,6 +1821,95 @@ void CBitstreamConverter::StripAnnexbHdr10Plus(const uint8_t* data, int size)
     m_annexbHdr10PlusBuffer.insert(m_annexbHdr10PlusBuffer.end(), unchanged, end);
     m_inputBuffer = m_annexbHdr10PlusBuffer.data();
     m_inputSize = static_cast<int>(m_annexbHdr10PlusBuffer.size());
+  }
+}
+
+bool CBitstreamConverter::IsPqHdrBaseLayer() const
+{
+  return !m_seenHlgAtc &&
+         !m_hints.transferInferred &&
+         m_hints.colorTransferCharacteristic == AVCOL_TRC_SMPTE2084 &&
+         m_initial_hdrType != StreamHdrType::HDR_TYPE_HLG &&
+         m_hints.hdrType != StreamHdrType::HDR_TYPE_HLG;
+}
+
+void CBitstreamConverter::InitHdrStaticMetadataFromHints()
+{
+  m_hdrStaticMetadataInfo = {};
+  bool updateMetadata = false;
+
+  if (m_hints.masteringMetadata)
+  {
+    const auto& md = *m_hints.masteringMetadata;
+    auto toPrimaryCoord = [](const AVRational& r) -> uint16_t
+    {
+      if (r.den <= 0 || r.num <= 0)
+        return 0;
+      const double v = av_q2d(r) * 50000.0;
+      return static_cast<uint16_t>(std::llround(std::clamp(v, 0.0, 65535.0)));
+    };
+
+    MasteringDisplayColourVolume mdcv{};
+    bool hasAny = false;
+
+    if (md.has_primaries)
+    {
+      // FFmpeg AVMasteringDisplayMetadata orders display_primaries as [0]=R, [1]=G, [2]=B.
+      // MasteringDisplayColourVolume follows Rec. ITU-T H.265 D.3.27: [0]=G, [1]=B, [2]=R.
+      mdcv.displayPrimaries[0] = {toPrimaryCoord(md.display_primaries[1][0]),
+                                  toPrimaryCoord(md.display_primaries[1][1])};
+      mdcv.displayPrimaries[1] = {toPrimaryCoord(md.display_primaries[2][0]),
+                                  toPrimaryCoord(md.display_primaries[2][1])};
+      mdcv.displayPrimaries[2] = {toPrimaryCoord(md.display_primaries[0][0]),
+                                  toPrimaryCoord(md.display_primaries[0][1])};
+      mdcv.whitePoint = {toPrimaryCoord(md.white_point[0]),
+                         toPrimaryCoord(md.white_point[1])};
+      hasAny = true;
+    }
+
+    if (md.has_luminance && md.max_luminance.den > 0 && md.max_luminance.num > 0)
+    {
+      const double maxNits = av_q2d(md.max_luminance);
+      mdcv.maxLuminance = static_cast<uint32_t>(
+          std::llround(std::clamp(maxNits, 0.0, 100000.0)));
+      if (md.min_luminance.den > 0 && md.min_luminance.num > 0)
+      {
+        const double minScaled = av_q2d(md.min_luminance) * 10000.0;
+        mdcv.minLuminance = static_cast<uint32_t>(std::llround(
+            std::clamp(minScaled, 0.0, static_cast<double>(std::numeric_limits<uint32_t>::max()))));
+      }
+      hasAny = true;
+    }
+
+    if (hasAny)
+    {
+      m_hdrStaticMetadataInfo.has_mdcv_metadata = true;
+      m_hdrStaticMetadataInfo.max_lum = mdcv.maxLuminance;
+      m_hdrStaticMetadataInfo.min_lum = mdcv.minLuminance;
+      if (md.has_primaries)
+        m_hdrStaticMetadataInfo.colour_primaries = MasteringDisplayColourVolumeText(mdcv);
+      updateMetadata = true;
+    }
+  }
+
+  if (m_hints.contentLightMetadata)
+  {
+    const auto& cll = *m_hints.contentLightMetadata;
+    if (cll.MaxCLL > 0 || cll.MaxFALL > 0)
+    {
+      m_hdrStaticMetadataInfo.has_cll_metadata = true;
+      m_hdrStaticMetadataInfo.max_cll = static_cast<uint16_t>(
+          std::min<unsigned>(cll.MaxCLL, std::numeric_limits<uint16_t>::max()));
+      m_hdrStaticMetadataInfo.max_fall = static_cast<uint16_t>(
+          std::min<unsigned>(cll.MaxFALL, std::numeric_limits<uint16_t>::max()));
+      updateMetadata = true;
+    }
+  }
+
+  if (updateMetadata)
+  {
+    UpdateHdrStaticMetadata();
+    aml_dv_send_hdr10_data();
   }
 }
 
@@ -1829,6 +1994,10 @@ void CBitstreamConverter::ProcessSeiPrefix(uint8_t *buf, int32_t nal_size, uint8
       meta = *metadata.hdr10Plus;
       convert_hdr10plus_meta = true;
     }
+    else if (considerAsHdr10Plus)
+    {
+      m_nativeHdr10PlusActive = true;
+    }
 
     if (convert || m_removeHdr10Plus)
     {
@@ -1839,7 +2008,9 @@ void CBitstreamConverter::ProcessSeiPrefix(uint8_t *buf, int32_t nal_size, uint8
       aml_kodi_set_cd_cs(2);
   }
 
-  if (metadata.hdrVivid && m_convert_HdrVivid && !convert_hdr10plus_meta)
+  if (metadata.hdrVivid && m_convert_HdrVivid && !convert_hdr10plus_meta &&
+      !m_nativeHdr10PlusActive && m_hints.hdrType != StreamHdrType::HDR_TYPE_HDR10PLUS &&
+      IsPqHdrBaseLayer())
   {
     vivid = *metadata.hdrVivid;
     convert_vivid = true;
@@ -2140,23 +2311,37 @@ bool CBitstreamConverter::BitstreamConvert(uint8_t* pData, int iSize, uint8_t **
     cumul_size += nal_size + m_sps_pps_context.length_size;
   } while (cumul_size < buf_size);
 
-  // If converting hdr10plus - add the DoVi RPU as the last NALU in the access unit.
-  if (convert_hdr10plus_meta)
   {
-    AddDoViRpuNalu(hdr10plus_meta, poutbuf, poutbuf_size, pts);
-    m_lastHdr10PlusMeta = hdr10plus_meta;
-    m_lastHdr10PlusMetaValid = true;
+    const bool preserveNativeHdr10Plus =
+        m_nativeHdr10PlusActive || m_hints.hdrType == StreamHdrType::HDR_TYPE_HDR10PLUS;
+
+    // If converting hdr10plus - add the DoVi RPU as the last NALU in the access unit.
+    if (convert_hdr10plus_meta)
+    {
+      AddDoViRpuNalu(hdr10plus_meta, poutbuf, poutbuf_size, pts);
+      m_lastHdr10PlusMeta = hdr10plus_meta;
+      m_lastHdr10PlusMetaValid = true;
+    }
+    else if (m_lastHdr10PlusMetaValid && !au_has_rpu)
+      AddDoViRpuNalu(m_lastHdr10PlusMeta, poutbuf, poutbuf_size, pts);
+    else if (convert_vivid_meta && IsPqHdrBaseLayer() && !preserveNativeHdr10Plus)
+    {
+      AddDoViRpuNaluFromVivid(vivid_stats, poutbuf, poutbuf_size, pts);
+      m_lastVividStats = vivid_stats;
+      m_lastVividStatsValid = true;
+      m_seenHdrVivid = true;
+    }
+    else if (m_convert_HdrVivid && !au_has_rpu && IsPqHdrBaseLayer() &&
+             !preserveNativeHdr10Plus &&
+             (m_lastVividStatsValid || m_seenHdrVivid ||
+              m_initial_hdrType == StreamHdrType::HDR_TYPE_HDR_VIVID))
+    {
+      const HdrVividStats stats = m_lastVividStatsValid
+                                      ? m_lastVividStats
+                                      : create_neutral_vivid_stats(m_hdrStaticMetadataInfo);
+      AddDoViRpuNaluFromVivid(stats, poutbuf, poutbuf_size, pts);
+    }
   }
-  else if (m_lastHdr10PlusMetaValid && !au_has_rpu)
-    AddDoViRpuNalu(m_lastHdr10PlusMeta, poutbuf, poutbuf_size, pts);
-  else if (convert_vivid_meta)
-  {
-    AddDoViRpuNaluFromVivid(vivid_stats, poutbuf, poutbuf_size, pts);
-    m_lastVividStats = vivid_stats;
-    m_lastVividStatsValid = true;
-  }
-  else if (m_convert_HdrVivid && m_lastVividStatsValid && !au_has_rpu)
-    AddDoViRpuNaluFromVivid(m_lastVividStats, poutbuf, poutbuf_size, pts);
 
   m_first_frame = false;
 

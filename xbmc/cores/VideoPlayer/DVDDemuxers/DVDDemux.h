@@ -167,6 +167,7 @@ public:
   AVColorRange colorRange = AVCOL_RANGE_UNSPECIFIED;
   AVColorPrimaries colorPrimaries = AVCOL_PRI_UNSPECIFIED;
   AVColorTransferCharacteristic colorTransferCharacteristic = AVCOL_TRC_UNSPECIFIED;
+  bool transferInferred = false;
 
   std::shared_ptr<AVMasteringDisplayMetadata> masteringMetaData;
   std::shared_ptr<AVContentLightMetadata> contentLightMetaData;

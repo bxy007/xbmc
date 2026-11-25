@@ -36,6 +36,7 @@
 #include "utils/AMLUtils.h"
 #include "utils/BitstreamConverter.h"
 #include "utils/FontUtils.h"
+#include "utils/HevcSei.h"
 #include "utils/LangCodeExpander.h"
 #include "utils/StereoAspect.h"
 #include "utils/StreamDetails.h"
@@ -46,11 +47,14 @@
 #include "utils/log.h"
 #include "cores/DataCacheCore.h"
 
+#include <algorithm>
+#include <climits>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <sstream>
 #include <tuple>
 #include <utility>
@@ -62,6 +66,7 @@
 #define __STDC_LIMIT_MACROS
 #endif
 #ifdef TARGET_POSIX
+#include <dlfcn.h>
 #include <stdint.h>
 #endif
 
@@ -71,6 +76,7 @@ extern "C"
 #include <libavutil/dict.h>
 #include <libavutil/display.h>
 #include <libavutil/dovi_meta.h>
+#include <libavutil/mastering_display_metadata.h>
 #include <libavutil/opt.h>
 #include <libavutil/pixdesc.h>
 }
@@ -117,6 +123,207 @@ bool AttachmentIsFont(const AVDictionaryEntry* dict)
            font_mimetypes.end();
   }
   return false;
+}
+
+constexpr uint8_t HEVC_NAL_SEI_PREFIX_TYPE = 39;
+constexpr uint8_t HEVC_NAL_UNSPEC62_TYPE = 62;
+constexpr unsigned int HEVC_HDR_PROBE_MAX_PACKETS = 64;
+constexpr unsigned int HEVC_HDR_PROBE_MAX_VIDEO_PACKETS = 32;
+
+bool IsHvccExtradata(const uint8_t* data, size_t size, uint8_t& nalLengthSize)
+{
+  if (!data || size < 23 || !(data[0] || data[1] || data[2] > 1))
+    return false;
+  nalLengthSize = (data[21] & 0x3) + 1;
+  return nalLengthSize >= 1 && nalLengthSize <= 4;
+}
+
+struct HevcPacketHdrProbeResult
+{
+  bool hasDoviRpu{false};
+  bool hasHdr10Plus{false};
+  bool hasHdrVivid{false};
+  bool hasHlgAtc{false};
+  std::optional<MasteringDisplayColourVolume> mdcv;
+  std::optional<ContentLightLevel> cll;
+};
+
+HevcPacketHdrProbeResult InspectHvccPacketHdrMetadata(const uint8_t* data,
+                                                      size_t size,
+                                                      uint8_t nalLengthSize)
+{
+  HevcPacketHdrProbeResult result;
+  if (!data || size == 0 || nalLengthSize < 1 || nalLengthSize > 4)
+    return result;
+
+  std::vector<uint8_t> seiBuf;
+  std::vector<CHevcSei> seiMessages;
+  const uint8_t* p = data;
+  const uint8_t* const end = data + size;
+
+  while (static_cast<size_t>(end - p) > nalLengthSize)
+  {
+    uint32_t nalSize = 0;
+    for (uint8_t i = 0; i < nalLengthSize; ++i)
+      nalSize = (nalSize << 8) | p[i];
+    p += nalLengthSize;
+
+    if (nalSize == 0 || nalSize > static_cast<size_t>(end - p))
+      break;
+
+    const uint8_t nalType = (p[0] >> 1) & 0x3f;
+    if (nalType == HEVC_NAL_UNSPEC62_TYPE)
+    {
+      result.hasDoviRpu = true;
+    }
+    else if (nalType == HEVC_NAL_SEI_PREFIX_TYPE && nalSize > 2)
+    {
+      const auto meta = CHevcSei::ExtractMetadata(p, nalSize, seiBuf, seiMessages);
+      if (meta.hdr10Plus)
+        result.hasHdr10Plus = true;
+      if (meta.hdrVivid)
+        result.hasHdrVivid = true;
+      if (meta.alternativeTransferCharacteristics &&
+          *meta.alternativeTransferCharacteristics == AVCOL_TRC_ARIB_STD_B67)
+        result.hasHlgAtc = true;
+      if (!result.mdcv && meta.masteringDisplayColourVolume)
+        result.mdcv = meta.masteringDisplayColourVolume;
+      if (!result.cll && meta.contentLightLevel)
+        result.cll = meta.contentLightLevel;
+    }
+
+    p += nalSize;
+  }
+
+  return result;
+}
+
+std::shared_ptr<AVMasteringDisplayMetadata> MakeAvMasteringMetadata(
+    const MasteringDisplayColourVolume& mdcv)
+{
+  auto meta = std::make_shared<AVMasteringDisplayMetadata>();
+  // Rec. ITU-T H.265 D.3.27 orders primaries as [0]=Green, [1]=Blue, [2]=Red.
+  // FFmpeg AVMasteringDisplayMetadata orders display_primaries as [0]=Red, [1]=Green, [2]=Blue.
+  static constexpr int kSeiToAvPrimary[3] = {2, 0, 1};
+  bool hasPrimaries = (mdcv.whitePoint.x != 0 || mdcv.whitePoint.y != 0);
+  for (int i = 0; i < 3; ++i)
+  {
+    const DisplayPrimary& src = mdcv.displayPrimaries[kSeiToAvPrimary[i]];
+    if (src.x != 0 || src.y != 0)
+      hasPrimaries = true;
+    meta->display_primaries[i][0] = AVRational{static_cast<int>(src.x), 50000};
+    meta->display_primaries[i][1] = AVRational{static_cast<int>(src.y), 50000};
+  }
+  meta->white_point[0] = AVRational{static_cast<int>(mdcv.whitePoint.x), 50000};
+  meta->white_point[1] = AVRational{static_cast<int>(mdcv.whitePoint.y), 50000};
+  meta->has_primaries = hasPrimaries ? 1 : 0;
+
+  if (mdcv.maxLuminance > 0)
+  {
+    const int maxLum = static_cast<int>(
+        std::min<uint32_t>(mdcv.maxLuminance, static_cast<uint32_t>(INT_MAX)));
+    const int minLum = static_cast<int>(
+        std::min<uint32_t>(mdcv.minLuminance, static_cast<uint32_t>(INT_MAX)));
+    meta->max_luminance = AVRational{maxLum, 1};
+    meta->min_luminance = AVRational{minLum, 10000};
+    meta->has_luminance = 1;
+  }
+
+  if (!meta->has_primaries && !meta->has_luminance)
+    return nullptr;
+
+  return meta;
+}
+
+bool MergeAvMasteringMetadata(std::shared_ptr<AVMasteringDisplayMetadata>& dst,
+                              const MasteringDisplayColourVolume& mdcv)
+{
+  auto probed = MakeAvMasteringMetadata(mdcv);
+  if (!probed)
+    return false;
+
+  if (!dst)
+  {
+    dst = std::move(probed);
+    return true;
+  }
+
+  const bool needPrimaries = !dst->has_primaries && probed->has_primaries;
+  const bool dstHasValidLuminance =
+      dst->has_luminance && dst->max_luminance.den > 0 && dst->max_luminance.num > 0;
+  const bool needLuminance = !dstHasValidLuminance && probed->has_luminance;
+  if (!needPrimaries && !needLuminance)
+    return false;
+
+  auto merged = std::make_shared<AVMasteringDisplayMetadata>(*dst);
+  if (needPrimaries)
+  {
+    for (int i = 0; i < 3; ++i)
+    {
+      merged->display_primaries[i][0] = probed->display_primaries[i][0];
+      merged->display_primaries[i][1] = probed->display_primaries[i][1];
+    }
+    merged->white_point[0] = probed->white_point[0];
+    merged->white_point[1] = probed->white_point[1];
+    merged->has_primaries = 1;
+  }
+  if (needLuminance)
+  {
+    merged->max_luminance = probed->max_luminance;
+    merged->min_luminance = probed->min_luminance;
+    merged->has_luminance = 1;
+  }
+  dst = std::move(merged);
+  return true;
+}
+
+bool MergeAvContentLightMetadata(std::shared_ptr<AVContentLightMetadata>& dst,
+                                 const ContentLightLevel& cll)
+{
+  if (cll.maxContentLightLevel == 0 && cll.maxFrameAverageLightLevel == 0)
+    return false;
+
+  if (!dst)
+  {
+    auto meta = std::make_shared<AVContentLightMetadata>();
+    meta->MaxCLL = cll.maxContentLightLevel;
+    meta->MaxFALL = cll.maxFrameAverageLightLevel;
+    dst = std::move(meta);
+    return true;
+  }
+
+  const bool needCll = (dst->MaxCLL == 0 && cll.maxContentLightLevel > 0);
+  const bool needFall = (dst->MaxFALL == 0 && cll.maxFrameAverageLightLevel > 0);
+  if (!needCll && !needFall)
+    return false;
+
+  auto merged = std::make_shared<AVContentLightMetadata>(*dst);
+  if (needCll)
+    merged->MaxCLL = cll.maxContentLightLevel;
+  if (needFall)
+    merged->MaxFALL = cll.maxFrameAverageLightLevel;
+  dst = std::move(merged);
+  return true;
+}
+
+using AvformatPeekBufferedPacketsFn = int (*)(const AVFormatContext*,
+                                              int (*)(void*, const AVPacket*),
+                                              void*);
+
+AvformatPeekBufferedPacketsFn ResolveAvformatPeekBufferedPackets()
+{
+#if defined(TARGET_POSIX)
+  static const AvformatPeekBufferedPacketsFn fn = []() -> AvformatPeekBufferedPacketsFn
+  {
+    void* sym = dlsym(RTLD_DEFAULT, "avformat_peek_buffered_packets");
+    return reinterpret_cast<AvformatPeekBufferedPacketsFn>(sym);
+  }();
+  return fn;
+#elif defined(AVFORMAT_HAS_PEEK_BUFFERED_PACKETS)
+  return &avformat_peek_buffered_packets;
+#else
+  return nullptr;
+#endif
 }
 } // namespace
 
@@ -711,6 +918,11 @@ bool CDVDDemuxFFmpeg::Open(const std::shared_ptr<CDVDInputStream>& pInput, bool 
       }
     }
     CreateStreams(nProgram);
+    if (!fileinfo && m_streaminfo && !m_checkTransportStream && !m_pSSIF &&
+        (!m_pInput || !m_pInput->IsRealtime()))
+    {
+      ProbeInitialHevcHdrMetadata();
+    }
   }
 
   m_newProgram = m_program;
@@ -2171,9 +2383,24 @@ CDemuxStream* CDVDDemuxFFmpeg::AddStream(int streamIdx)
           if (st->colorTransferCharacteristic == AVCOL_TRC_UNSPECIFIED ||
               (st->hdr_type == StreamHdrType::HDR_TYPE_HLG &&
                st->colorTransferCharacteristic == AVCOL_TRC_BT2020_10))
+          {
+            if (st->hdr_type == StreamHdrType::HDR_TYPE_HDR10 &&
+                st->colorTransferCharacteristic == AVCOL_TRC_UNSPECIFIED)
+            {
+              bool confirmedPq = false;
+              if (pStream->codecpar->codec_id == AV_CODEC_ID_HEVC &&
+                  pStream->codecpar->extradata && pStream->codecpar->extradata_size > 0)
+              {
+                const auto vui = CBitstreamConverter::hevc_extract_sps_vui_transfer(
+                    pStream->codecpar->extradata, pStream->codecpar->extradata_size);
+                confirmedPq = vui && *vui == AVCOL_TRC_SMPTE2084;
+              }
+              st->transferInferred = !confirmedPq;
+            }
             st->colorTransferCharacteristic =
                 (st->hdr_type == StreamHdrType::HDR_TYPE_HLG) ? AVCOL_TRC_ARIB_STD_B67
                                                              : AVCOL_TRC_SMPTE2084;
+          }
           if (st->colorRange == AVCOL_RANGE_UNSPECIFIED)
             st->colorRange = AVCOL_RANGE_MPEG;
         }
@@ -3300,6 +3527,168 @@ StreamHdrType CDVDDemuxFFmpeg::DetermineHdrType(AVStream* pStream)
 #endif
 
   return hdrType;
+}
+
+void CDVDDemuxFFmpeg::ProbeInitialHevcHdrMetadata()
+{
+  std::lock_guard lock(m_critSection);
+
+  if (!m_pFormatContext || m_dv_dual_stream || m_aborted.load(std::memory_order_relaxed))
+    return;
+
+  const auto peekBufferedPackets = ResolveAvformatPeekBufferedPackets();
+  if (!peekBufferedPackets)
+    return;
+
+  struct ProbeCandidate
+  {
+    CDemuxStreamVideo* stream{nullptr};
+    uint8_t nalLengthSize{4};
+    bool hasDoviRpu{false};
+    bool hasHdr10Plus{false};
+    bool hasHdrVivid{false};
+    bool hasHlgAtc{false};
+    bool mdcvMerged{false};
+    bool cllMerged{false};
+    bool done{false};
+    unsigned int videoPacketsSeen{0};
+  };
+
+  std::map<int, ProbeCandidate> candidates;
+  for (const auto& [streamIdx, stream] : m_streams)
+  {
+    if (!stream || stream->type != STREAM_VIDEO || streamIdx < 0 ||
+        streamIdx >= static_cast<int>(m_pFormatContext->nb_streams))
+      continue;
+
+    AVStream* avStream = m_pFormatContext->streams[streamIdx];
+    if (!avStream || avStream->discard == AVDISCARD_ALL ||
+        (avStream->disposition & AV_DISPOSITION_ATTACHED_PIC) != 0)
+      continue;
+
+    auto* videoStream = static_cast<CDemuxStreamVideo*>(stream);
+    if (videoStream->codec != AV_CODEC_ID_HEVC)
+      continue;
+
+    // Inspect HDR10 streams (including inferred-transfer ones to catch HLG ATC & MDCV/CLL);
+    // preserve explicit HLG streams as-is.
+    if (videoStream->hdr_type != StreamHdrType::HDR_TYPE_HDR10)
+      continue;
+
+    uint8_t nalLengthSize = 0;
+    if (!IsHvccExtradata(videoStream->extraData.GetData(), videoStream->extraData.GetSize(),
+                         nalLengthSize))
+      continue;
+
+    candidates.emplace(streamIdx, ProbeCandidate{videoStream, nalLengthSize});
+  }
+
+  if (candidates.empty())
+    return;
+
+  struct PeekContext
+  {
+    std::map<int, ProbeCandidate>& candidates;
+    size_t remainingActive{0};
+    unsigned int visitedTotal{0};
+  };
+
+  PeekContext ctx{candidates, candidates.size(), 0};
+
+  auto peekCb = [](void* opaque, const AVPacket* pkt) -> int
+  {
+    auto* c = static_cast<PeekContext*>(opaque);
+    if (c->remainingActive == 0 || c->visitedTotal >= HEVC_HDR_PROBE_MAX_PACKETS)
+      return 1;
+
+    ++c->visitedTotal;
+    if (!pkt)
+      return 0;
+
+    auto it = c->candidates.find(pkt->stream_index);
+    if (it == c->candidates.end() || it->second.done || !pkt->data || pkt->size <= 0)
+      return (c->visitedTotal >= HEVC_HDR_PROBE_MAX_PACKETS) ? 1 : 0;
+
+    ProbeCandidate& cand = it->second;
+    ++cand.videoPacketsSeen;
+
+    if (av_packet_get_side_data(pkt, AV_PKT_DATA_DYNAMIC_HDR10_PLUS, nullptr) ||
+        av_packet_get_side_data(pkt, AV_PKT_DATA_DYNAMIC_HDR10_PLUS_RAW, nullptr))
+      cand.hasHdr10Plus = true;
+
+    const HevcPacketHdrProbeResult probed =
+        InspectHvccPacketHdrMetadata(pkt->data, static_cast<size_t>(pkt->size), cand.nalLengthSize);
+
+    if (probed.hasDoviRpu)
+      cand.hasDoviRpu = true;
+    if (probed.hasHdr10Plus)
+      cand.hasHdr10Plus = true;
+    if (probed.hasHdrVivid)
+      cand.hasHdrVivid = true;
+    if (probed.hasHlgAtc)
+      cand.hasHlgAtc = true;
+
+    if (probed.mdcv && MergeAvMasteringMetadata(cand.stream->masteringMetaData, *probed.mdcv))
+      cand.mdcvMerged = true;
+
+    if (probed.cll && MergeAvContentLightMetadata(cand.stream->contentLightMetaData, *probed.cll))
+      cand.cllMerged = true;
+
+    if (cand.hasDoviRpu || cand.hasHdr10Plus || cand.hasHlgAtc ||
+        cand.videoPacketsSeen >= HEVC_HDR_PROBE_MAX_VIDEO_PACKETS)
+    {
+      cand.done = true;
+      --c->remainingActive;
+    }
+
+    return (c->remainingActive == 0 || c->visitedTotal >= HEVC_HDR_PROBE_MAX_PACKETS) ? 1 : 0;
+  };
+
+  peekBufferedPackets(m_pFormatContext, peekCb, &ctx);
+
+  for (auto& [streamIdx, cand] : candidates)
+  {
+    if (cand.mdcvMerged && cand.stream->masteringMetaData)
+    {
+      const auto& md = *cand.stream->masteringMetaData;
+      logM(LOGDEBUG,
+           "HEVC initial probe: stream {} MDCV has_primaries={} has_luminance={} max={:.1f} nits "
+           "(bufferedVisited={} videoPkts={} extraReadBytes=0)",
+           streamIdx, md.has_primaries, md.has_luminance,
+           (md.has_luminance && md.max_luminance.den > 0) ? av_q2d(md.max_luminance) : 0.0,
+           ctx.visitedTotal, cand.videoPacketsSeen);
+    }
+
+    if (cand.cllMerged && cand.stream->contentLightMetaData)
+    {
+      const auto& cll = *cand.stream->contentLightMetaData;
+      logM(LOGDEBUG,
+           "HEVC initial probe: stream {} CLL maxCLL={} maxFALL={} "
+           "(bufferedVisited={} videoPkts={} extraReadBytes=0)",
+           streamIdx, cll.MaxCLL, cll.MaxFALL, ctx.visitedTotal, cand.videoPacketsSeen);
+    }
+
+    if (cand.hasHlgAtc)
+    {
+      cand.stream->hdr_type = StreamHdrType::HDR_TYPE_HLG;
+      cand.stream->colorTransferCharacteristic = AVCOL_TRC_ARIB_STD_B67;
+      cand.stream->transferInferred = false;
+      logM(LOGINFO,
+           "HEVC initial probe: stream {} detected HLG via ATC SEI (transfer=18); "
+           "reclassifying stream as HDR_TYPE_HLG (bufferedVisited={} videoPkts={} extraReadBytes=0)",
+           streamIdx, ctx.visitedTotal, cand.videoPacketsSeen);
+    }
+    else if (cand.hasHdrVivid && !cand.hasDoviRpu && !cand.hasHdr10Plus &&
+             !cand.stream->transferInferred &&
+             cand.stream->colorTransferCharacteristic == AVCOL_TRC_SMPTE2084)
+    {
+      cand.stream->hdr_type = StreamHdrType::HDR_TYPE_HDR_VIVID;
+      logM(LOGINFO,
+           "HEVC initial probe: stream {} detected HDR Vivid (CUVA 005.1 T.35 SEI) "
+           "(bufferedVisited={} videoPkts={} extraReadBytes=0)",
+           streamIdx, ctx.visitedTotal, cand.videoPacketsSeen);
+    }
+  }
 }
 
 int CDVDDemuxFFmpeg::GetEditionCount()
