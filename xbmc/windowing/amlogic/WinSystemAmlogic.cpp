@@ -118,6 +118,13 @@ bool CWinSystemAmlogic::InitWindowSystem()
   return CWinSystemBase::InitWindowSystem();
 }
 
+bool CWinSystemAmlogic::MessagePump()
+{
+  if (m_dolbyVisionAML)
+    m_dolbyVisionAML->ProcessStdOutputCheck();
+  return CWinSystemBase::MessagePump();
+}
+
 bool CWinSystemAmlogic::DestroyWindowSystem()
 {
   return true;

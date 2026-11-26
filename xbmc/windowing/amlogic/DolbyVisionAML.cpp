@@ -20,6 +20,7 @@
 #include "settings/lib/SettingsManager.h"
 #include "settings/lib/Setting.h"
 #include "guilib/LocalizeStrings.h"
+#include "dialogs/GUIDialogKaiToast.h"
 #include "messaging/ApplicationMessenger.h"
 #include "utils/AMLUtils.h"
 #include "utils/log.h"
@@ -861,6 +862,15 @@ CDolbyVisionAML::CDolbyVisionAML()
   CSysfsPath("/sys/module/amdolby_vision/parameters/dolby_vision_vsif_hold", 0);
 }
 
+CDolbyVisionAML::~CDolbyVisionAML()
+{
+  if (auto announcer = CServiceBroker::GetAnnouncementManager())
+    announcer->RemoveAnnouncer(this);
+  if (auto component = CServiceBroker::GetSettingsComponent())
+    if (auto current = component->GetSettings())
+      current->GetSettingsManager()->UnregisterCallback(this);
+}
+
 void CDolbyVisionAML::ValidateOutputSettings()
 {
   if (!aml_support_dolby_vision() || !dv_display_capabilities_ready())
@@ -920,18 +930,26 @@ void CDolbyVisionAML::ValidateOutputSettings()
          aml_display_support_dv_ll(), hdrPq, hlg);
 }
 
-void CDolbyVisionAML::ApplyStdYcbcrSetting()
+static int GetEffectiveStdOutputMode()
 {
-  CSysfsPath path("/sys/module/amdolby_vision/parameters/dv_std_ycc");
+  const auto s = settings();
+  if (!s)
+    return 0;
+  if (s->GetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_TYPE) != DV_TYPE_DISPLAY_LED ||
+      s->GetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_MODE) == DV_MODE_OFF ||
+      s->GetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_VIDEO_PROCESSOR) != 0)
+    return 0;
+  const int mode = s->GetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_STD_OUTPUT);
+  return (mode == 1 || mode == 2) ? mode : 0;
+}
+
+static void SetStdSysfs(const char* sysfsPath, bool enable)
+{
+  CSysfsPath path(sysfsPath);
   if (!path.Exists())
     return;
 
-  const auto s = settings();
-  const bool enabled = s->GetBool(CSettings::SETTING_COREELEC_AMLOGIC_DV_STD_YCBCR) &&
-      s->GetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_TYPE) == DV_TYPE_DISPLAY_LED &&
-      s->GetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_MODE) != DV_MODE_OFF &&
-      s->GetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_VIDEO_PROCESSOR) == 0;
-  const std::string requested = enabled ? "Y" : "N";
+  const std::string requested = enable ? "Y" : "N";
   if (path.Get<std::string>() == requested)
     return;
 
@@ -939,14 +957,138 @@ void CDolbyVisionAML::ApplyStdYcbcrSetting()
   {
     path.Set(requested);
     if (path.Get<std::string>() != requested)
-      CLog::Log(LOGERROR, "Dolby Vision: YCbCr test setting did not read back as {}", requested);
+      CLog::Log(LOGERROR, "Dolby Vision: {} did not read back as {}", sysfsPath, requested);
     else
-      CLog::Log(LOGDEBUG, "Dolby Vision: YCbCr test request {}", requested);
+      CLog::Log(LOGDEBUG, "Dolby Vision: {} request {}", sysfsPath, requested);
   }
   catch (const std::exception& e)
   {
-    CLog::Log(LOGERROR, "Dolby Vision: failed to apply YCbCr test setting: {}", e.what());
+    CLog::Log(LOGERROR, "Dolby Vision: failed to write {}: {}", sysfsPath, e.what());
   }
+}
+
+static std::string ParseStatusToken(const std::string& status, const std::string& key)
+{
+  const std::string needle = key + "=";
+  size_t pos = status.find(needle);
+  while (pos != std::string::npos)
+  {
+    if (pos == 0 || status[pos - 1] == ' ')
+    {
+      const size_t valStart = pos + needle.size();
+      const size_t valEnd = status.find_first_of(" \t\r\n", valStart);
+      return status.substr(valStart,
+                           valEnd == std::string::npos ? std::string::npos : valEnd - valStart);
+    }
+    pos = status.find(needle, pos + 1);
+  }
+  return "";
+}
+
+void CDolbyVisionAML::ApplyStdOutputSetting()
+{
+  const int mode = GetEffectiveStdOutputMode();
+  const bool wantIpt = (mode == 1);
+  const bool wantYcc = (mode == 2);
+
+  // Disable any inactive route first so direct 1<->2 switches never collide.
+  if (!wantYcc)
+    SetStdSysfs("/sys/module/amdolby_vision/parameters/dv_std_ycc", false);
+  if (!wantIpt)
+    SetStdSysfs("/sys/module/amdolby_vision/parameters/dv_std_ipt", false);
+  if (wantIpt)
+    SetStdSysfs("/sys/module/amdolby_vision/parameters/dv_std_ipt", true);
+  if (wantYcc)
+    SetStdSysfs("/sys/module/amdolby_vision/parameters/dv_std_ycc", true);
+}
+
+void CDolbyVisionAML::ProcessStdOutputCheck()
+{
+  constexpr auto delay = std::chrono::milliseconds(1500);
+  if (m_stdOutputDirty.load() || m_requestedCheck.load() != PlaybackCheck::None)
+  {
+    const bool changed = m_stdOutputDirty.exchange(false);
+    const auto request = m_requestedCheck.exchange(PlaybackCheck::None);
+    if (changed)
+      ApplyStdOutputSetting();
+    m_checkMode = (request == PlaybackCheck::Start ||
+                   (changed && request != PlaybackCheck::Stop && aml_dv_playback_active()))
+                      ? GetEffectiveStdOutputMode() : 0;
+    // delayrefreshchange uses 100 ms units. Allow the configured HDMI pause
+    // in addition to the three samples normally sufficient for startup.
+    const int hdmiPause = m_checkMode ? settings()->GetInt("videoscreen.delayrefreshchange") : 0;
+    m_checksLeft = m_checkMode ? 3 + (std::max(0, hdmiPause) + 14) / 15 : 0;
+    m_nextCheck = std::chrono::steady_clock::now() + delay;
+  }
+  if (!m_checksLeft || std::chrono::steady_clock::now() < m_nextCheck)
+    return;
+
+  --m_checksLeft;
+  if (GetEffectiveStdOutputMode() != m_checkMode || CheckStdOutputStatus(m_checkMode))
+    m_checksLeft = 0;
+  else
+    m_nextCheck = std::chrono::steady_clock::now() + delay;
+}
+
+// HDMI mode switching and the first kernel submission can lag OnAVStart.
+// Retry an unsettled state, and notify only on a completed native fallback.
+bool CDolbyVisionAML::CheckStdOutputStatus(int mode)
+{
+  if (!aml_dv_playback_active() ||
+      CServiceBroker::GetDataCacheCore().GetVideoHdrType() != StreamHdrType::HDR_TYPE_DOLBYVISION ||
+      !aml_is_dv_enable() || aml_dv_dolby_vision_mode() != DOLBY_VISION_OUTPUT_MODE_IPT_TUNNEL)
+    return false;
+
+  const char* statusPath = (mode == 1)
+                               ? "/sys/module/amdolby_vision/parameters/dv_std_ipt_status"
+                               : "/sys/module/amdolby_vision/parameters/dv_std_ycc_status";
+  CSysfsPath sp(statusPath);
+  const auto statusOpt = sp.Get<std::string>();
+  if (!statusOpt)
+    return false;
+  const std::string& status = *statusOpt;
+  const std::string active = ParseStatusToken(status, "active");
+  const std::string reason = ParseStatusToken(status, "reason");
+  const std::string request = ParseStatusToken(status, "request");
+  if (ParseStatusToken(status, "enabled") != "1" || request.empty() ||
+      request != ParseStatusToken(status, "handled") || reason.empty() ||
+      reason == "idle" || reason == "disabled" || reason == "settings_blocked" ||
+      reason == "source_changed" || reason == "no_output")
+    return false;
+
+  if (active == "1")
+  {
+    CLog::Log(LOGINFO, "Dolby Vision: STDV direct mode {} active ({})", mode, status);
+    return true;
+  }
+  if (active != "0" || (reason == "source_unavailable" && m_checksLeft))
+    return false;
+  if (m_requestedCheck.load() != PlaybackCheck::None || m_stdOutputDirty.load())
+    return true;
+
+  int reasonId = 69269;
+  if (reason == "hw_verify_failed")
+  {
+    reasonId = 69270;
+  }
+  else if (reason == "mode")
+  {
+    CSysfsPath multiPath("/sys/module/amdolby_vision/parameters/amdv_multi_dv_mode");
+    const bool hasDovi5 = multiPath.Exists() && multiPath.Get<int>().value_or(0) != 0;
+    reasonId = hasDovi5 ? 69268 : 69267;
+  }
+
+  const std::string modeLabel = g_localizeStrings.Get(mode == 1 ? 69263 : 69264);
+  const std::string reasonLabel = g_localizeStrings.Get(reasonId);
+  const std::string body =
+      modeLabel + " - " + g_localizeStrings.Get(69266) + " (" + reasonLabel + ")";
+
+  CLog::Log(LOGWARNING, "Dolby Vision: STDV direct mode {} fell back to native ({})", mode, status);
+  CGUIDialogKaiToast::QueueNotification(CGUIDialogKaiToast::Warning,
+                                        g_localizeStrings.Get(69265),
+                                        body,
+                                        6000);
+  return true;
 }
 
 bool CDolbyVisionAML::Setup()
@@ -957,7 +1099,7 @@ bool CDolbyVisionAML::Setup()
   {
     set_visible(CSettings::SETTING_COREELEC_AMLOGIC_DV_MODE, false);
     settings()->SetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_MODE, DV_MODE_OFF);
-    ApplyStdYcbcrSetting();
+    ApplyStdOutputSetting();
     CLog::Log(LOGDEBUG, "CDolbyVisionAML::Setup - Device does not support Dolby Vision - exiting setup");
     return false;
   }
@@ -995,8 +1137,9 @@ bool CDolbyVisionAML::Setup()
 
   set_visible(CSettings::SETTING_COREELEC_AMLOGIC_DV_MODE_ON_LUMINANCE, true);
   set_visible(CSettings::SETTING_COREELEC_AMLOGIC_DV_TYPE, true);
-  set_visible(CSettings::SETTING_COREELEC_AMLOGIC_DV_STD_YCBCR,
-              CSysfsPath("/sys/module/amdolby_vision/parameters/dv_std_ycc").Exists());
+  set_visible(CSettings::SETTING_COREELEC_AMLOGIC_DV_STD_OUTPUT,
+              CSysfsPath("/sys/module/amdolby_vision/parameters/dv_std_ipt").Exists() ||
+                  CSysfsPath("/sys/module/amdolby_vision/parameters/dv_std_ycc").Exists());
   set_visible(CSettings::SETTING_COREELEC_AMLOGIC_DV_VIDEO_PROCESSOR, true);
   set_visible(CSettings::SETTING_COREELEC_AMLOGIC_DV_TYPE_VP_AUTO, true);
   set_visible(CSettings::SETTING_COREELEC_AMLOGIC_DV_VSVDB_INJECT, true);
@@ -1028,7 +1171,7 @@ bool CDolbyVisionAML::Setup()
   settingSet.insert(CSettings::SETTING_COREELEC_AMLOGIC_DV_MODE_ON_LUMINANCE);
   settingSet.insert(CSettings::SETTING_VIDEOSCREEN_GUISATURATION_DOLBYVISION);
   settingSet.insert(CSettings::SETTING_COREELEC_AMLOGIC_DV_TYPE);
-  settingSet.insert(CSettings::SETTING_COREELEC_AMLOGIC_DV_STD_YCBCR);
+  settingSet.insert(CSettings::SETTING_COREELEC_AMLOGIC_DV_STD_OUTPUT);
   settingSet.insert(CSettings::SETTING_COREELEC_AMLOGIC_DV_TYPE_ASSIGNED);
   settingSet.insert(CSettings::SETTING_COREELEC_AMLOGIC_DV_VIDEO_PROCESSOR);
   settingSet.insert(CSettings::SETTING_COREELEC_AMLOGIC_DV_TYPE_VP_AUTO);
@@ -1061,7 +1204,7 @@ bool CDolbyVisionAML::Setup()
 
   aml_dv_write_vsvdb_policy();
   aml_dv_push_l5_flags();
-  ApplyStdYcbcrSetting();
+  ApplyStdOutputSetting();
 
   // The kernel display state survives a Kodi crash. Reconcile both the
   // graphics input and output before drawing the new process's SDR GUI.
@@ -1103,11 +1246,11 @@ void CDolbyVisionAML::OnSettingChanged(const std::shared_ptr<const CSetting>& se
     return;
   }
 
-  if (setting->GetId() == CSettings::SETTING_COREELEC_AMLOGIC_DV_STD_YCBCR)
+  if (setting->GetId() == CSettings::SETTING_COREELEC_AMLOGIC_DV_STD_OUTPUT)
   {
     // The kernel owns the frame-matched transition; do not restart the
     // display pipeline or rewrite VSVDB solely for this switch.
-    ApplyStdYcbcrSetting();
+    m_stdOutputDirty.store(true);
     return;
   }
 
@@ -1222,7 +1365,9 @@ void CDolbyVisionAML::OnSettingChanged(const std::shared_ptr<const CSetting>& se
   if (settingId == CSettings::SETTING_COREELEC_AMLOGIC_DV_MODE ||
       settingId == CSettings::SETTING_COREELEC_AMLOGIC_DV_TYPE ||
       settingId == CSettings::SETTING_COREELEC_AMLOGIC_DV_VIDEO_PROCESSOR)
-    ApplyStdYcbcrSetting();
+  {
+    m_stdOutputDirty.store(true);
+  }
 }
 
 void CDolbyVisionAML::Announce(ANNOUNCEMENT::AnnouncementFlag flag,
@@ -1235,9 +1380,16 @@ void CDolbyVisionAML::Announce(ANNOUNCEMENT::AnnouncementFlag flag,
   {
     ValidateOutputSettings();
     aml_dv_push_l5_flags();
-    ApplyStdYcbcrSetting();
+    m_stdOutputDirty.store(true);
     aml_dv_start();
   }
 
-  if ((flag == ANNOUNCEMENT::Player) && (message == "OnStop")) aml_dv_restore_gui_osd_max();
+  if ((flag == ANNOUNCEMENT::Player) && (message == "OnAVStart"))
+    m_requestedCheck.store(PlaybackCheck::Start);
+
+  if ((flag == ANNOUNCEMENT::Player) && (message == "OnStop"))
+  {
+    m_requestedCheck.store(PlaybackCheck::Stop);
+    aml_dv_restore_gui_osd_max();
+  }
 }

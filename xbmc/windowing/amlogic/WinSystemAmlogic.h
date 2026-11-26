@@ -27,6 +27,7 @@ public:
   CWinSystemAmlogic();
 
   bool InitWindowSystem() override;
+  bool MessagePump() override;
   bool DestroyWindowSystem() override;
 
   bool CreateNewWindow(const std::string& name,
