@@ -1100,6 +1100,9 @@ bool URIUtils::IsStreamedFilesystem(const std::string& strPath)
   if (url.IsProtocol("stack"))
     return IsStreamedFilesystem(CStackDirectory::GetFirstStackedFile(strPath));
 
+  if (HasParentInHostname(url))
+    return IsStreamedFilesystem(url.GetHostName());
+
   if (IsUPnP(strPath) || IsFTP(strPath) || IsHTTP(strPath, true))
     return true;
 

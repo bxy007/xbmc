@@ -33,6 +33,15 @@
 
 using namespace XFILE;
 
+namespace
+{
+std::chrono::milliseconds GetThrottleWait(uint32_t bytesPerSecond)
+{
+  const double megabits = bytesPerSecond / 1024.0 / 1024.0 * 8.0;
+  return std::chrono::milliseconds(std::clamp(static_cast<int>(110.0 - megabits), 30, 100));
+}
+} // namespace
+
 class CWriteRate
 {
 public:
@@ -298,22 +307,24 @@ void CFileCache::Process()
     if (useAdaptativeReadFactor)
     {
       // cache level [0.0 - 1.0]
-      const double level = static_cast<double>(m_writePos - m_readPos) / m_maxForward;
+      const double level =
+          static_cast<double>(m_writePos - m_readPos.load(std::memory_order_relaxed)) / m_maxForward;
       readFactor = static_cast<float>(level * -2.5 + 4.0); // read factor [4.0x - 1.5x]
     }
 
-    while (m_writeRate)
+    while (const uint32_t writeRate = m_writeRate.load(std::memory_order_relaxed))
     {
-      if (m_writePos - m_readPos < m_writeRate * readFactor)
+      const double targetRate = writeRate * static_cast<double>(readFactor);
+      if (m_writePos - m_readPos.load(std::memory_order_relaxed) < targetRate)
       {
         limiter.Reset(m_writePos);
         break;
       }
 
-      if (limiter.Rate(m_writePos) < m_writeRate * readFactor)
+      if (limiter.Rate(m_writePos) < targetRate)
         break;
 
-      if (m_seekEvent.Wait(m_processWait))
+      if (m_seekEvent.Wait(GetThrottleWait(writeRate)))
       {
         if (!m_bStop)
           m_seekEvent.Set();
@@ -424,7 +435,8 @@ void CFileCache::Process()
 
     // under estimate write rate by a second, to
     // avoid uncertainty at start of caching
-    m_writeRateActual = average.Rate(m_writePos, 1000);
+    const uint32_t actualRate = average.Rate(m_writePos, 1000);
+    m_writeRateActual.store(actualRate, std::memory_order_relaxed);
 
    /* NOTE: We can only reliably test for low speed condition, when the cache is *really*
     * filling. This is because as soon as it's full the average-
@@ -436,8 +448,8 @@ void CFileCache::Process()
       const int64_t forward = m_pCache->WaitForData(0, 0ms);
       if (forward + m_chunkSize >= m_forwardCacheSize)
       {
-        if (m_writeRateActual < m_writeRate)
-          m_writeRateLowSpeed = m_writeRateActual;
+        if (actualRate < m_writeRate.load(std::memory_order_relaxed))
+          m_writeRateLowSpeed.store(actualRate, std::memory_order_relaxed);
 
         m_bFilling = false;
       }
@@ -499,7 +511,7 @@ retry:
   iRc = m_pCache->ReadFromCache((char *)lpBuf, uiBufSize);
   if (iRc > 0)
   {
-    m_readPos += iRc;
+    m_readPos.fetch_add(iRc, std::memory_order_relaxed);
     return (int)iRc;
   }
 
@@ -529,8 +541,8 @@ retry:
 
 int64_t CFileCache::SeekInternal(int64_t iTarget)
 {
-  if (iTarget == m_readPos)
-    return m_readPos;
+  if (iTarget == m_readPos.load(std::memory_order_relaxed))
+    return iTarget;
 
   if ((m_nSeekResult = m_pCache->Seek(iTarget)) != iTarget)
   {
@@ -593,7 +605,8 @@ int64_t CFileCache::Seek(int64_t iFilePosition, int iWhence)
   }
 
   const int64_t deferredEof = m_deferredEofPos.load(std::memory_order_acquire);
-  const int64_t iCurPos = (deferredEof >= 0) ? deferredEof : m_readPos;
+  const int64_t iCurPos =
+      (deferredEof >= 0) ? deferredEof : m_readPos.load(std::memory_order_relaxed);
   const int64_t fileSize = m_fileSize.load(std::memory_order_relaxed);
   int64_t iTarget = iFilePosition;
   if (iWhence == SEEK_END)
@@ -636,7 +649,7 @@ void CFileCache::Close()
 int64_t CFileCache::GetPosition()
 {
   const int64_t deferredEof = m_deferredEofPos.load(std::memory_order_acquire);
-  return (deferredEof >= 0) ? deferredEof : m_readPos;
+  return (deferredEof >= 0) ? deferredEof : m_readPos.load(std::memory_order_relaxed);
 }
 
 int64_t CFileCache::GetLength()
@@ -667,28 +680,20 @@ int CFileCache::IoControl(EIoControl request, void* param)
     auto status = (SCacheStatus*)param;
     status->maxforward = m_maxForward;
     status->forward = m_pCache->WaitForData(0, 0ms);
-    status->maxrate = m_writeRate;
-    status->currate = m_writeRateActual;
-    status->lowrate = m_writeRateLowSpeed;
-    m_writeRateLowSpeed = 0; // Reset low speed condition
+    status->maxrate = m_writeRate.load(std::memory_order_relaxed);
+    status->currate = m_writeRateActual.load(std::memory_order_relaxed);
+    status->lowrate = m_writeRateLowSpeed.exchange(0, std::memory_order_relaxed);
     return 0;
   }
 
   if (request == IOCTRL_CACHE_SETRATE)
   {
-    m_writeRate = *static_cast<uint32_t*>(param);
-
-    const double mBits = m_writeRate / 1024.0 / 1024.0 * 8.0; // Mbit/s
-
-    // calculates wait time inversely proportional to the bitrate
-    // and limited between 30 - 100 ms
-    const int wait = std::clamp(static_cast<int>(110.0 - mBits), 30, 100);
-
-    m_processWait = std::chrono::milliseconds(wait);
+    const uint32_t writeRate = *static_cast<uint32_t*>(param);
+    m_writeRate.store(writeRate, std::memory_order_relaxed);
 
     CLog::Log(LOGDEBUG,
               "CFileCache::IoControl - setting maxRate to {:.2f} Mbit/s with processWait of {} ms",
-              mBits, wait);
+              writeRate / 1024.0 / 1024.0 * 8.0, GetThrottleWait(writeRate).count());
     return 0;
   }
 

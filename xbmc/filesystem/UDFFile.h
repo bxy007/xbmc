@@ -36,6 +36,7 @@ public:
 
   int64_t GetLength() override;
   int64_t GetPosition() override;
+  int GetChunkSize() override;
 
   bool Exists(const CURL& url) override;
   int IoControl(EIoControl request, void* param) override;

@@ -71,6 +71,7 @@ public:
   ~CUDFBlockInput() = default;
 
   udfread_block_input* GetBlockInput(const std::string& file);
+  int GetSourceChunkSize() const;
 
 
 private:
@@ -120,6 +121,7 @@ private:
     std::atomic<bool> supportsReadRange{false};
     std::atomic<bool> allowStreamChannel{true};
     int64_t fileSize{0};
+    int sourceChunkSize{0};
     uint64_t totalPages{0};
     size_t pageSize{0};
     size_t pageBlocks{0};

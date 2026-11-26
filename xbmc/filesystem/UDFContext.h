@@ -53,6 +53,7 @@ public:
   static std::shared_ptr<CUDFContext> Get(const std::string& image);
 
   udfread* GetHandle() const { return m_udf; }
+  int GetSourceChunkSize() const { return m_blockInput.GetSourceChunkSize(); }
 
 
 private:

@@ -96,6 +96,14 @@ int64_t CUDFFile::GetPosition()
   return udfread_file_tell(m_file);
 }
 
+int CUDFFile::GetChunkSize()
+{
+  if (!m_isStreamFile || !m_context)
+    return 0;
+
+  return m_context->GetSourceChunkSize();
+}
+
 bool CUDFFile::Exists(const CURL& url)
 {
   return Open(url);

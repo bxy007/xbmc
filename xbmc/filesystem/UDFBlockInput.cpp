@@ -991,6 +991,7 @@ udfread_block_input* CUDFBlockInput::GetBlockInput(const std::string& file)
       m_bi->pageSize = m_bi->enableRemoteOptimizations ? REMOTE_PAGE_SIZE : LOCAL_PAGE_SIZE;
       m_bi->pageBlocks = m_bi->pageSize / UDF_BLOCK_SIZE;
       m_bi->fileSize = fp->GetLength();
+      m_bi->sourceChunkSize = std::max(0, fp->GetChunkSize());
       if (m_bi->fileSize > 0)
         m_bi->totalPages =
             (static_cast<uint64_t>(m_bi->fileSize) + m_bi->pageSize - 1) / m_bi->pageSize;
@@ -1011,10 +1012,11 @@ udfread_block_input* CUDFBlockInput::GetBlockInput(const std::string& file)
 
       CLog::Log(LOGDEBUG,
                 "CUDFBlockInput::GetBlockInput - remote={} range={} remoteOpt={} streamChan={} "
-                "backgroundPrefetch={} pageKB={} maxMB={} size={} hasRedirectUrl={}",
+                "backgroundPrefetch={} pageKB={} srcChunkKB={} maxMB={} size={} hasRedirectUrl={}",
                 m_bi->isRemote, supportsRange, m_bi->enableRemoteOptimizations,
                 m_bi->allowStreamChannel.load(std::memory_order_relaxed),
                 m_bi->enableBackgroundPrefetch, m_bi->pageSize / 1024,
+                m_bi->sourceChunkSize / 1024,
                 ((MAX_HOT_PAGES + MAX_COLD_PAGES) * m_bi->pageSize) / (1024 * 1024),
                 m_bi->fileSize, !m_bi->effectiveUrl.empty());
 
@@ -1025,4 +1027,9 @@ udfread_block_input* CUDFBlockInput::GetBlockInput(const std::string& file)
   }
 
   return nullptr;
+}
+
+int CUDFBlockInput::GetSourceChunkSize() const
+{
+  return m_bi ? m_bi->sourceChunkSize : 0;
 }

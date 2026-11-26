@@ -61,27 +61,26 @@ namespace XFILE
     int64_t SeekInternal(int64_t iTarget);
 
     std::unique_ptr<CCacheStrategy> m_pCache;
-    int m_seekPossible = 0;
+    std::atomic<int> m_seekPossible{0};
     CFile m_source;
     std::string m_sourcePath;
     CEvent m_seekEvent;
     CEvent m_seekEnded;
     int64_t m_nSeekResult = 0;
     int64_t m_seekPos = 0;
-    int64_t m_readPos = 0;
+    std::atomic<int64_t> m_readPos{0};
     int64_t m_writePos = 0;
     std::atomic<int64_t> m_deferredEofPos{-1};
     unsigned m_chunkSize = 0;
-    uint32_t m_writeRate = 0;
-    uint32_t m_writeRateActual = 0;
-    uint32_t m_writeRateLowSpeed = 0;
+    std::atomic<uint32_t> m_writeRate{0};
+    std::atomic<uint32_t> m_writeRateActual{0};
+    std::atomic<uint32_t> m_writeRateLowSpeed{0};
     int64_t m_forwardCacheSize = 0;
     int64_t m_maxForward = 0;
     bool m_bFilling = false;
     std::atomic<int64_t> m_fileSize;
     unsigned int m_flags;
     CCriticalSection m_sync;
-    std::chrono::milliseconds m_processWait{100ms};
   };
 
 }

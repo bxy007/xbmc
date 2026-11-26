@@ -80,6 +80,7 @@ public:
   bool IsEOF() override;
   int64_t GetLength() override;
   int GetBlockSize() override { return 6144; }
+  void SetReadRate(uint32_t rate) override;
   ENextStream NextStream() override;
 
 

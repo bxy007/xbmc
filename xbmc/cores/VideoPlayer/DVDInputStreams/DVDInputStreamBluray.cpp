@@ -59,6 +59,7 @@
 #include <queue>
 #include <thread>
 #include <utility>
+#include <vector>
 
 #include <libbluray/bluray.h>
 #include <libbluray/filesystem.h>
@@ -197,7 +198,11 @@ struct BlurayFileAccess
   }
 
   std::string rootPath;
-  std::atomic_bool navigation{false};
+  // Protects active cached stream file handles and the latest target read rate.
+  // Lifetime outlives libbluray's bd_close() via BdCloseWorker.
+  std::mutex streamFilesMutex;
+  std::vector<XFILE::CFile*> streamFiles;
+  uint32_t maxReadRate{0};
 #if defined(HAS_UDFREAD)
   // Share the disc's UDF mount across file opens, including during shutdown.
   XFILE::CUDFMount udfMount;
@@ -321,11 +326,82 @@ BD_DIR_H* dir_open(void* handle, const char* relPath)
   return CBlurayCallback::dir_open(&access.rootPath, relPath);
 }
 
+uint32_t GetTitleReadRate(const BLURAY_TITLE_INFO* title)
+{
+  if (!title || !title->clips || title->duration == 0)
+    return 0;
+
+  uint64_t packets = 0;
+  for (uint32_t i = 0; i < title->clip_count; ++i)
+  {
+    if (title->clips[i].pkt_count == 0)
+      return 0;
+    packets += title->clips[i].pkt_count;
+  }
+
+  // Each M2TS packet has 192 bytes; libbluray reports duration in 90 kHz ticks.
+  const double bytesPerSecond = packets * (192.0 * 90000.0) / title->duration;
+  return static_cast<uint32_t>(
+      std::min<double>(bytesPerSecond, std::numeric_limits<uint32_t>::max()));
+}
+
+struct TrackedBlurayFile
+{
+  BD_FILE_H handle{};
+  BlurayFileAccess* access{nullptr};
+  BD_FILE_H* inner{nullptr};
+  XFILE::CFile* file{nullptr};
+};
+
+void tracked_file_close(BD_FILE_H* file)
+{
+  auto* tracked = static_cast<TrackedBlurayFile*>(file->internal);
+  if (!tracked)
+    return;
+  {
+    std::lock_guard<std::mutex> lock(tracked->access->streamFilesMutex);
+    auto& files = tracked->access->streamFiles;
+    files.erase(std::remove(files.begin(), files.end(), tracked->file), files.end());
+  }
+  tracked->inner->close(tracked->inner);
+  delete tracked;
+}
+
+int64_t tracked_file_seek(BD_FILE_H* file, int64_t offset, int32_t origin)
+{
+  auto* tracked = static_cast<TrackedBlurayFile*>(file->internal);
+  return tracked->inner->seek(tracked->inner, offset, origin);
+}
+
+int64_t tracked_file_tell(BD_FILE_H* file)
+{
+  auto* tracked = static_cast<TrackedBlurayFile*>(file->internal);
+  return tracked->inner->tell(tracked->inner);
+}
+
+int tracked_file_eof(BD_FILE_H* file)
+{
+  auto* tracked = static_cast<TrackedBlurayFile*>(file->internal);
+  return tracked->inner->eof(tracked->inner);
+}
+
+int64_t tracked_file_read(BD_FILE_H* file, uint8_t* buf, int64_t size)
+{
+  auto* tracked = static_cast<TrackedBlurayFile*>(file->internal);
+  return tracked->inner->read(tracked->inner, buf, size);
+}
+
+int64_t tracked_file_write(BD_FILE_H* file, const uint8_t* buf, int64_t size)
+{
+  auto* tracked = static_cast<TrackedBlurayFile*>(file->internal);
+  return tracked->inner->write(tracked->inner, buf, size);
+}
+
 BD_FILE_H* file_open(void* handle, const char* relPath)
 {
   auto& access = *static_cast<BlurayFileAccess*>(handle);
   unsigned int flags = 0;
-  if (access.navigation && URIUtils::HasExtension(relPath, ".m2ts|.ssif"))
+  if (URIUtils::HasExtension(relPath, ".m2ts|.ssif"))
   {
     flags = XFILE::READ_AUDIO_VIDEO;
 #ifdef BD_FILE_OPEN_DIRECT_IO_HINT
@@ -337,7 +413,36 @@ BD_FILE_H* file_open(void* handle, const char* relPath)
     }
 #endif
   }
-  return CBlurayCallback::file_open(&access.rootPath, relPath, flags);
+  BD_FILE_H* inner = CBlurayCallback::file_open(&access.rootPath, relPath, flags);
+  if (!inner || flags != XFILE::READ_AUDIO_VIDEO)
+    return inner;
+
+  auto* fp = static_cast<XFILE::CFile*>(inner->internal);
+  if (!fp)
+    return inner;
+
+  auto* tracked = new TrackedBlurayFile();
+  tracked->access = &access;
+  tracked->inner = inner;
+  tracked->file = fp;
+  tracked->handle.close = tracked_file_close;
+  tracked->handle.seek = tracked_file_seek;
+  tracked->handle.read = tracked_file_read;
+  tracked->handle.write = tracked_file_write;
+  tracked->handle.tell = tracked_file_tell;
+  tracked->handle.eof = tracked_file_eof;
+  tracked->handle.internal = tracked;
+
+  {
+    std::lock_guard<std::mutex> lock(access.streamFilesMutex);
+    access.streamFiles.push_back(fp);
+    if (access.maxReadRate > 0)
+    {
+      uint32_t rate = access.maxReadRate;
+      fp->IoControl(XFILE::IOCTRL_CACHE_SETRATE, &rate);
+    }
+  }
+  return &tracked->handle;
 }
 } // namespace
 
@@ -890,9 +995,6 @@ bool CDVDInputStreamBluray::Open()
       ReplaceTitleInfo(GetMainTitle());
   }
 
-  if (m_fileAccess)
-    m_fileAccess->navigation.store(m_navmode.load());
-
   UpdateGraphicsRegime();
 
   if (m_navmode)
@@ -1088,6 +1190,9 @@ void CDVDInputStreamBluray::ReplaceTitleInfo(BLURAY_TITLE_INFO* incoming)
 
   if (outgoing)
     bd_free_title_info(outgoing);
+
+  if (incoming)
+    SetReadRate(0);
 }
 
 // the player still plays the title out of its queues until the next stream
@@ -2957,6 +3062,39 @@ int64_t CDVDInputStreamBluray::GetLength()
   return static_cast<int64_t>(bd_get_title_size(m_bd));
 }
 
+void CDVDInputStreamBluray::SetReadRate(uint32_t rate)
+{
+  if (!m_fileAccess)
+    return;
+
+  // The demuxer's duration can describe just the current clip in a multi-clip title.
+  // Use its estimate only when libbluray lacks a complete title packet count.
+  {
+    std::lock_guard lock(m_clipTableMutex);
+    if (const uint32_t titleRate = GetTitleReadRate(m_titleInfo))
+      rate = titleRate;
+  }
+
+  // Match CDVDInputStreamFile::SetReadRate (+10%) while keeping at least CFileCache's
+  // 1 MiB/s default floor so tiny menu stills do not under-throttle subsequent reads.
+  constexpr uint64_t MIN_CACHE_RATE = 1024 * 1024;
+  const uint64_t scaled = static_cast<uint64_t>(rate) + static_cast<uint64_t>(rate) / 10;
+  uint32_t maxrate = static_cast<uint32_t>(
+      std::clamp<uint64_t>(scaled, MIN_CACHE_RATE, std::numeric_limits<uint32_t>::max()));
+
+  std::lock_guard<std::mutex> lock(m_fileAccess->streamFilesMutex);
+  if (m_fileAccess->maxReadRate == maxrate)
+    return;
+  m_fileAccess->maxReadRate = maxrate;
+  for (XFILE::CFile* fp : m_fileAccess->streamFiles)
+  {
+    if (fp->IoControl(XFILE::IOCTRL_CACHE_SETRATE, &maxrate) >= 0)
+      CLog::Log(LOGDEBUG,
+                "CDVDInputStreamBluray::SetReadRate - set cache throttle rate to {} bytes per second",
+                maxrate);
+  }
+}
+
 static bool find_stream(int pid, BLURAY_STREAM_INFO *info, int count, std::string &language)
 {
   int i=0;
@@ -4516,7 +4654,7 @@ bool CDVDInputStreamBluray::OpenMVCDemux(int playItem)
   {
     unsigned int flags = 0;
 #ifdef BD_FILE_OPEN_DIRECT_IO_HINT
-    if (m_navmode && IsRemoteUdfImage(m_root))
+    if (IsRemoteUdfImage(m_root))
       flags = XFILE::READ_NO_CACHE;
 #endif
     CFileItem fileitem(CURL(strFileName), false);
